@@ -4655,7 +4655,7 @@ export class AgentRun {
     this.interruptTimeoutMs = cfg.interruptTimeoutMs ?? 5000
     const external = cfg.options.abortController
     if (external) {
-      if (external.signal.aborted) this.abortController.abort()
+      if (external.signal.aborted) this.abort()
       else external.signal.addEventListener('abort', () => this.abort(), { once: true })
     }
     const emit = (e: RunnerEvent) => {
