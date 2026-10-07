@@ -3,7 +3,11 @@ import { randomUUID } from 'node:crypto'
 import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
-const isMissing = (e: unknown) => (e as NodeJS.ErrnoException).code === 'ENOENT'
+// ENOTDIR：路徑中間是檔案（例如 tasks/.DS_Store/task.json），一樣視為不存在
+const isMissing = (e: unknown) => {
+  const code = (e as NodeJS.ErrnoException).code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
 
 export class Store {
   constructor(readonly root: string) {}
@@ -57,7 +61,7 @@ export class Store {
 
   async list(relDir: string): Promise<string[]> {
     try {
-      return await readdir(this.path(relDir))
+      return (await readdir(this.path(relDir))).filter((name) => !name.startsWith('.'))
     } catch (e) {
       if (isMissing(e)) return []
       throw e

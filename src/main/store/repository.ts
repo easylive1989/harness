@@ -7,7 +7,8 @@ export const defaultSettings = (home: string): Settings => ({
   defaultModel: 'claude-opus-5-5',
   worktreeRoot: join(home, '.harness', 'worktrees'),
   branchPrefix: 'harness/',
-  alwaysAllowedCommands: ['git status', 'git diff *', 'git log *', 'ls *'],
+  // git diff / git log 帶任意參數可用 --output 寫到 worktree 外，所以只允許不帶參數的版本
+  alwaysAllowedCommands: ['git status', 'git diff', 'git log', 'ls', 'ls *'],
   loadProjectSettings: true
 })
 

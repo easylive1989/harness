@@ -11,16 +11,32 @@ function setup(phase: GatePhase, decision = { allow: true }, patterns: string[] 
     onApproved: vi.fn()
   }
   const gate = createPermissionGate(ctx)
-  const call = (tool: string, input: Record<string, unknown>) =>
-    gate(tool, input, { signal: new AbortController().signal } as never)
+  const call = (
+    tool: string,
+    input: Record<string, unknown>,
+    mcpServer?: { name: string; source: string }
+  ) => gate(tool, input, { signal: new AbortController().signal, mcpServer } as never)
   return { ctx, call }
 }
 
 describe('PermissionGate', () => {
   test('harness 工具與 TodoWrite 永遠允許', async () => {
     const { call } = setup('clarify')
-    expect((await call('mcp__harness__ask_user', {})).behavior).toBe('allow')
+    expect(
+      (await call('mcp__harness__ask_user', {}, { name: 'harness', source: 'sdk' })).behavior
+    ).toBe('allow')
     expect((await call('TodoWrite', {})).behavior).toBe('allow')
+  })
+
+  test('只信任 app 自己註冊（source: sdk）的 harness MCP 伺服器', async () => {
+    const { call } = setup('implement')
+    expect(
+      (await call('mcp__harness__ask_user', {}, { name: 'harness', source: 'project' })).behavior
+    ).toBe('deny')
+    expect((await call('mcp__harness__ask_user', {})).behavior).toBe('deny')
+    expect(
+      (await call('mcp__harness__ask_user', {}, { name: 'other', source: 'sdk' })).behavior
+    ).toBe('deny')
   })
 
   test('讀取：worktree 內允許、外部拒絕、無路徑允許', async () => {

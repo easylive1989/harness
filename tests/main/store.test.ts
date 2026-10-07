@@ -36,4 +36,17 @@ describe('Store', () => {
     await mkdir(join(root, 'tasks/a'), { recursive: true })
     expect(await store.list('tasks')).toEqual(['a'])
   })
+
+  test('list 略過以 . 開頭的項目', async () => {
+    await mkdir(join(root, 'tasks/a'), { recursive: true })
+    await writeFile(join(root, 'tasks/.DS_Store'), '')
+    expect(await store.list('tasks')).toEqual(['a'])
+  })
+
+  test('路徑中間是檔案（ENOTDIR）時視為不存在', async () => {
+    await writeFile(join(root, 'f'), '')
+    expect(await store.readJson('f/x.json', 'fb')).toBe('fb')
+    expect(await store.readJsonl('f/x.jsonl')).toEqual([])
+    expect(await store.list('f/sub')).toEqual([])
+  })
 })

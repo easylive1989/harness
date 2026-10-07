@@ -1,8 +1,9 @@
 // src/main/permissions/commandPattern.ts
 const normalize = (s: string) => s.trim().replace(/\s+/g, ' ')
 
+/** 串接、重導、命令替換、變數展開或換行都視為需要人工核准 */
 export function hasShellOperators(command: string): boolean {
-  return /[;&|`<>\n]|\$\(/.test(command)
+  return /[;&|`<>$\n\r]/.test(command)
 }
 
 export function matchesPattern(command: string, pattern: string): boolean {

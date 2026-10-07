@@ -1256,7 +1256,10 @@ describe('Store', () => {
   test('jsonl append 與讀取，略過壞掉的行', async () => {
     await store.appendJsonl('t/log.jsonl', { n: 1 })
     await store.appendJsonl('t/log.jsonl', { n: 2 })
-    await writeFile(join(root, 't/log.jsonl'), (await readFile(join(root, 't/log.jsonl'), 'utf8')) + '{"n":')
+    await writeFile(
+      join(root, 't/log.jsonl'),
+      (await readFile(join(root, 't/log.jsonl'), 'utf8')) + '{"n":'
+    )
     expect(await store.readJsonl('t/log.jsonl')).toEqual([{ n: 1 }, { n: 2 }])
   })
 
@@ -1264,6 +1267,19 @@ describe('Store', () => {
     expect(await store.list('tasks')).toEqual([])
     await mkdir(join(root, 'tasks/a'), { recursive: true })
     expect(await store.list('tasks')).toEqual(['a'])
+  })
+
+  test('list 略過以 . 開頭的項目', async () => {
+    await mkdir(join(root, 'tasks/a'), { recursive: true })
+    await writeFile(join(root, 'tasks/.DS_Store'), '')
+    expect(await store.list('tasks')).toEqual(['a'])
+  })
+
+  test('路徑中間是檔案（ENOTDIR）時視為不存在', async () => {
+    await writeFile(join(root, 'f'), '')
+    expect(await store.readJson('f/x.json', 'fb')).toBe('fb')
+    expect(await store.readJsonl('f/x.jsonl')).toEqual([])
+    expect(await store.list('f/sub')).toEqual([])
   })
 })
 ```
@@ -1278,12 +1294,18 @@ import { randomUUID } from 'node:crypto'
 import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
-const isMissing = (e: unknown) => (e as NodeJS.ErrnoException).code === 'ENOENT'
+// ENOTDIR：路徑中間是檔案（例如 tasks/.DS_Store/task.json），一樣視為不存在
+const isMissing = (e: unknown) => {
+  const code = (e as NodeJS.ErrnoException).code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
 
 export class Store {
   constructor(readonly root: string) {}
 
-  private path(rel: string) { return join(this.root, rel) }
+  private path(rel: string) {
+    return join(this.root, rel)
+  }
 
   async readJson<T>(rel: string, fallback: T): Promise<T> {
     try {
@@ -1319,14 +1341,18 @@ export class Store {
     const out: T[] = []
     for (const line of text.split('\n')) {
       if (!line.trim()) continue
-      try { out.push(JSON.parse(line) as T) } catch { /* 寫到一半的行，略過 */ }
+      try {
+        out.push(JSON.parse(line) as T)
+      } catch {
+        /* 寫到一半的行，略過 */
+      }
     }
     return out
   }
 
   async list(relDir: string): Promise<string[]> {
     try {
-      return await readdir(this.path(relDir))
+      return (await readdir(this.path(relDir))).filter((name) => !name.startsWith('.'))
     } catch (e) {
       if (isMissing(e)) return []
       throw e
@@ -1335,7 +1361,7 @@ export class Store {
 }
 ```
 
-**Step 4: 確認通過** — 4 passed
+**Step 4: 確認通過** — 6 passed
 
 **Step 5: Commit**
 
@@ -1363,12 +1389,26 @@ import type { Task } from '@shared/types'
 
 export function makeTask(over: Partial<Task> = {}): Task {
   return {
-    id: 't1', repoId: 'r1', title: '登入失敗鎖定', request: '加上登入失敗鎖定',
-    baseBranch: 'main', branch: 'harness/t1', worktreePath: '/tmp/wt/t1', model: 'claude-opus-5-5',
-    status: 'clarifying', runState: 'idle',
-    questions: [], decisions: [], specs: [], plan: [], branches: [],
-    allowedCommands: [], approvedCommands: [], reportVersions: [],
-    createdAt: '2026-10-07T00:00:00.000Z', updatedAt: '2026-10-07T00:00:00.000Z',
+    id: 't1',
+    repoId: 'r1',
+    title: '登入失敗鎖定',
+    request: '加上登入失敗鎖定',
+    baseBranch: 'main',
+    branch: 'harness/t1',
+    worktreePath: '/tmp/wt/t1',
+    model: 'claude-opus-5-5',
+    status: 'clarifying',
+    runState: 'idle',
+    questions: [],
+    decisions: [],
+    specs: [],
+    plan: [],
+    branches: [],
+    allowedCommands: [],
+    approvedCommands: [],
+    reportVersions: [],
+    createdAt: '2026-10-07T00:00:00.000Z',
+    updatedAt: '2026-10-07T00:00:00.000Z',
     ...over
   }
 }
@@ -1377,7 +1417,7 @@ export function makeTask(over: Partial<Task> = {}): Task {
 **Step 2: 寫失敗測試**
 
 ```ts
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, test } from 'vitest'
@@ -1386,9 +1426,11 @@ import { Store } from '../../src/main/store/store'
 import { makeTask } from '../fixtures/task'
 import { sampleReport } from '../fixtures/report'
 
+let root: string
 let repo: Repository
 beforeEach(async () => {
-  repo = new Repository(new Store(await mkdtemp(join(tmpdir(), 'harness-repo-'))), '/Users/me')
+  root = await mkdtemp(join(tmpdir(), 'harness-repo-'))
+  repo = new Repository(new Store(root), '/Users/me')
 })
 
 describe('Repository', () => {
@@ -1396,6 +1438,8 @@ describe('Repository', () => {
     const s = await repo.getSettings()
     expect(s.worktreeRoot).toBe('/Users/me/.harness/worktrees')
     expect(s.defaultModel).toBe('claude-opus-5-5')
+    // git diff / git log 帶任意參數可用 --output 寫檔，所以只預設允許不帶參數的版本
+    expect(s.alwaysAllowedCommands).toEqual(['git status', 'git diff', 'git log', 'ls', 'ls *'])
     await repo.saveSettings({ ...s, branchPrefix: 'x/' })
     expect((await repo.getSettings()).branchPrefix).toBe('x/')
   })
@@ -1406,13 +1450,35 @@ describe('Repository', () => {
     expect((await repo.listTasks()).map((t) => t.id)).toEqual(['b', 'a'])
   })
 
+  test('tasks 資料夾裡的雜檔（如 .DS_Store）不影響任務清單', async () => {
+    await repo.saveTask(makeTask({ id: 'a' }))
+    await mkdir(join(root, 'tasks'), { recursive: true })
+    await writeFile(join(root, 'tasks/.DS_Store'), '')
+    await writeFile(join(root, 'tasks/stray.txt'), '')
+    expect((await repo.listTasks()).map((t) => t.id)).toEqual(['a'])
+  })
+
   test('時間軸 append 與讀取', async () => {
-    await repo.appendTimeline('a', { id: 'e1', ts: 'x', channel: 'main', kind: 'user_text', text: 'hi' })
+    await repo.appendTimeline('a', {
+      id: 'e1',
+      ts: 'x',
+      channel: 'main',
+      kind: 'user_text',
+      text: 'hi'
+    })
     expect(await repo.readTimeline('a')).toHaveLength(1)
   })
 
   test('報告存取，不存在時丟錯', async () => {
-    const r = { version: 1, taskId: 'a', input: sampleReport, diff: '', stats: { files: 0, additions: 0, deletions: 0, perFile: [] }, verification: [], createdAt: 'x' }
+    const r = {
+      version: 1,
+      taskId: 'a',
+      input: sampleReport,
+      diff: '',
+      stats: { files: 0, additions: 0, deletions: 0, perFile: [] },
+      verification: [],
+      createdAt: 'x'
+    }
     await repo.saveReport(r)
     expect((await repo.getReport('a', 1)).version).toBe(1)
     await expect(repo.getReport('a', 2)).rejects.toThrow('v2')
@@ -1434,41 +1500,69 @@ export const defaultSettings = (home: string): Settings => ({
   defaultModel: 'claude-opus-5-5',
   worktreeRoot: join(home, '.harness', 'worktrees'),
   branchPrefix: 'harness/',
-  alwaysAllowedCommands: ['git status', 'git diff *', 'git log *', 'ls *'],
+  // git diff / git log 帶任意參數可用 --output 寫到 worktree 外，所以只允許不帶參數的版本
+  alwaysAllowedCommands: ['git status', 'git diff', 'git log', 'ls', 'ls *'],
   loadProjectSettings: true
 })
 
 export class Repository {
-  constructor(private store: Store, private home: string) {}
+  constructor(
+    private store: Store,
+    private home: string
+  ) {}
 
   async getSettings(): Promise<Settings> {
-    return { ...defaultSettings(this.home), ...(await this.store.readJson<Partial<Settings>>('settings.json', {})) }
+    return {
+      ...defaultSettings(this.home),
+      ...(await this.store.readJson<Partial<Settings>>('settings.json', {}))
+    }
   }
-  saveSettings(s: Settings) { return this.store.writeJson('settings.json', s) }
+  saveSettings(s: Settings) {
+    return this.store.writeJson('settings.json', s)
+  }
 
-  listRepos() { return this.store.readJson<Repo[]>('repos.json', []) }
-  saveRepos(repos: Repo[]) { return this.store.writeJson('repos.json', repos) }
+  listRepos() {
+    return this.store.readJson<Repo[]>('repos.json', [])
+  }
+  saveRepos(repos: Repo[]) {
+    return this.store.writeJson('repos.json', repos)
+  }
 
   async listTasks(): Promise<Task[]> {
     const ids = await this.store.list('tasks')
-    const tasks = await Promise.all(ids.map((id) => this.store.readJson<Task | null>(`tasks/${id}/task.json`, null)))
-    return tasks.filter((t): t is Task => !!t).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    const tasks = await Promise.all(
+      ids.map((id) => this.store.readJson<Task | null>(`tasks/${id}/task.json`, null))
+    )
+    return tasks
+      .filter((t): t is Task => !!t)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   }
-  saveTask(t: Task) { return this.store.writeJson(`tasks/${t.id}/task.json`, t) }
+  saveTask(t: Task) {
+    return this.store.writeJson(`tasks/${t.id}/task.json`, t)
+  }
 
-  appendTimeline(taskId: string, e: TimelineEvent) { return this.store.appendJsonl(`tasks/${taskId}/timeline.jsonl`, e) }
-  readTimeline(taskId: string) { return this.store.readJsonl<TimelineEvent>(`tasks/${taskId}/timeline.jsonl`) }
+  appendTimeline(taskId: string, e: TimelineEvent) {
+    return this.store.appendJsonl(`tasks/${taskId}/timeline.jsonl`, e)
+  }
+  readTimeline(taskId: string) {
+    return this.store.readJsonl<TimelineEvent>(`tasks/${taskId}/timeline.jsonl`)
+  }
 
-  saveReport(r: Report) { return this.store.writeJson(`tasks/${r.taskId}/reports/v${r.version}.json`, r) }
+  saveReport(r: Report) {
+    return this.store.writeJson(`tasks/${r.taskId}/reports/v${r.version}.json`, r)
+  }
   async getReport(taskId: string, version: number): Promise<Report> {
-    const r = await this.store.readJson<Report | null>(`tasks/${taskId}/reports/v${version}.json`, null)
+    const r = await this.store.readJson<Report | null>(
+      `tasks/${taskId}/reports/v${version}.json`,
+      null
+    )
     if (!r) throw new Error(`找不到報告 v${version}`)
     return r
   }
 }
 ```
 
-**Step 5: 確認通過** — 4 passed
+**Step 5: 確認通過** — 5 passed
 
 **Step 6: Commit**
 
@@ -1585,7 +1679,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ```ts
 import { describe, expect, test } from 'vitest'
-import { hasShellOperators, matchesPattern, suggestPattern } from '../../src/main/permissions/commandPattern'
+import {
+  hasShellOperators,
+  matchesPattern,
+  suggestPattern
+} from '../../src/main/permissions/commandPattern'
 
 describe('matchesPattern', () => {
   test('完全相同', () => expect(matchesPattern('git status', 'git status')).toBe(true))
@@ -1594,12 +1692,24 @@ describe('matchesPattern', () => {
     expect(matchesPattern('npm test', 'npm test *')).toBe(true)
     expect(matchesPattern('npm testing', 'npm test *')).toBe(false)
   })
-  test('多餘空白會被正規化', () => expect(matchesPattern('  git   diff  HEAD ', 'git diff *')).toBe(true))
+  test('多餘空白會被正規化', () =>
+    expect(matchesPattern('  git   diff  HEAD ', 'git diff *')).toBe(true))
   test('空樣式不比對', () => expect(matchesPattern('ls', '')).toBe(false))
 })
 
 describe('hasShellOperators', () => {
-  test.each(['a && b', 'a; b', 'a | b', 'echo $(x)', 'echo `x`', 'a > f', 'a\nb'])('%s 有串接', (c) => {
+  test.each([
+    'a && b',
+    'a; b',
+    'a | b',
+    'echo $(x)',
+    'echo `x`',
+    'a > f',
+    'a\nb',
+    'a\rb',
+    'echo $HOME',
+    'npm test -- ${X}'
+  ])('%s 有串接', (c) => {
     expect(hasShellOperators(c)).toBe(true)
   })
   test('一般指令沒有', () => expect(hasShellOperators('npm test -- --run auth')).toBe(false))
@@ -1622,8 +1732,9 @@ describe('suggestPattern', () => {
 // src/main/permissions/commandPattern.ts
 const normalize = (s: string) => s.trim().replace(/\s+/g, ' ')
 
+/** 串接、重導、命令替換、變數展開或換行都視為需要人工核准 */
 export function hasShellOperators(command: string): boolean {
-  return /[;&|`<>\n]|\$\(/.test(command)
+  return /[;&|`<>$\n\r]/.test(command)
 }
 
 export function matchesPattern(command: string, pattern: string): boolean {
@@ -1678,15 +1789,32 @@ function setup(phase: GatePhase, decision = { allow: true }, patterns: string[] 
     onApproved: vi.fn()
   }
   const gate = createPermissionGate(ctx)
-  const call = (tool: string, input: Record<string, unknown>) => gate(tool, input, { signal: new AbortController().signal } as never)
+  const call = (
+    tool: string,
+    input: Record<string, unknown>,
+    mcpServer?: { name: string; source: string }
+  ) => gate(tool, input, { signal: new AbortController().signal, mcpServer } as never)
   return { ctx, call }
 }
 
 describe('PermissionGate', () => {
   test('harness 工具與 TodoWrite 永遠允許', async () => {
     const { call } = setup('clarify')
-    expect((await call('mcp__harness__ask_user', {})).behavior).toBe('allow')
+    expect(
+      (await call('mcp__harness__ask_user', {}, { name: 'harness', source: 'sdk' })).behavior
+    ).toBe('allow')
     expect((await call('TodoWrite', {})).behavior).toBe('allow')
+  })
+
+  test('只信任 app 自己註冊（source: sdk）的 harness MCP 伺服器', async () => {
+    const { call } = setup('implement')
+    expect(
+      (await call('mcp__harness__ask_user', {}, { name: 'harness', source: 'project' })).behavior
+    ).toBe('deny')
+    expect((await call('mcp__harness__ask_user', {})).behavior).toBe('deny')
+    expect(
+      (await call('mcp__harness__ask_user', {}, { name: 'other', source: 'sdk' })).behavior
+    ).toBe('deny')
   })
 
   test('讀取：worktree 內允許、外部拒絕、無路徑允許', async () => {
@@ -1722,20 +1850,32 @@ describe('PermissionGate', () => {
   test('有串接的指令即使符合樣式也要核准', async () => {
     const { call, ctx } = setup('implement', { allow: true }, ['npm test *'])
     await call('Bash', { command: 'npm test && rm -rf /' })
-    expect(ctx.requestApproval).toHaveBeenCalledWith(expect.objectContaining({ suggestedPattern: undefined }), expect.anything())
+    expect(ctx.requestApproval).toHaveBeenCalledWith(
+      expect.objectContaining({ suggestedPattern: undefined }),
+      expect.anything()
+    )
   })
 
   test('使用者核准後回呼 onApproved，並附上建議樣式', async () => {
-    const { call, ctx } = setup('implement', { allow: true, rememberPattern: 'npm test *' } as never)
+    const { call, ctx } = setup('implement', {
+      allow: true,
+      rememberPattern: 'npm test *'
+    } as never)
     const r = await call('Bash', { command: 'npm test -- auth' })
     expect(r.behavior).toBe('allow')
-    expect(ctx.requestApproval).toHaveBeenCalledWith(expect.objectContaining({ suggestedPattern: 'npm test *' }), expect.anything())
+    expect(ctx.requestApproval).toHaveBeenCalledWith(
+      expect.objectContaining({ suggestedPattern: 'npm test *' }),
+      expect.anything()
+    )
     expect(ctx.onApproved).toHaveBeenCalledWith('npm test -- auth', 'npm test *')
   })
 
   test('使用者拒絕時帶回說明', async () => {
     const { call } = setup('implement', { allow: false, message: '先不要跑' } as never)
-    expect(await call('Bash', { command: 'npm run build' })).toEqual({ behavior: 'deny', message: '先不要跑' })
+    expect(await call('Bash', { command: 'npm run build' })).toEqual({
+      behavior: 'deny',
+      message: '先不要跑'
+    })
   })
 
   test('任務結束後一律拒絕；未知工具拒絕', async () => {
@@ -1757,7 +1897,11 @@ import type { PermissionDecision } from '@shared/types'
 import type { GatePhase } from '../tasks/stateMachine'
 import { hasShellOperators, matchesPattern, suggestPattern } from './commandPattern'
 
-export interface ApprovalRequest { toolName: string; input: Record<string, unknown>; suggestedPattern?: string }
+export interface ApprovalRequest {
+  toolName: string
+  input: Record<string, unknown>
+  suggestedPattern?: string
+}
 
 export interface GateContext {
   getPhase(): GatePhase
@@ -1775,7 +1919,10 @@ const WRITE = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const ALWAYS = new Set(['TodoWrite', 'Task', 'Agent'])
 const NEEDS_APPROVAL = new Set(['WebFetch', 'WebSearch'])
 
-const allow = (input: Record<string, unknown>): PermissionResult => ({ behavior: 'allow', updatedInput: input })
+const allow = (input: Record<string, unknown>): PermissionResult => ({
+  behavior: 'allow',
+  updatedInput: input
+})
 const deny = (message: string): PermissionResult => ({ behavior: 'deny', message })
 
 export function isInside(root: string, p: string | undefined): boolean {
@@ -1785,38 +1932,61 @@ export function isInside(root: string, p: string | undefined): boolean {
   return abs === r || abs.startsWith(r + sep)
 }
 
+type McpServerInfo = Parameters<CanUseTool>[2]['mcpServer']
+const isOwnHarnessServer = (s: McpServerInfo) => s?.source === 'sdk' && s.name === 'harness'
+
 function targetPath(input: Record<string, unknown>): string | undefined {
   const v = input.file_path ?? input.notebook_path ?? input.path
   return typeof v === 'string' ? v : undefined
 }
 
 export function createPermissionGate(ctx: GateContext): PermissionGate {
-  async function ask(toolName: string, input: Record<string, unknown>, signal: AbortSignal, command?: string, suggestedPattern?: string) {
+  async function ask(
+    toolName: string,
+    input: Record<string, unknown>,
+    signal: AbortSignal,
+    command?: string,
+    suggestedPattern?: string
+  ) {
     const d = await ctx.requestApproval({ toolName, input, suggestedPattern }, signal)
     if (!d.allow) return deny(d.message?.trim() || '使用者拒絕了這個操作')
     ctx.onApproved(command, d.rememberPattern)
     return allow(input)
   }
 
-  return async (toolName, input, { signal }) => {
+  return async (toolName, input, { signal, mcpServer }) => {
     const phase = ctx.getPhase()
     if (phase === 'closed') return deny('任務已結束')
-    if (toolName.startsWith('mcp__harness__') || ALWAYS.has(toolName)) return allow(input)
+    if (ALWAYS.has(toolName)) return allow(input)
+    if (toolName.startsWith('mcp__harness__')) {
+      // 名稱可被專案設定冒用，只信任 app 在 process 內註冊的伺服器
+      return isOwnHarnessServer(mcpServer)
+        ? allow(input)
+        : deny('不明來源的 harness MCP 伺服器，已拒絕')
+    }
 
     if (READ.has(toolName)) {
-      return isInside(ctx.worktreePath, targetPath(input)) ? allow(input) : deny('只能讀取 worktree 內的檔案')
+      return isInside(ctx.worktreePath, targetPath(input))
+        ? allow(input)
+        : deny('只能讀取 worktree 內的檔案')
     }
 
     if (WRITE.has(toolName)) {
-      if (phase !== 'implement') return deny('目前不是實作階段，不能修改檔案。請用 ask_user 提問或用 propose_spec 提出規格。')
-      return isInside(ctx.worktreePath, targetPath(input)) ? allow(input) : deny('只能修改 worktree 內的檔案')
+      if (phase !== 'implement')
+        return deny(
+          '目前不是實作階段，不能修改檔案。請用 ask_user 提問或用 propose_spec 提出規格。'
+        )
+      return isInside(ctx.worktreePath, targetPath(input))
+        ? allow(input)
+        : deny('只能修改 worktree 內的檔案')
     }
 
     if (toolName === 'Bash') {
       if (phase !== 'implement') return deny('目前不是實作階段，不能執行指令。')
       const command = String(input.command ?? '')
       const chained = hasShellOperators(command)
-      if (!chained && ctx.getAllowedPatterns().some((p) => matchesPattern(command, p))) return allow(input)
+      if (!chained && ctx.getAllowedPatterns().some((p) => matchesPattern(command, p)))
+        return allow(input)
       return ask(toolName, input, signal, command, chained ? undefined : suggestPattern(command))
     }
 

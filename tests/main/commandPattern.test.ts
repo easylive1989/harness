@@ -18,12 +18,20 @@ describe('matchesPattern', () => {
 })
 
 describe('hasShellOperators', () => {
-  test.each(['a && b', 'a; b', 'a | b', 'echo $(x)', 'echo `x`', 'a > f', 'a\nb'])(
-    '%s 有串接',
-    (c) => {
-      expect(hasShellOperators(c)).toBe(true)
-    }
-  )
+  test.each([
+    'a && b',
+    'a; b',
+    'a | b',
+    'echo $(x)',
+    'echo `x`',
+    'a > f',
+    'a\nb',
+    'a\rb',
+    'echo $HOME',
+    'npm test -- ${X}'
+  ])('%s 有串接', (c) => {
+    expect(hasShellOperators(c)).toBe(true)
+  })
   test('一般指令沒有', () => expect(hasShellOperators('npm test -- --run auth')).toBe(false))
 })
 

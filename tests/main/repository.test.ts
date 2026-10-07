@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, test } from 'vitest'
@@ -7,9 +7,11 @@ import { Store } from '../../src/main/store/store'
 import { makeTask } from '../fixtures/task'
 import { sampleReport } from '../fixtures/report'
 
+let root: string
 let repo: Repository
 beforeEach(async () => {
-  repo = new Repository(new Store(await mkdtemp(join(tmpdir(), 'harness-repo-'))), '/Users/me')
+  root = await mkdtemp(join(tmpdir(), 'harness-repo-'))
+  repo = new Repository(new Store(root), '/Users/me')
 })
 
 describe('Repository', () => {
@@ -17,6 +19,8 @@ describe('Repository', () => {
     const s = await repo.getSettings()
     expect(s.worktreeRoot).toBe('/Users/me/.harness/worktrees')
     expect(s.defaultModel).toBe('claude-opus-5-5')
+    // git diff / git log 帶任意參數可用 --output 寫檔，所以只預設允許不帶參數的版本
+    expect(s.alwaysAllowedCommands).toEqual(['git status', 'git diff', 'git log', 'ls', 'ls *'])
     await repo.saveSettings({ ...s, branchPrefix: 'x/' })
     expect((await repo.getSettings()).branchPrefix).toBe('x/')
   })
@@ -25,6 +29,14 @@ describe('Repository', () => {
     await repo.saveTask(makeTask({ id: 'a', createdAt: '2026-10-01T00:00:00Z' }))
     await repo.saveTask(makeTask({ id: 'b', createdAt: '2026-10-05T00:00:00Z' }))
     expect((await repo.listTasks()).map((t) => t.id)).toEqual(['b', 'a'])
+  })
+
+  test('tasks 資料夾裡的雜檔（如 .DS_Store）不影響任務清單', async () => {
+    await repo.saveTask(makeTask({ id: 'a' }))
+    await mkdir(join(root, 'tasks'), { recursive: true })
+    await writeFile(join(root, 'tasks/.DS_Store'), '')
+    await writeFile(join(root, 'tasks/stray.txt'), '')
+    expect((await repo.listTasks()).map((t) => t.id)).toEqual(['a'])
   })
 
   test('時間軸 append 與讀取', async () => {

@@ -40,6 +40,9 @@ export function isInside(root: string, p: string | undefined): boolean {
   return abs === r || abs.startsWith(r + sep)
 }
 
+type McpServerInfo = Parameters<CanUseTool>[2]['mcpServer']
+const isOwnHarnessServer = (s: McpServerInfo) => s?.source === 'sdk' && s.name === 'harness'
+
 function targetPath(input: Record<string, unknown>): string | undefined {
   const v = input.file_path ?? input.notebook_path ?? input.path
   return typeof v === 'string' ? v : undefined
@@ -59,10 +62,16 @@ export function createPermissionGate(ctx: GateContext): PermissionGate {
     return allow(input)
   }
 
-  return async (toolName, input, { signal }) => {
+  return async (toolName, input, { signal, mcpServer }) => {
     const phase = ctx.getPhase()
     if (phase === 'closed') return deny('任務已結束')
-    if (toolName.startsWith('mcp__harness__') || ALWAYS.has(toolName)) return allow(input)
+    if (ALWAYS.has(toolName)) return allow(input)
+    if (toolName.startsWith('mcp__harness__')) {
+      // 名稱可被專案設定冒用，只信任 app 在 process 內註冊的伺服器
+      return isOwnHarnessServer(mcpServer)
+        ? allow(input)
+        : deny('不明來源的 harness MCP 伺服器，已拒絕')
+    }
 
     if (READ.has(toolName)) {
       return isInside(ctx.worktreePath, targetPath(input))
