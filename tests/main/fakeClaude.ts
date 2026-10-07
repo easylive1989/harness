@@ -26,6 +26,16 @@ export const assistantText = (text: string) => ({
 export class FakeClaude {
   calls: { prompt: string; options: Options; tools: HarnessToolName[] }[] = []
   script: Script = async () => []
+  /** 下一次 query() 直接丟出錯誤（模擬 CLI 無法啟動） */
+  failNextQuery?: Error
+  /**
+   * 送出 result 之後不結束：'hang' 會在 abort 時結束，'hang_ignoring_abort' 連 abort 都不理，
+   * 兩者都可用 releaseHang() 放行
+   */
+  afterResult?: 'hang' | 'hang_ignoring_abort'
+  /** 已被 AgentRun 處理完的 result 數（yield 之後才加，代表消費端已讀過） */
+  results = 0
+  private hangRelease = new Set<() => void>()
   private lastSink?: ToolSink
   private lastTools: HarnessToolName[] = []
 
@@ -35,7 +45,19 @@ export class FakeClaude {
     return { type: 'sdk', name: 'harness' } as never
   }
 
+  releaseHang() {
+    for (const r of this.hangRelease) r()
+    this.hangRelease.clear()
+  }
+
   queryFn: QueryFn = ({ prompt, options }) => {
+    if (this.failNextQuery) {
+      const e = this.failNextQuery
+      this.failNextQuery = undefined
+      throw e
+    }
+    const afterResult = this.afterResult
+    const hang = new Promise<'released'>((r) => this.hangRelease.add(() => r('released')))
     const sink = this.lastSink!
     const tools = this.lastTools
     const call = this.calls.length
@@ -49,6 +71,7 @@ export class FakeClaude {
       signal?.addEventListener('abort', () => r('aborted'), { once: true })
     })
     const record = (c: FakeClaude['calls'][number]) => this.calls.push(c)
+    const resultConsumed = () => this.results++
     const run = (ctx: ScriptCtx) => this.script(ctx)
     const gen = (async function* () {
       const it = prompt[Symbol.asyncIterator]()
@@ -70,6 +93,12 @@ export class FakeClaude {
       }
       if (signal?.aborted) throw new Error('aborted')
       yield { type: 'result', subtype: 'success', is_error: false } as unknown as SDKMessage
+      resultConsumed()
+      if (afterResult === 'hang') {
+        if ((await Promise.race([hang, aborted])) === 'aborted') throw new Error('aborted')
+      } else if (afterResult === 'hang_ignoring_abort') {
+        await hang
+      }
     })()
     return Object.assign(gen, {
       interrupt: async () => {

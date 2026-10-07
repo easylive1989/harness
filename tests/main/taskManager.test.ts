@@ -11,7 +11,7 @@ import { TaskManager, type TaskManagerDeps } from '../../src/main/tasks/taskMana
 import { sampleReport } from '../fixtures/report'
 import { assistantText, FakeClaude, fakeGit, until } from './fakeClaude'
 
-async function setup() {
+async function setup(over: Partial<TaskManagerDeps> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'harness-tm-'))
   const repo = new Repository(new Store(root), '/home/me')
   await repo.saveRepos([{ id: 'r1', name: 'shop-api', path: '/repos/shop-api', addedAt: 'x' }])
@@ -31,7 +31,8 @@ async function setup() {
     emit: (e) => events.push(e),
     verify,
     newId: () => `id${++n}`,
-    now: () => '2026-10-07T10:00:00.000Z'
+    now: () => '2026-10-07T10:00:00.000Z',
+    ...over
   })
   await tm.init()
   const create = async () => {
@@ -457,11 +458,14 @@ async function toImplementing() {
 describe('TaskManager：報告與收尾', () => {
   test('submit_report → commit、diff、驗證、存報告、進入 reviewing', async () => {
     const { tm, claude, verify, repo, id } = await toImplementing()
-    tm.get(id).approvedCommands.push('npm test') // get() 回傳內部物件，模擬實作中核准過 npm test
-    claude.script = async ({ sink }) => {
+    // 實作中核准過 npm test，之後提交報告
+    claude.script = async ({ options, sink }) => {
+      await options.canUseTool!('Bash', { command: 'npm test' }, signalOf())
       await sink.submitReport(sampleReport)
     }
     await tm.send(id, 'main', '完成了嗎？')
+    await until(() => !!tm.get(id).pendingPermission)
+    await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: true })
     await tm.whenIdle(id)
     const t = tm.get(id)
     expect(t).toMatchObject({ status: 'reviewing', runState: 'idle', reportVersions: [1] })
@@ -567,5 +571,298 @@ describe('TaskManager：報告與收尾', () => {
     await expect(tm.send(id, 'main', 'hi')).rejects.toThrow('任務已結束')
     await tm.discard(id) // 再丟棄一次也不會出錯
     expect(tm.get(id).status).toBe('discarded')
+  })
+})
+
+/** 可以從外部放行的 promise */
+function deferred<T = void>() {
+  let resolve!: (v: T) => void
+  const promise = new Promise<T>((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
+}
+
+async function toReviewing(over: Partial<TaskManagerDeps> = {}) {
+  const ctx = await setup(over)
+  ctx.claude.script = async ({ call, sink }) => {
+    if (call === 0) await sink.proposeSpec(spec)
+    if (call === 2) await sink.submitReport(sampleReport)
+  }
+  const id = await ctx.create()
+  await ctx.tm.approveSpec(id)
+  await ctx.tm.whenIdle(id)
+  await ctx.tm.send(id, 'main', '完成')
+  await ctx.tm.whenIdle(id)
+  expect(ctx.tm.get(id).status).toBe('reviewing')
+  ctx.claude.script = async () => []
+  return { ...ctx, id }
+}
+
+describe('TaskManager：狀態一致性', () => {
+  test('get() 回傳複本，改動不影響內部狀態', async () => {
+    const { tm, create } = await setup()
+    const id = await create()
+    tm.get(id).approvedCommands.push('rm -rf /')
+    expect(tm.get(id).approvedCommands).toEqual([])
+  })
+
+  test('閒置後不留下串接用的 promise', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async () => [assistantText('好')]
+    const id = await create()
+    await tm.send(id, 'main', '再一次')
+    await tm.whenIdle(id)
+    await new Promise((r) => setTimeout(r, 0))
+    const internals = tm as unknown as Record<string, Map<string, unknown>>
+    for (const name of ['chains', 'saves', 'timelineWrites', 'turnLocks']) {
+      expect(internals[name].size, name).toBe(0)
+    }
+  })
+
+  test('開 PR 期間拒絕其他收尾與改變狀態的操作', async () => {
+    const { tm, git, id } = await toReviewing()
+    const push = deferred<string>()
+    git.pushAndOpenPr = () => push.promise
+    const pr = tm.createPullRequest(id)
+    await expect(tm.merge(id)).rejects.toThrow('收尾')
+    await expect(tm.discard(id)).rejects.toThrow('收尾')
+    await expect(tm.createPullRequest(id)).rejects.toThrow('收尾')
+    await expect(
+      tm.submitReportFeedback(id, [{ anchor: 'a', label: 'a', text: '改' }])
+    ).rejects.toThrow('收尾')
+    await expect(tm.send(id, 'main', '還有一件事')).rejects.toThrow('收尾')
+    await expect(tm.openBranch(id, { title: 't' })).rejects.toThrow('收尾')
+    expect(tm.get(id).status).toBe('reviewing')
+    push.resolve('https://github.com/me/shop-api/pull/2')
+    expect(await pr).toBe('https://github.com/me/shop-api/pull/2')
+    expect(tm.get(id)).toMatchObject({
+      status: 'done',
+      prUrl: 'https://github.com/me/shop-api/pull/2'
+    })
+  })
+
+  test('合併期間拒絕規格與卡片操作', async () => {
+    const { tm, git, id } = await toReviewing()
+    const merging = deferred()
+    git.merge = () => merging.promise
+    const m = tm.merge(id)
+    await expect(tm.approveSpec(id)).rejects.toThrow('收尾')
+    await expect(tm.requestSpecChanges(id, '改')).rejects.toThrow('收尾')
+    await expect(tm.answerQuestion(id, 'q1', { text: 'x' })).rejects.toThrow('收尾')
+    await expect(tm.counterQuestion(id, 'q1', 'x')).rejects.toThrow('收尾')
+    merging.resolve()
+    await m
+    expect(tm.get(id).status).toBe('done')
+  })
+
+  test('開新一輪失敗時還原狀態，也不寫入時間軸', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    const before = (await tm.timeline(id)).length
+
+    claude.failNextQuery = new Error('spawn failed')
+    await expect(tm.approveSpec(id)).rejects.toThrow('spawn failed')
+    expect(tm.get(id).status).toBe('spec_review')
+
+    claude.failNextQuery = new Error('spawn failed')
+    await expect(tm.requestSpecChanges(id, '改')).rejects.toThrow('spawn failed')
+    expect(tm.get(id).status).toBe('spec_review')
+
+    claude.failNextQuery = new Error('spawn failed')
+    await expect(tm.openBranch(id, { title: 't' })).rejects.toThrow('spawn failed')
+    expect(tm.get(id).branches).toEqual([])
+
+    claude.failNextQuery = new Error('spawn failed')
+    await expect(tm.send(id, 'main', '哈囉')).rejects.toThrow('spawn failed')
+    expect(await tm.timeline(id)).toHaveLength(before)
+    expect(tm.get(id).runState).toBe('idle')
+  })
+
+  test('回饋送出失敗時回到 reviewing', async () => {
+    const { tm, claude, id } = await toReviewing()
+    claude.failNextQuery = new Error('spawn failed')
+    await expect(
+      tm.submitReportFeedback(id, [{ anchor: 'a', label: 'a', text: '改' }])
+    ).rejects.toThrow('spawn failed')
+    expect(tm.get(id).status).toBe('reviewing')
+  })
+
+  test('回答或反問送出失敗時還原卡片', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser(askQ1)
+    }
+    const id = await create()
+    claude.failNextQuery = new Error('spawn failed')
+    await expect(tm.answerQuestion(id, 'q1', { optionId: 'acct' })).rejects.toThrow()
+    expect(tm.get(id).questions[0]).toMatchObject({ status: 'open', answer: undefined })
+    claude.failNextQuery = new Error('spawn failed')
+    await expect(tm.counterQuestion(id, 'q1', '為什麼？')).rejects.toThrow()
+    expect(tm.get(id).questions[0].followups).toEqual([])
+    // 反問失敗後的一般回覆不應被當成反問的答案
+    claude.script = async () => [assistantText('一般回覆')]
+    await tm.send(id, 'main', '繼續')
+    await tm.whenIdle(id)
+    expect(tm.get(id).questions[0].followups).toEqual([])
+    expect((await tm.timeline(id)).at(-1)).toMatchObject({ kind: 'assistant_text' })
+  })
+
+  test('整理報告期間拒絕主線訊息；成功後清除舊錯誤', async () => {
+    const verifying = deferred()
+    const { tm, claude, verify, id } = await toImplementing()
+    claude.script = async () => [{ type: 'result', subtype: 'error_during_execution' }]
+    await tm.send(id, 'main', '先失敗一次')
+    await tm.whenIdle(id)
+    expect(tm.get(id).error).toBe('執行時發生錯誤') // turn_end 失敗（不是丟出例外）也記錄錯誤
+    expect(tm.get(id).runState).toBe('idle')
+
+    verify.mockImplementationOnce(async () => {
+      await verifying.promise
+      return []
+    })
+    // 同一輪裡提交報告後又回報失敗：整理報告成功後應清掉這個錯誤
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+      return [{ type: 'result', subtype: 'error_during_execution' }]
+    }
+    await tm.send(id, 'main', '完成')
+    await until(() => tm.get(id).runState === 'finalizing' && verify.mock.calls.length > 0)
+    await expect(tm.send(id, 'main', '等等')).rejects.toThrow('正在整理報告')
+    verifying.resolve()
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({ status: 'reviewing', runState: 'idle' })
+    expect(tm.get(id).error).toBeUndefined()
+  })
+
+  test('執行結束時拒絕還在等待的核准', async () => {
+    const { tm, claude, id } = await toImplementing()
+    let result: Promise<unknown> | undefined
+    claude.script = async ({ options }) => {
+      // 不等核准就結束這一輪（模擬 SDK 沒有取消 canUseTool 就結束）
+      result = Promise.resolve(options.canUseTool!('Bash', { command: 'npm test' }, signalOf()))
+      await until(() => !!tm.get(id).pendingPermission)
+    }
+    await tm.send(id, 'main', '跑測試')
+    await tm.whenIdle(id)
+    expect(await result).toMatchObject({ behavior: 'deny', message: '執行已結束' })
+    expect(tm.get(id).pendingPermission).toBeUndefined()
+    expect(tm.get(id).runState).toBe('idle')
+  })
+
+  test('丟棄會拒絕等待中的核准', async () => {
+    const { tm, claude, id } = await toImplementing()
+    let result: unknown
+    claude.script = async ({ options }) => {
+      result = await options.canUseTool!('Bash', { command: 'npm test' }, signalOf())
+      await new Promise(() => undefined)
+    }
+    await tm.send(id, 'main', '跑測試')
+    await until(() => !!tm.get(id).pendingPermission)
+    await tm.discard(id)
+    await tm.whenIdle(id)
+    expect(result).toMatchObject({ behavior: 'deny', message: '任務已丟棄' })
+    expect(tm.get(id)).toMatchObject({ status: 'discarded', runState: 'idle' })
+    expect(tm.get(id).pendingPermission).toBeUndefined()
+  })
+
+  test('停止分岔不影響主線', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => {
+      await new Promise(() => undefined)
+    }
+    const b = await tm.openBranch(id, { title: '討論' })
+    await until(() => tm.get(id).branches[0].running)
+    await tm.stop(id, `branch:${b.id}`)
+    await tm.whenIdle(id)
+    expect(tm.get(id).branches[0].running).toBe(false)
+    expect(tm.get(id)).toMatchObject({ runState: 'idle' })
+    expect(tm.get(id).error).toBeUndefined()
+  })
+
+  test('沒有 session 的中斷任務：resume 重新送出需求', async () => {
+    const { tm, claude, repo } = await setup()
+    const { makeTask } = await import('../fixtures/task')
+    await repo.saveTask(makeTask({ id: 'x', runState: 'interrupted' }))
+    await tm.init()
+    await tm.resume('x')
+    await tm.whenIdle('x')
+    expect(claude.calls.at(-1)!.prompt).toBe('加上登入失敗鎖定')
+    expect(claude.calls.at(-1)!.options.resume).toBeUndefined()
+  })
+
+  test('init 清掉殘留的核准請求與分岔執行狀態', async () => {
+    const { tm, repo } = await setup()
+    const { makeTask } = await import('../fixtures/task')
+    await repo.saveTask(
+      makeTask({
+        id: 'x',
+        runState: 'idle',
+        pendingPermission: {
+          id: 'p1',
+          taskId: 'x',
+          toolName: 'Bash',
+          input: { command: 'ls' },
+          createdAt: 'x'
+        },
+        branches: [{ id: 'b1', title: 't', status: 'open', running: true, createdAt: 'x' }]
+      })
+    )
+    await tm.init()
+    expect(tm.get('x').runState).toBe('idle')
+    expect(tm.get('x').pendingPermission).toBeUndefined()
+    expect(tm.get('x').branches[0].running).toBe(false)
+    expect((await repo.listTasks()).find((t) => t.id === 'x')!.branches[0].running).toBe(false)
+  })
+})
+
+describe('TaskManager：上一段執行卡住', () => {
+  test('等太久就中止上一段執行，再開新的一輪', async () => {
+    const { tm, claude, create } = await setup({ prevRunTimeoutMs: 50 })
+    const id = await create()
+    claude.afterResult = 'hang'
+    await tm.send(id, 'main', '第一輪')
+    await until(() => claude.results === 2) // 第一輪的 result 已處理，輸入已關閉
+    claude.afterResult = undefined
+    await tm.send(id, 'main', '第二輪')
+    await tm.whenIdle(id)
+    expect(claude.calls.map((c) => c.prompt).slice(-2)).toEqual(['第一輪', '第二輪'])
+    expect(tm.get(id).runState).toBe('idle')
+  })
+
+  test('中止後仍不結束就拒絕送出', async () => {
+    const { tm, claude, create } = await setup({ prevRunTimeoutMs: 50 })
+    const id = await create()
+    claude.afterResult = 'hang_ignoring_abort'
+    await tm.send(id, 'main', '第一輪')
+    await until(() => claude.results === 2) // 第一輪的 result 已處理，輸入已關閉
+    claude.afterResult = undefined
+    await expect(tm.send(id, 'main', '第二輪')).rejects.toThrow('上一輪尚未結束，請先停止')
+    expect(claude.calls).toHaveLength(2)
+    expect((await tm.timeline(id)).map((e) => e.text)).not.toContain('第二輪')
+    claude.releaseHang()
+    await tm.whenIdle(id)
+  })
+
+  test('等上一段執行期間任務被丟棄，就不再開新的一輪', async () => {
+    const { tm, claude, create } = await setup({ prevRunTimeoutMs: 5000 })
+    const id = await create()
+    claude.afterResult = 'hang'
+    await tm.send(id, 'main', '第一輪')
+    await until(() => claude.results === 2) // 第一輪的 result 已處理，輸入已關閉
+    claude.afterResult = undefined
+    // 先接住結果：拒絕會在 discard() 進行中發生
+    const sending = tm.send(id, 'main', '第二輪').then(
+      () => 'sent',
+      (e: unknown) => String(e)
+    )
+    await tm.discard(id)
+    expect(await sending).toContain('收尾')
+    expect(claude.calls).toHaveLength(2)
+    await tm.whenIdle(id)
   })
 })
