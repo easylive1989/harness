@@ -55,6 +55,8 @@
 @layer base {
   html, body, #root { height: 100%; }
   body { margin: 0; background: var(--color-canvas); color: var(--color-ink); font-family: var(--font-sans); font-size: 14px; line-height: 1.65; -webkit-font-smoothing: antialiased; }
+  a { color: var(--color-brand); }
+  a:hover { color: var(--color-brand-hover); }
   code { font-family: var(--font-mono); font-size: 12px; background: #eef2f1; padding: 1px 6px; border-radius: 5px; color: #134e4a; }
 }
 

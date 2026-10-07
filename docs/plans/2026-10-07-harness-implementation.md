@@ -128,6 +128,11 @@ export default defineConfig({
 
 ```ts
 import '@testing-library/jest-dom/vitest'
+import { cleanup } from '@testing-library/react'
+import { afterEach } from 'vitest'
+
+// vitest 沒開 globals，Testing Library 不會自動在每個測試後卸載畫面
+afterEach(cleanup)
 ```
 
 建立 `tests/sanity.test.ts`：
@@ -223,6 +228,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 @layer base {
   html, body, #root { height: 100%; }
   body { margin: 0; background: var(--color-canvas); color: var(--color-ink); font-family: var(--font-sans); font-size: 14px; line-height: 1.65; -webkit-font-smoothing: antialiased; }
+  a { color: var(--color-brand); }
+  a:hover { color: var(--color-brand-hover); }
   code { font-family: var(--font-mono); font-size: 12px; background: #eef2f1; padding: 1px 6px; border-radius: 5px; color: #134e4a; }
 }
 
@@ -8963,26 +8970,200 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `src/renderer/src/App.tsx`
 - Create: `src/renderer/src/components/Sidebar.tsx`、`StageNav.tsx`、`Markdown.tsx`、`Toast.tsx`
 - Create: `src/renderer/src/screens/TaskScreen.tsx`（暫時只顯示標題，後續 Task 填入各階段）
+- Modify: `src/renderer/src/styles/app.css`（`@layer base` 補設計稿的全域連結色）、`tests/renderer/setup.ts`（每個測試後 `cleanup`）
+- Test: `tests/renderer/shell.test.tsx`
+
+**Step 0: 寫測試（先失敗）**
+
+```tsx
+// tests/renderer/shell.test.tsx
+import { act, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(async () => null),
+  onEvent: vi.fn(() => () => {}),
+  errorText: String
+}))
+import { call } from '@renderer/api'
+import { Markdown } from '@renderer/components/Markdown'
+import { Sidebar } from '@renderer/components/Sidebar'
+import { Toast } from '@renderer/components/Toast'
+import { TaskScreen } from '@renderer/screens/TaskScreen'
+import { useStore } from '@renderer/store'
+import { makeTask } from '../fixtures/task'
+
+const repos = [
+  { id: 'r1', name: 'shop-api', path: '/Users/me/shop-api', addedAt: '' },
+  { id: 'r2', name: 'web-dashboard', path: '/Users/me/web', addedAt: '' }
+]
+
+beforeEach(() => {
+  vi.mocked(call).mockClear()
+  useStore.setState({
+    ready: true,
+    repos,
+    tasks: {},
+    timelines: {},
+    view: { kind: 'new' },
+    toast: undefined,
+    claude: { found: true, loggedIn: true },
+    settings: {
+      defaultModel: 'claude-opus-5-5',
+      worktreeRoot: '/wt',
+      branchPrefix: 'harness/',
+      alwaysAllowedCommands: [],
+      loadProjectSettings: false
+    }
+  })
+})
+
+describe('Sidebar', () => {
+  const tasks = {
+    a: makeTask({
+      id: 'a',
+      repoId: 'r1',
+      title: '登入失敗鎖定',
+      createdAt: '2026-10-07T02:00:00Z'
+    }),
+    b: makeTask({
+      id: 'b',
+      repoId: 'r2',
+      title: '匯出 CSV',
+      status: 'reviewing',
+      reportVersions: [1],
+      createdAt: '2026-10-07T01:00:00Z'
+    }),
+    c: makeTask({ id: 'c', repoId: 'r2', title: '修正時區', createdAt: '2026-10-07T00:00:00Z' }),
+    gone: makeTask({ id: 'gone', repoId: 'r1', title: '已丟棄的任務', status: 'discarded' })
+  }
+
+  test('展開目前任務所在的 repo，其他 repo 收合只顯示數量', () => {
+    useStore.setState({ tasks, view: { kind: 'task', taskId: 'a' } })
+    render(<Sidebar />)
+    const shop = screen.getByRole('button', { name: /shop-api/ })
+    const web = screen.getByRole('button', { name: /web-dashboard/ })
+    expect(shop).toHaveAttribute('aria-expanded', 'true')
+    expect(web).toHaveAttribute('aria-expanded', 'false')
+    expect(web).toHaveTextContent('2')
+    expect(screen.getByRole('button', { name: /登入失敗鎖定/ })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
+    expect(screen.getByText('釐清中 · 問題 1')).toBeInTheDocument()
+    expect(screen.queryByText('匯出 CSV')).not.toBeInTheDocument()
+    expect(screen.queryByText('已丟棄的任務')).not.toBeInTheDocument()
+  })
+
+  test('點 repo 標題展開，點任務切換畫面', async () => {
+    useStore.setState({ tasks, view: { kind: 'task', taskId: 'a' } })
+    render(<Sidebar />)
+    await userEvent.click(screen.getByRole('button', { name: /web-dashboard/ }))
+    expect(screen.getByText('待審閱報告 · v1')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /匯出 CSV/ }))
+    expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 'b' })
+    expect(call).toHaveBeenCalledWith('tasks:timeline', 'b')
+  })
+
+  test('新任務、加入 repo、設定', async () => {
+    useStore.setState({ tasks, view: { kind: 'task', taskId: 'a' } })
+    render(<Sidebar />)
+    await userEvent.click(screen.getByRole('button', { name: '加入 repo' }))
+    expect(call).toHaveBeenCalledWith('repos:pick')
+    await userEvent.click(screen.getByRole('button', { name: /設定/ }))
+    expect(useStore.getState().view).toEqual({ kind: 'settings' })
+    await userEvent.click(screen.getByRole('button', { name: '新任務' }))
+    expect(useStore.getState().view).toEqual({ kind: 'new' })
+  })
+
+  test('底部顯示 Claude Code 狀態', () => {
+    const { rerender } = render(<Sidebar />)
+    expect(screen.getByRole('button', { name: /設定/ })).toHaveTextContent('Opus 5.5 · 訂閱方案')
+    act(() => useStore.setState({ claude: { found: false, loggedIn: false } }))
+    rerender(<Sidebar />)
+    expect(screen.getByRole('button', { name: /設定/ })).toHaveTextContent('Claude Code 未就緒')
+  })
+})
+
+describe('TaskScreen', () => {
+  test('可回看已經過的階段；狀態改變時回到目前階段', async () => {
+    useStore.setState({ tasks: { a: makeTask({ id: 'a', status: 'spec_review' }) } })
+    render(<TaskScreen taskId="a" />)
+    const tabs = within(screen.getByRole('tablist', { name: '任務階段' }))
+    expect(tabs.getByRole('tab', { name: /規格/ })).toHaveAttribute('aria-selected', 'true')
+    expect(tabs.getByRole('tab', { name: /實作/ })).toBeDisabled()
+    await userEvent.click(tabs.getByRole('tab', { name: /釐清/ }))
+    expect(tabs.getByRole('tab', { name: /釐清/ })).toHaveAttribute('aria-selected', 'true')
+    act(() => useStore.setState({ tasks: { a: makeTask({ id: 'a', status: 'implementing' }) } }))
+    expect(tabs.getByRole('tab', { name: /實作/ })).toHaveAttribute('aria-selected', 'true')
+  })
+})
+
+describe('Toast', () => {
+  test('顯示錯誤，可關閉，8 秒後自動消失', async () => {
+    vi.useFakeTimers()
+    try {
+      useStore.setState({ toast: '出錯了' })
+      render(<Toast />)
+      expect(screen.getByRole('alert')).toHaveTextContent('出錯了')
+      act(() => vi.advanceTimersByTime(8000))
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+      act(() => useStore.setState({ toast: '又出錯了' }))
+      act(() => screen.getByRole('button', { name: '關閉' }).click())
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('Markdown', () => {
+  test('連結交給系統瀏覽器開啟', async () => {
+    render(<Markdown text={'看 [文件](https://example.com) 與 `code`'} />)
+    await userEvent.click(screen.getByRole('link', { name: '文件' }))
+    expect(call).toHaveBeenCalledWith('shell:openExternal', 'https://example.com')
+    expect(screen.getByText('code').tagName).toBe('CODE')
+  })
+})
+```
+
+側欄依設計稿：目前任務所在的 repo（沒有打開任務時是最新任務的 repo）展開、粗體、徽章為品牌色；其他 repo 收合只顯示任務數，點標題可展開／收合（`aria-expanded`）。TaskScreen 的「回看階段」以 `taskId:status` 為鍵記在 state 裡，換任務或狀態前進時自然回到目前階段（不在 effect 裡 setState，符合 react-hooks 7 的 `set-state-in-effect`）。
 
 **Step 1: Markdown.tsx**
 
 ```tsx
+// src/renderer/src/components/Markdown.tsx
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { call } from '../api'
 
 export function Markdown({ text }: { text: string }) {
   return (
-    <div className="flex flex-col gap-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_ul]:list-disc [&_ul]:pl-5 [&_p]:m-0">
+    <div className="flex flex-col gap-2 [&_:is(h1,h2,h3,h4)]:m-0 [&_:is(h1,h2,h3,h4)]:font-bold [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:m-0 [&_ul]:list-disc [&_ul]:pl-5">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ href, children }) => (
-            <a href={href} onClick={(e) => { e.preventDefault(); if (href) void call('shell:openExternal', href) }}>{children}</a>
+            <a
+              href={href}
+              onClick={(e) => {
+                // 不在 app 視窗裡導覽；https 連結由主程序交給系統瀏覽器
+                e.preventDefault()
+                if (href) void call('shell:openExternal', href)
+              }}
+            >
+              {children}
+            </a>
           ),
-          pre: ({ children }) => <pre className="overflow-x-auto rounded-xl bg-code p-3 text-[12.5px] text-code-ink [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-code-ink">{children}</pre>
+          pre: ({ children }) => (
+            <pre className="overflow-x-auto rounded-xl bg-code p-3 text-[12.5px] text-code-ink [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-code-ink">
+              {children}
+            </pre>
+          )
         }}
-      >{text}</ReactMarkdown>
+      >
+        {text}
+      </ReactMarkdown>
     </div>
   )
 }
@@ -8991,6 +9172,9 @@ export function Markdown({ text }: { text: string }) {
 **Step 2: Sidebar.tsx（對照 `docs/design/StyleB.dc.html` 的 `<nav>`）**
 
 ```tsx
+// src/renderer/src/components/Sidebar.tsx
+// 對照 docs/design/StyleB.dc.html、B1-NewTask.dc.html 的 <nav>
+import { useState } from 'react'
 import { MODELS, type Task } from '@shared/types'
 import { call } from '../api'
 import { taskStatusLabel } from '../lib/stage'
@@ -8999,7 +9183,13 @@ import { Button, cx, Icons, TONE_TEXT } from './ui'
 
 function RepoBadge({ name, active }: { name: string; active: boolean }) {
   return (
-    <span className={cx('flex size-[22px] items-center justify-center rounded-md text-[11px]', active ? 'bg-brand-soft text-brand' : 'bg-chip text-muted')}>
+    <span
+      aria-hidden
+      className={cx(
+        'flex size-[22px] flex-none items-center justify-center rounded-md text-[11px]',
+        active ? 'bg-brand-soft text-brand' : 'bg-chip text-muted'
+      )}
+    >
       {name.slice(0, 1).toUpperCase()}
     </span>
   )
@@ -9011,9 +9201,15 @@ function TaskItem({ task, active, onClick }: { task: Task; active: boolean; onCl
     <button
       type="button"
       onClick={onClick}
-      className={cx('flex flex-col rounded-xl px-3 py-2.5 text-left', active ? 'bg-surface shadow-raised' : 'hover:bg-white/60')}
+      aria-current={active ? 'page' : undefined}
+      className={cx(
+        'flex cursor-pointer flex-col rounded-xl px-3 py-2.5 text-left',
+        active ? 'bg-surface shadow-raised' : 'hover:bg-surface/60'
+      )}
     >
-      <span className={cx('text-[13px]', active ? 'font-medium text-ink' : 'text-ink-2')}>{task.title}</span>
+      <span className={cx('text-[13px]', active ? 'font-medium text-ink' : 'text-ink-2')}>
+        {task.title}
+      </span>
       <span className={cx('text-xs', TONE_TEXT[s.tone])}>{s.text}</span>
     </button>
   )
@@ -9021,33 +9217,84 @@ function TaskItem({ task, active, onClick }: { task: Task; active: boolean; onCl
 
 export function Sidebar() {
   const { repos, tasks, view, open, claude, settings, act } = useStore()
-  const list = Object.values(tasks).filter((t) => t.status !== 'discarded').sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  // 使用者手動展開／收合過的 repo；沒動過的依「目前焦點」決定
+  const [toggled, setToggled] = useState<Record<string, boolean>>({})
+  const list = Object.values(tasks)
+    .filter((t) => t.status !== 'discarded')
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  const activeId = view.kind === 'task' ? view.taskId : undefined
+  // 焦點 repo：目前打開的任務所在的 repo，否則是最新任務的 repo
+  const focusRepo = (list.find((t) => t.id === activeId) ?? list[0])?.repoId
   const model = MODELS.find((m) => m.id === settings?.defaultModel)?.label ?? ''
   return (
-    <nav aria-label="Repo 與任務" className="flex w-[236px] flex-none flex-col gap-[18px] px-1.5 py-2">
-      <Button variant="primary" className="h-[42px]" onClick={() => void open({ kind: 'new' })}><Icons.Plus />新任務</Button>
+    <nav
+      aria-label="Repo 與任務"
+      className="flex w-[236px] flex-none flex-col gap-[18px] px-1.5 py-2"
+    >
+      <Button
+        variant="primary"
+        className={cx(
+          'h-[42px] text-sm',
+          view.kind === 'new' && 'shadow-[0_0_0_3px_var(--color-brand-halo)]'
+        )}
+        aria-current={view.kind === 'new' ? 'page' : undefined}
+        onClick={() => void open({ kind: 'new' })}
+      >
+        <Icons.Plus />
+        新任務
+      </Button>
       <div className="flex min-h-0 flex-1 flex-col gap-[18px] overflow-y-auto">
         {repos.map((r) => {
           const ts = list.filter((t) => t.repoId === r.id)
-          const hasActive = ts.some((t) => view.kind === 'task' && view.taskId === t.id)
+          const expanded = toggled[r.id] ?? r.id === focusRepo
           return (
             <div key={r.id} className="flex flex-col gap-1">
-              <div className="flex items-center gap-2 px-2.5 py-1 text-[13px] font-bold">
-                <RepoBadge name={r.name} active={hasActive} />{r.name}
-                <span className="ml-auto text-xs font-normal text-muted-2">{ts.length || ''}</span>
-              </div>
-              {ts.map((t) => (
-                <TaskItem key={t.id} task={t} active={view.kind === 'task' && view.taskId === t.id} onClick={() => void open({ kind: 'task', taskId: t.id })} />
-              ))}
+              <button
+                type="button"
+                aria-expanded={expanded}
+                onClick={() => setToggled((s) => ({ ...s, [r.id]: !expanded }))}
+                className={cx(
+                  'flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1 text-left text-[13px]',
+                  expanded ? 'font-bold text-ink' : 'text-ink-2'
+                )}
+              >
+                <RepoBadge name={r.name} active={expanded} />
+                <span className="min-w-0 truncate">{r.name}</span>
+                {!expanded && ts.length > 0 && (
+                  <span className="ml-auto text-xs text-muted-2">{ts.length}</span>
+                )}
+              </button>
+              {expanded &&
+                ts.map((t) => (
+                  <TaskItem
+                    key={t.id}
+                    task={t}
+                    active={t.id === activeId}
+                    onClick={() => void open({ kind: 'task', taskId: t.id })}
+                  />
+                ))}
             </div>
           )
         })}
-        <button type="button" className="flex h-10 items-center gap-2 px-2.5 text-[13px] text-muted hover:text-ink" onClick={() => void act(() => call('repos:pick'))}>
-          <Icons.Plus width={14} height={14} />加入 repo
+        <button
+          type="button"
+          className="flex h-10 flex-none cursor-pointer items-center gap-2 px-2.5 text-[13px] text-muted hover:text-ink"
+          onClick={() => void act(() => call('repos:pick'))}
+        >
+          <Icons.Plus width={14} height={14} />
+          加入 repo
         </button>
       </div>
-      <button type="button" onClick={() => void open({ kind: 'settings' })} className="flex items-center gap-2.5 rounded-xl bg-chip p-3 text-left text-xs text-ink-2">
-        <span className={cx('size-2 rounded-full', claude?.loggedIn ? 'bg-green-600' : 'bg-danger')} />
+      <button
+        type="button"
+        onClick={() => void open({ kind: 'settings' })}
+        aria-current={view.kind === 'settings' ? 'page' : undefined}
+        className="flex cursor-pointer items-center gap-2.5 rounded-xl bg-chip p-3 text-left text-xs text-ink-2"
+      >
+        <span
+          aria-hidden
+          className={cx('size-2 flex-none rounded-full', claude?.loggedIn ? 'bg-ok' : 'bg-danger')}
+        />
         {claude?.loggedIn ? `${model} · 訂閱方案` : 'Claude Code 未就緒'}
         <span className="ml-auto text-muted">設定</span>
       </button>
@@ -9059,23 +9306,47 @@ export function Sidebar() {
 **Step 3: StageNav.tsx**
 
 ```tsx
+// src/renderer/src/components/StageNav.tsx
 import type { Task } from '@shared/types'
 import { currentStage, reachable, type Stage, STAGES } from '../lib/stage'
 import { cx } from './ui'
 
-export function StageNav({ task, shown, onSelect }: { task: Task; shown: Stage; onSelect: (s: Stage) => void }) {
+export function StageNav({
+  task,
+  shown,
+  onSelect
+}: {
+  task: Task
+  shown: Stage
+  onSelect: (s: Stage) => void
+}) {
   const current = currentStage(task)
   const order = STAGES.map((s) => s.id)
   return (
-    <div role="tablist" aria-label="任務階段" className="ml-auto flex items-center gap-1 rounded-full bg-fill p-1 text-xs">
+    <div
+      role="tablist"
+      aria-label="任務階段"
+      className="ml-auto flex items-center gap-1 rounded-full bg-fill p-1 text-xs"
+    >
       {STAGES.map((s, i) => {
         const can = reachable(task, s.id)
         const passed = order.indexOf(s.id) < order.indexOf(current)
         return (
           <button
-            key={s.id} type="button" role="tab" aria-selected={shown === s.id} disabled={!can}
+            key={s.id}
+            type="button"
+            role="tab"
+            aria-selected={shown === s.id}
+            disabled={!can}
             onClick={() => onSelect(s.id)}
-            className={cx('rounded-full px-3 py-1', shown === s.id ? 'bg-surface font-medium text-brand shadow-[0_1px_2px_rgba(16,24,40,0.08)]' : can ? 'text-brand' : 'text-muted-2')}
+            className={cx(
+              'rounded-full px-3 py-1 disabled:cursor-default',
+              shown === s.id
+                ? 'bg-surface font-medium text-brand shadow-[0_1px_2px_rgba(16,24,40,0.08)]'
+                : can
+                  ? 'cursor-pointer text-brand hover:bg-surface/60'
+                  : 'text-muted-2'
+            )}
           >
             {passed && shown !== s.id ? '✓' : i + 1} {s.label}
           </button>
@@ -9089,6 +9360,7 @@ export function StageNav({ task, shown, onSelect }: { task: Task; shown: Stage; 
 **Step 4: Toast.tsx**
 
 ```tsx
+// src/renderer/src/components/Toast.tsx
 import { useEffect } from 'react'
 import { useStore } from '../store'
 import { Icons } from './ui'
@@ -9102,9 +9374,19 @@ export function Toast() {
   }, [toast, dismissToast])
   if (!toast) return null
   return (
-    <div role="alert" className="fixed right-5 bottom-5 z-50 flex max-w-md items-start gap-3 rounded-2xl bg-ink px-4 py-3 text-[13px] text-white shadow-dialog">
+    <div
+      role="alert"
+      className="fixed right-5 bottom-5 z-50 flex max-w-md items-start gap-3 rounded-2xl bg-ink px-4 py-3 text-[13px] text-white shadow-dialog"
+    >
       <span className="flex-1 whitespace-pre-wrap">{toast}</span>
-      <button type="button" aria-label="關閉" onClick={dismissToast} className="text-white/70 hover:text-white"><Icons.X width={14} height={14} /></button>
+      <button
+        type="button"
+        aria-label="關閉"
+        onClick={dismissToast}
+        className="mt-0.5 cursor-pointer text-white/70 hover:text-white"
+      >
+        <Icons.X width={14} height={14} />
+      </button>
     </div>
   )
 }
@@ -9113,43 +9395,75 @@ export function Toast() {
 **Step 5: TaskScreen.tsx（骨架）**
 
 ```tsx
-import { useEffect, useState } from 'react'
+// src/renderer/src/screens/TaskScreen.tsx
+import { useState } from 'react'
 import { StageNav } from '../components/StageNav'
 import { currentStage, type Stage } from '../lib/stage'
 import { useStore } from '../store'
 
 export function TaskScreen({ taskId }: { taskId: string }) {
   const task = useStore((s) => s.tasks[taskId])
-  const [stage, setStage] = useState<Stage | null>(null)
-  useEffect(() => setStage(null), [taskId, task?.status])
+  // 使用者回看的階段，只對選它時的任務與狀態有效；換任務或狀態前進就回到目前階段
+  const [picked, setPicked] = useState<{ key: string; stage: Stage } | null>(null)
   if (!task) return null
-  const shown = stage ?? currentStage(task)
-  const nav = <StageNav task={task} shown={shown} onSelect={(s) => setStage(s === currentStage(task) ? null : s)} />
+  const key = `${taskId}:${task.status}`
+  const current = currentStage(task)
+  const shown = picked?.key === key ? picked.stage : current
+  const nav = (
+    <StageNav
+      task={task}
+      shown={shown}
+      onSelect={(s) => setPicked(s === current ? null : { key, stage: s })}
+    />
+  )
   // Task 29–33 依 shown 切換到 ClarifyScreen / SpecScreen / ImplementScreen / ReportScreen
-  return <main className="flex-1 rounded-2xl bg-surface p-7 shadow-card"><div className="flex items-center gap-4"><span className="text-lg font-bold">{task.title}</span>{nav}</div></main>
+  return (
+    <main className="flex min-w-0 flex-1 flex-col rounded-2xl bg-surface shadow-card">
+      <div className="flex flex-wrap items-center gap-4 px-7 py-[18px]">
+        <span className="text-lg font-bold">{task.title}</span>
+        {nav}
+      </div>
+    </main>
+  )
 }
 ```
 
 **Step 6: App.tsx**
 
 ```tsx
+// src/renderer/src/App.tsx
 import { useEffect } from 'react'
 import { Sidebar } from './components/Sidebar'
 import { Toast } from './components/Toast'
 import { TaskScreen } from './screens/TaskScreen'
 import { useStore } from './store'
 
+/** 視窗用 hiddenInset 標題列：這一條是拖曳區，左側留給紅綠燈 */
 function TitleBar({ title }: { title: string }) {
-  return <div className="drag flex h-11 flex-none items-center justify-center text-xs text-muted">{title}</div>
+  return (
+    <div className="drag flex h-11 flex-none items-center justify-center px-20 text-xs text-muted select-none">
+      <span className="truncate">{title}</span>
+    </div>
+  )
 }
 
 export default function App() {
   const { ready, init, view, tasks, repos } = useStore()
-  useEffect(() => { void init() }, [init])
-  if (!ready) return <div className="flex h-full items-center justify-center text-muted">載入中…</div>
+  useEffect(() => init(), [init])
+  if (!ready)
+    return (
+      <div className="drag flex h-full items-center justify-center text-muted select-none">
+        載入中…
+      </div>
+    )
   const task = view.kind === 'task' ? tasks[view.taskId] : undefined
   const repo = task ? repos.find((r) => r.id === task.repoId) : undefined
-  const title = view.kind === 'settings' ? '設定' : view.kind === 'new' ? '新任務' : `${repo?.name ?? ''} · ${task?.title ?? ''}`
+  const title =
+    view.kind === 'settings'
+      ? '設定'
+      : view.kind === 'new'
+        ? '新任務'
+        : [repo?.name, task?.title].filter(Boolean).join(' · ')
   return (
     <div className="flex h-full flex-col">
       <TitleBar title={title} />
@@ -9168,13 +9482,14 @@ export default function App() {
 
 **Step 7: 驗證**
 
+Run: `npx vitest run tests/renderer` → PASS
 Run: `npm run typecheck` → PASS
 Run: `npm run dev` → 左側欄出現「新任務」按鈕、「加入 repo」、底部 Claude 狀態；點「加入 repo」選一個 git 資料夾後出現在側欄。
 
 **Step 8: Commit**
 
 ```bash
-git add src/renderer/src
+git add src/renderer/src tests/renderer
 git commit -m "feat(ui): add app shell, sidebar, stage nav, markdown and toast
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
