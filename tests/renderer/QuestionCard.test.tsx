@@ -78,14 +78,28 @@ describe('QuestionCard', () => {
     expect(screen.queryByRole('radio', { name: /email/ })).not.toBeInTheDocument()
   })
 
-  test('選一般選項時可附補充說明，與「其他」的描述分開', async () => {
+  test('補充說明預設收起，按「＋ 補充說明」展開並移入焦點', async () => {
+    render(<QuestionCard task={task} question={q} />)
+    expect(screen.queryByRole('textbox', { name: '補充說明' })).not.toBeInTheDocument()
+    const reveal = screen.getByRole('button', { name: '＋ 補充說明' })
+    expect(reveal).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(reveal)
+    expect(screen.getByRole('textbox', { name: '補充說明' })).toHaveFocus()
+    expect(screen.queryByRole('button', { name: '＋ 補充說明' })).not.toBeInTheDocument()
+  })
+
+  test('選一般選項時可附補充說明，與「其他」的描述分開；有內容就保持展開', async () => {
     render(<QuestionCard task={task} question={q} />)
     expect(screen.queryByRole('textbox', { name: '自己描述' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '＋ 補充說明' }))
     await userEvent.type(screen.getByRole('textbox', { name: '補充說明' }), '要寫稽核日誌')
     await userEvent.click(screen.getByRole('radio', { name: /其他/ }))
     expect(screen.queryByRole('textbox', { name: '補充說明' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '＋ 補充說明' })).not.toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: '自己描述' })).toHaveValue('')
     await userEvent.click(screen.getByRole('radio', { name: /鎖定 15 分鐘/ }))
+    expect(screen.getByRole('textbox', { name: '補充說明' })).toHaveValue('要寫稽核日誌')
+    expect(screen.getByRole('textbox', { name: '補充說明' })).not.toHaveFocus()
     await userEvent.click(screen.getByRole('button', { name: '確認答案' }))
     expect(call).toHaveBeenCalledWith('tasks:answer', 't1', 'q3', {
       optionId: 'lock15',
@@ -95,10 +109,12 @@ describe('QuestionCard', () => {
 
   test('Claude 改成不允許自由文字後，不送出之前打的補充說明', async () => {
     const { rerender } = render(<QuestionCard task={task} question={q} />)
+    await userEvent.click(screen.getByRole('button', { name: '＋ 補充說明' }))
     await userEvent.type(screen.getByRole('textbox', { name: '補充說明' }), '要寫稽核日誌')
     const strict: Question = { ...q, allowFreeText: false }
     rerender(<QuestionCard task={makeTask({ questions: [strict] })} question={strict} />)
     expect(screen.queryByRole('textbox', { name: '補充說明' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '＋ 補充說明' })).not.toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /其他/ })).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: '確認答案' }))
     expect(call).toHaveBeenCalledWith('tasks:answer', 't1', 'q3', {

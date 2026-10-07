@@ -1,5 +1,5 @@
 // src/renderer/src/components/QuestionCard.tsx
-import { type FormEvent, useId, useState } from 'react'
+import { type FormEvent, useId, useRef, useState } from 'react'
 import type { Question, Task } from '@shared/types'
 import { call } from '../api'
 import { awaitingCounterReply, isBusy } from '../lib/stage'
@@ -32,6 +32,9 @@ export function QuestionCard({
   // 選「其他」時的答案，與選一般選項時的補充說明分開保存
   const [otherText, setOtherText] = useState('')
   const [note, setNote] = useState('')
+  // 補充說明預設收起（設計稿沒有這一欄），按「＋ 補充說明」才展開；已有內容就保持展開
+  const [noteOpen, setNoteOpen] = useState(false)
+  const focusNote = useRef(false)
   const [counter, setCounter] = useState('')
   const [answering, runAnswer] = usePending()
   const [upgrading, runUpgrade] = usePending()
@@ -149,19 +152,43 @@ export function QuestionCard({
           />
         </label>
       )}
-      {q.allowFreeText && selected !== undefined && selected !== OTHER && !readOnly && (
-        <label className="flex flex-col">
-          <span className="sr-only">補充說明</span>
-          <textarea
-            rows={1}
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
+      {q.allowFreeText &&
+        selected !== undefined &&
+        selected !== OTHER &&
+        !readOnly &&
+        (noteOpen || note ? (
+          <label className="flex flex-col">
+            <span className="sr-only">補充說明</span>
+            <textarea
+              // 剛按下「＋ 補充說明」時把焦點移進來（按鈕已經消失）
+              ref={(el) => {
+                if (el && focusNote.current) {
+                  focusNote.current = false
+                  el.focus()
+                }
+              }}
+              rows={1}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              disabled={disabled}
+              placeholder="補充說明（選填）"
+              className={cx(textareaClass, 'resize-y')}
+            />
+          </label>
+        ) : (
+          <button
+            type="button"
+            aria-expanded={false}
             disabled={disabled}
-            placeholder="補充說明（選填）"
-            className={cx(textareaClass, 'resize-y')}
-          />
-        </label>
-      )}
+            onClick={() => {
+              focusNote.current = true
+              setNoteOpen(true)
+            }}
+            className="cursor-pointer self-start text-xs text-muted hover:text-brand disabled:cursor-default disabled:opacity-50"
+          >
+            ＋ 補充說明
+          </button>
+        ))}
 
       {q.followups.length > 0 && (
         <div className="flex flex-col gap-2.5 rounded-[14px] bg-fill-2 px-3.5 py-3 text-[13px]">

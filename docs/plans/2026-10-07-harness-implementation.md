@@ -10535,14 +10535,28 @@ describe('QuestionCard', () => {
     expect(screen.queryByRole('radio', { name: /email/ })).not.toBeInTheDocument()
   })
 
-  test('選一般選項時可附補充說明，與「其他」的描述分開', async () => {
+  test('補充說明預設收起，按「＋ 補充說明」展開並移入焦點', async () => {
+    render(<QuestionCard task={task} question={q} />)
+    expect(screen.queryByRole('textbox', { name: '補充說明' })).not.toBeInTheDocument()
+    const reveal = screen.getByRole('button', { name: '＋ 補充說明' })
+    expect(reveal).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(reveal)
+    expect(screen.getByRole('textbox', { name: '補充說明' })).toHaveFocus()
+    expect(screen.queryByRole('button', { name: '＋ 補充說明' })).not.toBeInTheDocument()
+  })
+
+  test('選一般選項時可附補充說明，與「其他」的描述分開；有內容就保持展開', async () => {
     render(<QuestionCard task={task} question={q} />)
     expect(screen.queryByRole('textbox', { name: '自己描述' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '＋ 補充說明' }))
     await userEvent.type(screen.getByRole('textbox', { name: '補充說明' }), '要寫稽核日誌')
     await userEvent.click(screen.getByRole('radio', { name: /其他/ }))
     expect(screen.queryByRole('textbox', { name: '補充說明' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '＋ 補充說明' })).not.toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: '自己描述' })).toHaveValue('')
     await userEvent.click(screen.getByRole('radio', { name: /鎖定 15 分鐘/ }))
+    expect(screen.getByRole('textbox', { name: '補充說明' })).toHaveValue('要寫稽核日誌')
+    expect(screen.getByRole('textbox', { name: '補充說明' })).not.toHaveFocus()
     await userEvent.click(screen.getByRole('button', { name: '確認答案' }))
     expect(call).toHaveBeenCalledWith('tasks:answer', 't1', 'q3', {
       optionId: 'lock15',
@@ -10552,10 +10566,12 @@ describe('QuestionCard', () => {
 
   test('Claude 改成不允許自由文字後，不送出之前打的補充說明', async () => {
     const { rerender } = render(<QuestionCard task={task} question={q} />)
+    await userEvent.click(screen.getByRole('button', { name: '＋ 補充說明' }))
     await userEvent.type(screen.getByRole('textbox', { name: '補充說明' }), '要寫稽核日誌')
     const strict: Question = { ...q, allowFreeText: false }
     rerender(<QuestionCard task={makeTask({ questions: [strict] })} question={strict} />)
     expect(screen.queryByRole('textbox', { name: '補充說明' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '＋ 補充說明' })).not.toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /其他/ })).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: '確認答案' }))
     expect(call).toHaveBeenCalledWith('tasks:answer', 't1', 'q3', {
@@ -11156,11 +11172,11 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
 
 **Step 5: QuestionCard.tsx（對照 `StyleB.dc.html` 的「目前問題」section）**
 
-選擇存成「使用者點的選項」，畫面上的值在 render 時推導：Claude 用同一個 question_id 更新卡片後，若原選項不見了就回到建議選項。「其他」的描述與一般選項的「補充說明」分開保存；Claude 改成不允許自由文字後，補充說明不送出。已經從這個問題分出分岔時，「升級成分岔」改成「查看分岔」。
+選擇存成「使用者點的選項」，畫面上的值在 render 時推導：Claude 用同一個 question_id 更新卡片後，若原選項不見了就回到建議選項。「其他」的描述與一般選項的「補充說明」分開保存；補充說明預設收起在「＋ 補充說明」按鈕後面（設計稿沒有這一欄），已有內容就保持展開；Claude 改成不允許自由文字後，補充說明不送出。已經從這個問題分出分岔時，「升級成分岔」改成「查看分岔」。
 
 ```tsx
 // src/renderer/src/components/QuestionCard.tsx
-import { type FormEvent, useId, useState } from 'react'
+import { type FormEvent, useId, useRef, useState } from 'react'
 import type { Question, Task } from '@shared/types'
 import { call } from '../api'
 import { awaitingCounterReply, isBusy } from '../lib/stage'
@@ -11193,6 +11209,9 @@ export function QuestionCard({
   // 選「其他」時的答案，與選一般選項時的補充說明分開保存
   const [otherText, setOtherText] = useState('')
   const [note, setNote] = useState('')
+  // 補充說明預設收起（設計稿沒有這一欄），按「＋ 補充說明」才展開；已有內容就保持展開
+  const [noteOpen, setNoteOpen] = useState(false)
+  const focusNote = useRef(false)
   const [counter, setCounter] = useState('')
   const [answering, runAnswer] = usePending()
   const [upgrading, runUpgrade] = usePending()
@@ -11310,19 +11329,43 @@ export function QuestionCard({
           />
         </label>
       )}
-      {q.allowFreeText && selected !== undefined && selected !== OTHER && !readOnly && (
-        <label className="flex flex-col">
-          <span className="sr-only">補充說明</span>
-          <textarea
-            rows={1}
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
+      {q.allowFreeText &&
+        selected !== undefined &&
+        selected !== OTHER &&
+        !readOnly &&
+        (noteOpen || note ? (
+          <label className="flex flex-col">
+            <span className="sr-only">補充說明</span>
+            <textarea
+              // 剛按下「＋ 補充說明」時把焦點移進來（按鈕已經消失）
+              ref={(el) => {
+                if (el && focusNote.current) {
+                  focusNote.current = false
+                  el.focus()
+                }
+              }}
+              rows={1}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              disabled={disabled}
+              placeholder="補充說明（選填）"
+              className={cx(textareaClass, 'resize-y')}
+            />
+          </label>
+        ) : (
+          <button
+            type="button"
+            aria-expanded={false}
             disabled={disabled}
-            placeholder="補充說明（選填）"
-            className={cx(textareaClass, 'resize-y')}
-          />
-        </label>
-      )}
+            onClick={() => {
+              focusNote.current = true
+              setNoteOpen(true)
+            }}
+            className="cursor-pointer self-start text-xs text-muted hover:text-brand disabled:cursor-default disabled:opacity-50"
+          >
+            ＋ 補充說明
+          </button>
+        ))}
 
       {q.followups.length > 0 && (
         <div className="flex flex-col gap-2.5 rounded-[14px] bg-fill-2 px-3.5 py-3 text-[13px]">
@@ -11653,7 +11696,7 @@ export function RunStatus({
 }
 ```
 
-**Step 7: 確認通過** — `npx vitest run tests/renderer/QuestionCard.test.tsx tests/renderer/Timeline.test.tsx` → 30 passed
+**Step 7: 確認通過** — `npx vitest run tests/renderer/QuestionCard.test.tsx tests/renderer/Timeline.test.tsx` → 31 passed
 
 **Step 8: Commit**
 
