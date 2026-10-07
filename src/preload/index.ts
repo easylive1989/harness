@@ -1,22 +1,17 @@
-import { contextBridge } from 'electron'
-import { electronAPI } from '@electron-toolkit/preload'
+// src/preload/index.ts
+// sandbox 下的 preload：只能 import electron 與 @shared/*（會被打包成單一 CJS 檔）
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
+import { APP_EVENT_CHANNEL, type AppEvent, type HarnessBridge } from '@shared/ipc'
 
-// Custom APIs for renderer
-const api = {}
-
-// Use `contextBridge` APIs to expose Electron APIs to
-// renderer only if context isolation is enabled, otherwise
-// just add to the DOM global.
-if (process.contextIsolated) {
-  try {
-    contextBridge.exposeInMainWorld('electron', electronAPI)
-    contextBridge.exposeInMainWorld('api', api)
-  } catch (error) {
-    console.error(error)
+const bridge: HarnessBridge = {
+  invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
+  onEvent: (cb) => {
+    const listener = (_e: IpcRendererEvent, ev: AppEvent) => cb(ev)
+    ipcRenderer.on(APP_EVENT_CHANNEL, listener)
+    return () => {
+      ipcRenderer.removeListener(APP_EVENT_CHANNEL, listener)
+    }
   }
-} else {
-  // @ts-ignore (define in dts)
-  window.electron = electronAPI
-  // @ts-ignore (define in dts)
-  window.api = api
 }
+
+contextBridge.exposeInMainWorld('harness', bridge)

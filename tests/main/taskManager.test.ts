@@ -971,3 +971,54 @@ describe('TaskManager：審查補強', () => {
     await tm.whenIdle(id)
   })
 })
+
+describe('TaskManager：關閉 app', () => {
+  test('shutdown 中止所有執行、拒絕核准，主線標為中斷，之後拒絕新操作', async () => {
+    const { tm, claude, id, repo } = await toImplementing()
+    let result: PermissionResult | null | undefined
+    claude.script = async () => {
+      await new Promise(() => undefined) // 一直執行，直到被中止
+    }
+    await tm.openBranch(id, { title: '查資料' })
+    await until(() => tm.get(id).branches[0]?.running === true)
+    claude.script = async ({ options }) => {
+      result = await options.canUseTool!('Bash', { command: 'npm test' }, signalOf())
+      await new Promise(() => undefined)
+    }
+    await tm.send(id, 'main', '開始')
+    await until(() => !!tm.get(id).pendingPermission)
+
+    await tm.shutdown(500)
+    expect(result).toMatchObject({ behavior: 'deny' })
+    const t = tm.get(id)
+    expect(t.runState).toBe('interrupted')
+    expect(t.pendingPermission).toBeUndefined()
+    expect(t.branches[0].running).toBe(false)
+    await expect(tm.send(id, 'main', '再一則')).rejects.toThrow('正在關閉')
+    await expect(
+      tm.createTask({ repoId: 'r1', request: 'x', baseBranch: 'main', model: 'claude-opus-5-5' })
+    ).rejects.toThrow('正在關閉')
+    // 寫進磁碟的狀態也是中斷，下次啟動可以「繼續」
+    expect((await repo.listTasks()).find((x) => x.id === id)?.runState).toBe('interrupted')
+  })
+
+  test('shutdown 不會被不理會 abort 的執行卡住', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.afterResult = 'hang_ignoring_abort'
+    await tm.send(id, 'main', '第一輪')
+    await until(() => claude.results === 2)
+    const started = Date.now()
+    await tm.shutdown(100)
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(tm.get(id).runState).toBe('interrupted')
+    claude.releaseHang()
+  })
+
+  test('沒有執行時 shutdown 立即結束，閒置任務狀態不變', async () => {
+    const { tm, create } = await setup()
+    const id = await create()
+    await tm.shutdown(100)
+    expect(tm.get(id).runState).toBe('idle')
+  })
+})

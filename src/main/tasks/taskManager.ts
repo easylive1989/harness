@@ -117,6 +117,8 @@ export class TaskManager {
   private reportJobs = new Map<string, Promise<void>>()
   /** 正在開 PR／合併／丟棄的任務 */
   private finishing = new Set<string>()
+  /** app 正在關閉：拒絕新任務與新訊息 */
+  private shuttingDown = false
   private readonly now: () => string
   private readonly newId: () => string
   private readonly prevRunTimeoutMs: number
@@ -200,6 +202,7 @@ export class TaskManager {
 
   /** 對 channel 送出訊息前必須成立的條件；改變狀態的操作要在改狀態之前先檢查 */
   private assertCanSend(taskId: string, channel: Channel): Task {
+    if (this.shuttingDown) throw new Error('Harness 正在關閉')
     const t = this.openTask(taskId)
     if (this.finishing.has(taskId)) throw new Error('任務正在收尾，請稍候')
     if (channel === 'main' && this.finalizing.has(taskId))
@@ -283,6 +286,7 @@ export class TaskManager {
   // ───────── 建立任務與對話 ─────────
 
   async createTask(input: CreateTaskInput): Promise<Task> {
+    if (this.shuttingDown) throw new Error('Harness 正在關閉')
     const settings = await this.d.repo.getSettings()
     const repo = (await this.d.repo.listRepos()).find((r) => r.id === input.repoId)
     if (!repo) throw new Error('找不到 repo')
@@ -894,6 +898,40 @@ export class TaskManager {
         w.resolve({ allow: false, message: '使用者停止了執行' })
     }
     await this.runs.get(runKey(taskId, channel))?.interrupt()
+  }
+
+  /**
+   * 關閉 app 前呼叫：之後拒絕新任務與新訊息，拒絕等待中的核准、中止所有執行。
+   * 等執行結束與狀態寫入各最多 timeoutMs，不讓關閉卡住；被中止的主線標為已中斷，下次啟動可「繼續」。
+   */
+  async shutdown(timeoutMs = this.abortGraceMs) {
+    this.shuttingDown = true
+    for (const w of [...this.permissionWaiters.values()])
+      w.resolve({ allow: false, message: 'Harness 正在關閉' })
+    const runs = [...this.runs.entries()]
+    runs.forEach(([, r]) => r.abort())
+    await settlesWithin(Promise.all(runs.map(([, r]) => r.done.catch(() => undefined))), timeoutMs)
+    const taskIds = new Set(runs.map(([key]) => key.slice(0, key.indexOf('|'))))
+    const marks = [...taskIds].map((taskId) =>
+      // 排在 onRunDone 的收尾之後，才不會被它改回 idle
+      this.enqueue(taskId, () =>
+        this.update(taskId, (t) => {
+          const mainAborted = runs.some(([key]) => key === runKey(taskId, 'main'))
+          if (
+            mainAborted &&
+            (t.runState === 'idle' ||
+              t.runState === 'running' ||
+              t.runState === 'waiting_permission')
+          )
+            t.runState = 'interrupted'
+          t.branches.forEach((b) => {
+            b.running = false
+          })
+          this.syncPermission(t)
+        })
+      )
+    )
+    await settlesWithin(Promise.all(marks), timeoutMs)
   }
 
   async resume(taskId: string) {
