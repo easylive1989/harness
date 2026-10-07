@@ -69,7 +69,17 @@ export const ReportInputShape = {
 
 export const ReportInputSchema = z.object(ReportInputShape).superRefine((r, ctx) => {
   for (const side of ['before', 'after'] as const) {
-    const ids = new Set(r.architecture[side].nodes.map((n) => n.id))
+    const ids = new Set<string>()
+    r.architecture[side].nodes.forEach((n, i) => {
+      if (ids.has(n.id)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['architecture', side, 'nodes', i],
+          message: `節點 id 重複：${n.id}`
+        })
+      }
+      ids.add(n.id)
+    })
     r.architecture[side].edges.forEach((e, i) => {
       if (!ids.has(e.from) || !ids.has(e.to)) {
         ctx.addIssue({
@@ -80,6 +90,17 @@ export const ReportInputSchema = z.object(ReportInputShape).superRefine((r, ctx)
       }
     })
   }
+  const blockIds = new Set<string>()
+  r.custom_blocks.forEach((b, i) => {
+    if (blockIds.has(b.id)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['custom_blocks', i, 'id'],
+        message: `custom block id 重複：${b.id}`
+      })
+    }
+    blockIds.add(b.id)
+  })
 })
 
 export type ReportInput = z.infer<typeof ReportInputSchema>

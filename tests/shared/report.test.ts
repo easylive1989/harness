@@ -28,4 +28,31 @@ describe('ReportInputSchema', () => {
     bad.custom_blocks[0].id = 'State Machine'
     expect(ReportInputSchema.safeParse(bad).success).toBe(false)
   })
+
+  test('同一張圖裡節點 id 重複時失敗', () => {
+    const bad = structuredClone(sampleReport)
+    bad.architecture.before.nodes.push({
+      id: 'login',
+      label: 'login2',
+      status: 'unchanged',
+      files: []
+    })
+    const r = ReportInputSchema.safeParse(bad)
+    expect(r.success).toBe(false)
+    expect(r.error?.issues.some((i) => i.path.join('.') === 'architecture.before.nodes.2')).toBe(
+      true
+    )
+  })
+
+  test('before 與 after 可以有相同的節點 id', () => {
+    expect(ReportInputSchema.safeParse(sampleReport).success).toBe(true)
+  })
+
+  test('custom block id 重複時失敗', () => {
+    const bad = structuredClone(sampleReport)
+    bad.custom_blocks.push({ id: 'state-machine', title: '重複', html: '<p></p>' })
+    const r = ReportInputSchema.safeParse(bad)
+    expect(r.success).toBe(false)
+    expect(r.error?.issues.some((i) => i.path.join('.') === 'custom_blocks.1.id')).toBe(true)
+  })
 })

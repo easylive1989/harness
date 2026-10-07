@@ -485,8 +485,8 @@ describe('ReportInputSchema', () => {
   })
 
   test('缺少選填陣列時補預設值', () => {
-    const { limitations, followups, file_notes, verification, custom_blocks, ...rest } = sampleReport
-    const r = ReportInputSchema.parse(rest)
+    const { overview, architecture, decisions } = sampleReport
+    const r = ReportInputSchema.parse({ overview, architecture, decisions })
     expect(r.limitations).toEqual([])
     expect(r.custom_blocks).toEqual([])
   })
@@ -503,6 +503,33 @@ describe('ReportInputSchema', () => {
     const bad = structuredClone(sampleReport)
     bad.custom_blocks[0].id = 'State Machine'
     expect(ReportInputSchema.safeParse(bad).success).toBe(false)
+  })
+
+  test('同一張圖裡節點 id 重複時失敗', () => {
+    const bad = structuredClone(sampleReport)
+    bad.architecture.before.nodes.push({
+      id: 'login',
+      label: 'login2',
+      status: 'unchanged',
+      files: []
+    })
+    const r = ReportInputSchema.safeParse(bad)
+    expect(r.success).toBe(false)
+    expect(r.error?.issues.some((i) => i.path.join('.') === 'architecture.before.nodes.2')).toBe(
+      true
+    )
+  })
+
+  test('before 與 after 可以有相同的節點 id', () => {
+    expect(ReportInputSchema.safeParse(sampleReport).success).toBe(true)
+  })
+
+  test('custom block id 重複時失敗', () => {
+    const bad = structuredClone(sampleReport)
+    bad.custom_blocks.push({ id: 'state-machine', title: '重複', html: '<p></p>' })
+    const r = ReportInputSchema.safeParse(bad)
+    expect(r.success).toBe(false)
+    expect(r.error?.issues.some((i) => i.path.join('.') === 'custom_blocks.1.id')).toBe(true)
   })
 })
 ```
@@ -526,41 +553,97 @@ const NodeSchema = z.object({
   files: z.array(z.string()).default([])
 })
 const EdgeSchema = z.object({ from: z.string(), to: z.string(), label: z.string().optional() })
-export const GraphSchema = z.object({ nodes: z.array(NodeSchema).min(1), edges: z.array(EdgeSchema).default([]) })
-export const DecisionSourceSchema = z.object({ type: z.enum(['question', 'branch', 'implementation']), ref: z.string() })
+export const GraphSchema = z.object({
+  nodes: z.array(NodeSchema).min(1),
+  edges: z.array(EdgeSchema).default([])
+})
+export const DecisionSourceSchema = z.object({
+  type: z.enum(['question', 'branch', 'implementation']),
+  ref: z.string()
+})
 
 /** submit_report 工具使用的 raw shape */
 export const ReportInputShape = {
   overview: z.object({ headline: z.string().min(1), summary: z.string().min(1) }),
   architecture: z.object({ before: GraphSchema, after: GraphSchema }),
-  decisions: z.array(z.object({
-    id: z.string(),
-    title: z.string(),
-    chosen: z.string(),
-    rejected: z.array(z.string()).default([]),
-    rationale: z.string(),
-    source: DecisionSourceSchema
-  })),
-  limitations: z.array(z.object({ title: z.string(), detail: z.string(), severity: z.enum(['low', 'medium', 'high']) })).default([]),
+  decisions: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string(),
+      chosen: z.string(),
+      rejected: z.array(z.string()).default([]),
+      rationale: z.string(),
+      source: DecisionSourceSchema
+    })
+  ),
+  limitations: z
+    .array(
+      z.object({
+        title: z.string(),
+        detail: z.string(),
+        severity: z.enum(['low', 'medium', 'high'])
+      })
+    )
+    .default([]),
   followups: z.array(z.object({ title: z.string(), detail: z.string().default('') })).default([]),
-  file_notes: z.array(z.object({
-    path: z.string(),
-    why: z.string(),
-    hunks: z.array(z.object({ line_start: z.number().int().positive(), line_end: z.number().int().positive(), why: z.string() })).default([])
-  })).default([]),
+  file_notes: z
+    .array(
+      z.object({
+        path: z.string(),
+        why: z.string(),
+        hunks: z
+          .array(
+            z.object({
+              line_start: z.number().int().positive(),
+              line_end: z.number().int().positive(),
+              why: z.string()
+            })
+          )
+          .default([])
+      })
+    )
+    .default([]),
   verification: z.array(z.object({ command: z.string().min(1) })).default([]),
-  custom_blocks: z.array(z.object({ id, title: z.string(), html: z.string().max(200_000) })).max(5).default([])
+  custom_blocks: z
+    .array(z.object({ id, title: z.string(), html: z.string().max(200_000) }))
+    .max(5)
+    .default([])
 }
 
 export const ReportInputSchema = z.object(ReportInputShape).superRefine((r, ctx) => {
   for (const side of ['before', 'after'] as const) {
-    const ids = new Set(r.architecture[side].nodes.map((n) => n.id))
+    const ids = new Set<string>()
+    r.architecture[side].nodes.forEach((n, i) => {
+      if (ids.has(n.id)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['architecture', side, 'nodes', i],
+          message: `節點 id 重複：${n.id}`
+        })
+      }
+      ids.add(n.id)
+    })
     r.architecture[side].edges.forEach((e, i) => {
       if (!ids.has(e.from) || !ids.has(e.to)) {
-        ctx.addIssue({ code: 'custom', path: ['architecture', side, 'edges', i], message: `edge 參照不存在的節點 ${e.from}→${e.to}` })
+        ctx.addIssue({
+          code: 'custom',
+          path: ['architecture', side, 'edges', i],
+          message: `edge 參照不存在的節點 ${e.from}→${e.to}`
+        })
       }
     })
   }
+  const blockIds = new Set<string>()
+  r.custom_blocks.forEach((b, i) => {
+    if (blockIds.has(b.id)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['custom_blocks', i, 'id'],
+        message: `custom block id 重複：${b.id}`
+      })
+    }
+    blockIds.add(b.id)
+  })
 })
 
 export type ReportInput = z.infer<typeof ReportInputSchema>
@@ -568,7 +651,7 @@ export type ReportInput = z.infer<typeof ReportInputSchema>
 
 **Step 5: 確認通過**
 
-Run: `npx vitest run tests/shared/report.test.ts` → Expected: 4 passed
+Run: `npx vitest run tests/shared/report.test.ts` → Expected: 7 passed
 Run: `npm run typecheck` → PASS
 
 **Step 6: Commit**
@@ -734,7 +817,10 @@ describe('parseUnifiedDiff', () => {
   const files = parseUnifiedDiff(DIFF)
 
   test('解析出兩個檔案與狀態', () => {
-    expect(files.map((f) => [f.path, f.status])).toEqual([['src/a.ts', 'modified'], ['src/new.ts', 'added']])
+    expect(files.map((f) => [f.path, f.status])).toEqual([
+      ['src/a.ts', 'modified'],
+      ['src/new.ts', 'added']
+    ])
   })
 
   test('行號正確', () => {
@@ -751,8 +837,84 @@ describe('parseUnifiedDiff', () => {
   })
 
   test('rename', () => {
-    const r = parseUnifiedDiff('diff --git a/x.ts b/y.ts\nsimilarity index 100%\nrename from x.ts\nrename to y.ts\n')
+    const r = parseUnifiedDiff(
+      'diff --git a/x.ts b/y.ts\nsimilarity index 100%\nrename from x.ts\nrename to y.ts\n'
+    )
     expect(r[0]).toMatchObject({ path: 'y.ts', oldPath: 'x.ts', status: 'renamed' })
+  })
+
+  test('modified 檔案沒有 oldPath', () => {
+    expect(files[0].oldPath).toBeUndefined()
+    expect(files[1].oldPath).toBeUndefined()
+  })
+
+  test('CRLF 換行與 LF 結果相同', () => {
+    expect(parseUnifiedDiff(DIFF.replace(/\n/g, '\r\n'))).toEqual(files)
+  })
+
+  test('git 以引號與八進位跳脫表示的中文路徑', () => {
+    const r = parseUnifiedDiff(
+      String.raw`diff --git "a/\344\270\255.ts" "b/\344\270\255.ts"
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ "b/\344\270\255.ts"
+@@ -0,0 +1 @@
++x
+`
+    )
+    expect(r[0]).toMatchObject({ path: '中.ts', status: 'added' })
+    expect(r[0].hunks[0].lines).toEqual([{ type: 'add', text: 'x', newNo: 1 }])
+  })
+
+  test('沒有 ---/+++ 時從引號標頭取得路徑', () => {
+    const r = parseUnifiedDiff(
+      String.raw`diff --git "a/\344\270\255.png" "b/\344\270\255.png"
+new file mode 100644
+index 0000000..1111111
+Binary files /dev/null and "b/\344\270\255.png" differ
+`
+    )
+    expect(r[0]).toMatchObject({ path: '中.png', status: 'added', binary: true })
+  })
+
+  test('引號路徑中的跳脫字元（雙引號、反斜線、tab、換行）', () => {
+    const r = parseUnifiedDiff(
+      String.raw`diff --git "a/q\"b\\c\td\ne.ts" "b/q\"b\\c\td\ne.ts"
+--- "a/q\"b\\c\td\ne.ts"
++++ "b/q\"b\\c\td\ne.ts"
+@@ -1 +1 @@
+-a
++b
+`
+    )
+    expect(r[0].path).toBe('q"b\\c\td\ne.ts')
+  })
+
+  test('引號的 rename from/to', () => {
+    const r = parseUnifiedDiff(
+      String.raw`diff --git "a/\344\270\255.ts" "b/\346\226\207.ts"
+similarity index 100%
+rename from "\344\270\255.ts"
+rename to "\346\226\207.ts"
+`
+    )
+    expect(r[0]).toMatchObject({ path: '文.ts', oldPath: '中.ts', status: 'renamed' })
+  })
+
+  test('刪除檔案沿用舊路徑', () => {
+    const r = parseUnifiedDiff(
+      'diff --git a/old.ts b/old.ts\ndeleted file mode 100644\nindex 111..000\n--- a/old.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n'
+    )
+    expect(r[0]).toMatchObject({ path: 'old.ts', status: 'deleted' })
+    expect(r[0].oldPath).toBeUndefined()
+  })
+
+  test('含空白的路徑會去掉 git 補在 ---/+++ 後的 tab', () => {
+    const r = parseUnifiedDiff(
+      'diff --git a/my file.ts b/my file.ts\nindex 1..2 100644\n--- a/my file.ts\t\n+++ b/my file.ts\t\n@@ -1 +1 @@\n-a\n+b\n'
+    )
+    expect(r[0].path).toBe('my file.ts')
   })
 })
 ```
@@ -763,29 +925,66 @@ describe('parseUnifiedDiff', () => {
 
 ```ts
 // src/shared/diff.ts
-export interface DiffLine { type: 'add' | 'del' | 'ctx'; text: string; oldNo?: number; newNo?: number }
-export interface DiffHunk { header: string; lines: DiffLine[] }
+export interface DiffLine {
+  type: 'add' | 'del' | 'ctx'
+  text: string
+  oldNo?: number
+  newNo?: number
+}
+export interface DiffHunk {
+  header: string
+  lines: DiffLine[]
+}
 export interface DiffFile {
   path: string
+  /** 只有 status 為 'renamed' 時才有 */
   oldPath?: string
   status: 'added' | 'deleted' | 'modified' | 'renamed'
   hunks: DiffHunk[]
   binary: boolean
 }
 
+const QUOTED = String.raw`"(?:[^"\\]|\\.)*"`
+const GIT_HEADER = new RegExp(`^diff --git (${QUOTED}|a/.+) (${QUOTED}|b/.+)$`)
+const C_ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 }
+
+/** 解開 git 的 C 風格引號路徑；八進位跳脫是 UTF-8 位元組 */
+export function unquotePath(s: string): string {
+  if (s.length < 2 || !s.startsWith('"') || !s.endsWith('"')) return s
+  const enc = new TextEncoder()
+  const bytes: number[] = []
+  for (const m of s.slice(1, -1).matchAll(/\\([0-7]{1,3}|[\s\S])|[^\\]+/g)) {
+    const esc = m[1]
+    if (esc === undefined) bytes.push(...enc.encode(m[0]))
+    else if (/^[0-7]+$/.test(esc)) bytes.push(parseInt(esc, 8) & 0xff)
+    else if (esc in C_ESCAPES) bytes.push(C_ESCAPES[esc])
+    else bytes.push(...enc.encode(esc))
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes))
+}
+
+/** `a/x`、`"b/x"`、`/dev/null`（可能帶 git 補上的結尾 tab）→ 路徑；/dev/null 回傳 null */
+function sidePath(raw: string): string | null {
+  const p = unquotePath(raw.replace(/\t.*$/, ''))
+  return p === '/dev/null' ? null : p.replace(/^[ab]\//, '')
+}
+
 export function parseUnifiedDiff(text: string): DiffFile[] {
   const files: DiffFile[] = []
   let file: DiffFile | undefined
   let hunk: DiffHunk | undefined
+  /** 本檔案 `---` 行的路徑，供 `+++ /dev/null`（刪除）沿用 */
+  let minusPath: string | null = null
   let oldNo = 0
   let newNo = 0
 
-  for (const line of text.split('\n')) {
+  for (const line of text.split(/\r?\n/)) {
     if (line.startsWith('diff --git ')) {
-      const m = /^diff --git a\/(.+) b\/(.+)$/.exec(line)
-      file = { path: m?.[2] ?? '', oldPath: m?.[1], status: 'modified', hunks: [], binary: false }
+      const m = GIT_HEADER.exec(line)
+      file = { path: m ? (sidePath(m[2]) ?? '') : '', status: 'modified', hunks: [], binary: false }
       files.push(file)
       hunk = undefined
+      minusPath = null
       continue
     }
     if (!file) continue
@@ -800,20 +999,36 @@ export function parseUnifiedDiff(text: string): DiffFile[] {
     if (!hunk) {
       if (line.startsWith('new file mode')) file.status = 'added'
       else if (line.startsWith('deleted file mode')) file.status = 'deleted'
-      else if (line.startsWith('rename from ')) { file.status = 'renamed'; file.oldPath = line.slice('rename from '.length) }
-      else if (line.startsWith('rename to ')) file.path = line.slice('rename to '.length)
+      else if (line.startsWith('rename from ')) {
+        file.status = 'renamed'
+        file.oldPath = unquotePath(line.slice('rename from '.length))
+      } else if (line.startsWith('rename to '))
+        file.path = unquotePath(line.slice('rename to '.length))
       else if (line.startsWith('Binary files')) file.binary = true
+      else if (line.startsWith('--- ')) {
+        minusPath = sidePath(line.slice(4))
+        if (minusPath === null) file.status = 'added'
+      } else if (line.startsWith('+++ ')) {
+        const p = sidePath(line.slice(4))
+        if (p !== null) file.path = p
+        else {
+          file.status = 'deleted'
+          if (minusPath !== null) file.path = minusPath
+        }
+      }
       continue
     }
     if (line.startsWith('+')) hunk.lines.push({ type: 'add', text: line.slice(1), newNo: newNo++ })
-    else if (line.startsWith('-')) hunk.lines.push({ type: 'del', text: line.slice(1), oldNo: oldNo++ })
-    else if (line.startsWith(' ')) hunk.lines.push({ type: 'ctx', text: line.slice(1), oldNo: oldNo++, newNo: newNo++ })
+    else if (line.startsWith('-'))
+      hunk.lines.push({ type: 'del', text: line.slice(1), oldNo: oldNo++ })
+    else if (line.startsWith(' '))
+      hunk.lines.push({ type: 'ctx', text: line.slice(1), oldNo: oldNo++, newNo: newNo++ })
   }
   return files
 }
 ```
 
-**Step 4: 確認通過** — 4 passed
+**Step 4: 確認通過** — 12 passed
 
 **Step 5: Commit**
 
@@ -1736,7 +1951,9 @@ export async function runCommand(cmd: string, args: string[], cwd: string): Prom
   }
 }
 
-const git = (cwd: string, ...args: string[]) => runCommand('git', args, cwd)
+/** core.quotePath=false：非 ASCII 路徑原樣輸出，不用八進位跳脫 */
+const git = (cwd: string, ...args: string[]) =>
+  runCommand('git', ['-c', 'core.quotePath=false', ...args], cwd)
 
 export function parseNumstat(out: string): DiffStats {
   const perFile = out.split('\n').filter(Boolean).map((line) => {

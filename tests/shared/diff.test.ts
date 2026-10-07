@@ -50,4 +50,78 @@ describe('parseUnifiedDiff', () => {
     )
     expect(r[0]).toMatchObject({ path: 'y.ts', oldPath: 'x.ts', status: 'renamed' })
   })
+
+  test('modified 檔案沒有 oldPath', () => {
+    expect(files[0].oldPath).toBeUndefined()
+    expect(files[1].oldPath).toBeUndefined()
+  })
+
+  test('CRLF 換行與 LF 結果相同', () => {
+    expect(parseUnifiedDiff(DIFF.replace(/\n/g, '\r\n'))).toEqual(files)
+  })
+
+  test('git 以引號與八進位跳脫表示的中文路徑', () => {
+    const r = parseUnifiedDiff(
+      String.raw`diff --git "a/\344\270\255.ts" "b/\344\270\255.ts"
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ "b/\344\270\255.ts"
+@@ -0,0 +1 @@
++x
+`
+    )
+    expect(r[0]).toMatchObject({ path: '中.ts', status: 'added' })
+    expect(r[0].hunks[0].lines).toEqual([{ type: 'add', text: 'x', newNo: 1 }])
+  })
+
+  test('沒有 ---/+++ 時從引號標頭取得路徑', () => {
+    const r = parseUnifiedDiff(
+      String.raw`diff --git "a/\344\270\255.png" "b/\344\270\255.png"
+new file mode 100644
+index 0000000..1111111
+Binary files /dev/null and "b/\344\270\255.png" differ
+`
+    )
+    expect(r[0]).toMatchObject({ path: '中.png', status: 'added', binary: true })
+  })
+
+  test('引號路徑中的跳脫字元（雙引號、反斜線、tab、換行）', () => {
+    const r = parseUnifiedDiff(
+      String.raw`diff --git "a/q\"b\\c\td\ne.ts" "b/q\"b\\c\td\ne.ts"
+--- "a/q\"b\\c\td\ne.ts"
++++ "b/q\"b\\c\td\ne.ts"
+@@ -1 +1 @@
+-a
++b
+`
+    )
+    expect(r[0].path).toBe('q"b\\c\td\ne.ts')
+  })
+
+  test('引號的 rename from/to', () => {
+    const r = parseUnifiedDiff(
+      String.raw`diff --git "a/\344\270\255.ts" "b/\346\226\207.ts"
+similarity index 100%
+rename from "\344\270\255.ts"
+rename to "\346\226\207.ts"
+`
+    )
+    expect(r[0]).toMatchObject({ path: '文.ts', oldPath: '中.ts', status: 'renamed' })
+  })
+
+  test('刪除檔案沿用舊路徑', () => {
+    const r = parseUnifiedDiff(
+      'diff --git a/old.ts b/old.ts\ndeleted file mode 100644\nindex 111..000\n--- a/old.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n'
+    )
+    expect(r[0]).toMatchObject({ path: 'old.ts', status: 'deleted' })
+    expect(r[0].oldPath).toBeUndefined()
+  })
+
+  test('含空白的路徑會去掉 git 補在 ---/+++ 後的 tab', () => {
+    const r = parseUnifiedDiff(
+      'diff --git a/my file.ts b/my file.ts\nindex 1..2 100644\n--- a/my file.ts\t\n+++ b/my file.ts\t\n@@ -1 +1 @@\n-a\n+b\n'
+    )
+    expect(r[0].path).toBe('my file.ts')
+  })
 })
