@@ -2461,11 +2461,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ```ts
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, rename, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, test } from 'vitest'
-import { GitService, parseNumstat } from '../../src/main/git/gitService'
+import { GitService, parseNumstat, runCommand } from '../../src/main/git/gitService'
 
 const sh = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' })
 let repo: string
@@ -2502,8 +2503,13 @@ describe('GitService', () => {
     expect(sha).toMatch(/^[0-9a-f]{40}$/)
     expect(await git.diff(wt, 'main')).toContain('+two')
     expect(await git.diffStats(wt, 'main')).toEqual({
-      files: 2, additions: 2, deletions: 0,
-      perFile: [{ path: 'a.txt', additions: 1, deletions: 0 }, { path: 'b.txt', additions: 1, deletions: 0 }]
+      files: 2,
+      additions: 2,
+      deletions: 0,
+      perFile: [
+        { path: 'a.txt', additions: 1, deletions: 0 },
+        { path: 'b.txt', additions: 1, deletions: 0 }
+      ]
     })
   })
 
@@ -2511,12 +2517,61 @@ describe('GitService', () => {
     await git.createWorktree(repo, wt, 'harness/t1', 'main')
     await rename(join(wt, 'a.txt'), join(wt, 'renamed.txt'))
     const expected = {
-      files: 2, additions: 1, deletions: 1,
-      perFile: [{ path: 'a.txt', additions: 0, deletions: 1 }, { path: 'renamed.txt', additions: 1, deletions: 0 }]
+      files: 2,
+      additions: 1,
+      deletions: 1,
+      perFile: [
+        { path: 'a.txt', additions: 0, deletions: 1 },
+        { path: 'renamed.txt', additions: 1, deletions: 0 }
+      ]
     }
     expect(await git.workingStats(wt, 'main')).toEqual(expected)
     await git.commitAll(wt, 'rename')
     expect(await git.diffStats(wt, 'main')).toEqual(expected)
+  })
+
+  test('workingStats 不動到真正的 index', async () => {
+    await git.createWorktree(repo, wt, 'harness/t1', 'main')
+    await writeFile(join(wt, 'a.txt'), 'one\ntwo\n')
+    await writeFile(join(wt, 'b.txt'), 'new\n')
+    const before = sh(wt, 'status', '--porcelain')
+    expect((await git.workingStats(wt, 'main')).files).toBe(2)
+    expect(sh(wt, 'status', '--porcelain')).toBe(before)
+  })
+
+  test('檔名含引號時路徑原樣保留', async () => {
+    await git.createWorktree(repo, wt, 'harness/t1', 'main')
+    await writeFile(join(wt, 'q"uote.txt'), 'q\n')
+    expect((await git.workingStats(wt, 'main')).perFile).toEqual([
+      { path: 'q"uote.txt', additions: 1, deletions: 0 }
+    ])
+    await git.commitAll(wt, 'quote')
+    expect((await git.diffStats(wt, 'main')).perFile).toEqual([
+      { path: 'q"uote.txt', additions: 1, deletions: 0 }
+    ])
+  })
+
+  test('merge 衝突時中止合併並回報 CONFLICT', async () => {
+    await git.createWorktree(repo, wt, 'harness/t1', 'main')
+    await writeFile(join(wt, 'a.txt'), 'branch\n')
+    await git.commitAll(wt, 'branch change')
+    await writeFile(join(repo, 'a.txt'), 'main\n')
+    sh(repo, 'commit', '-qam', 'main change')
+    await expect(git.merge(repo, 'harness/t1', 'main')).rejects.toThrow('CONFLICT')
+    expect(existsSync(join(repo, '.git', 'MERGE_HEAD'))).toBe(false)
+    expect(sh(repo, 'status', '--porcelain')).toBe('')
+  })
+
+  test('拒絕看起來像選項或不合法的分支名稱', async () => {
+    for (const bad of ['-x', '--output=/tmp/x', 'a..b']) {
+      await expect(git.createWorktree(repo, wt, bad, 'main')).rejects.toThrow('分支名稱')
+      await expect(git.createWorktree(repo, wt, 'harness/t1', bad)).rejects.toThrow('分支名稱')
+      await expect(git.merge(repo, bad, 'main')).rejects.toThrow('分支名稱')
+      await expect(git.removeWorktree(repo, wt, bad)).rejects.toThrow('分支名稱')
+      await expect(git.pushAndOpenPr(repo, bad, 'main', 't', 'b')).rejects.toThrow('分支名稱')
+    }
+    expect(existsSync(wt)).toBe(false)
+    expect(await git.branches(repo)).toEqual(['main'])
   })
 
   test('merge 前檢查原 repo 狀態', async () => {
@@ -2534,14 +2589,68 @@ describe('GitService', () => {
     await git.createWorktree(repo, wt, 'harness/t1', 'main')
     await git.removeWorktree(repo, wt, 'harness/t1')
     expect(await git.branches(repo)).toEqual(['main'])
+    expect(existsSync(wt)).toBe(false)
+  })
+
+  test('removeWorktree：目錄與分支已不存在時視為成功', async () => {
+    await git.createWorktree(repo, wt, 'harness/t1', 'main')
+    await rm(wt, { recursive: true, force: true })
+    sh(repo, 'worktree', 'prune')
+    sh(repo, 'branch', '-D', 'harness/t1')
+    await git.removeWorktree(repo, wt, 'harness/t1')
+    expect(await git.branches(repo)).toEqual(['main'])
+  })
+
+  test('removeWorktree：移除失敗且目錄仍在時拋出原本的錯誤', async () => {
+    await mkdir(wt, { recursive: true })
+    sh(repo, 'branch', 'harness/t1')
+    await expect(git.removeWorktree(repo, wt, 'harness/t1')).rejects.toThrow('worktree remove')
+    expect(await git.branches(repo)).toContain('harness/t1')
+  })
+})
+
+describe('runCommand', () => {
+  test('錯誤訊息在 stderr 為空時改用 stdout', async () => {
+    // 輸出 "out-put" 不出現在指令文字裡，確保訊息真的來自 stdout
+    await expect(
+      runCommand('sh', ['-c', 'printf "%s-%s" out put; exit 1'], tmpdir())
+    ).rejects.toThrow('失敗：out-put')
+  })
+
+  test('支援 stdin 與額外環境變數，並關閉 git 的帳密提示', async () => {
+    expect(await runCommand('cat', [], tmpdir(), { input: 'from-stdin' })).toBe('from-stdin')
+    const out = await runCommand(
+      'sh',
+      ['-c', 'printf "%s %s" "$GIT_TERMINAL_PROMPT" "$FOO"'],
+      tmpdir(),
+      {
+        env: { FOO: 'bar' }
+      }
+    )
+    expect(out).toBe('0 bar')
+  })
+
+  test('沒有 input 時 stdin 是空的，不會卡住', async () => {
+    expect(await runCommand('cat', [], tmpdir())).toBe('')
   })
 })
 
 describe('parseNumstat', () => {
+  test('-z 輸出的路徑可含換行與 tab', () => {
+    expect(parseNumstat('1\t0\ta\nb\tc.txt\0').perFile).toEqual([
+      { path: 'a\nb\tc.txt', additions: 1, deletions: 0 }
+    ])
+  })
+
   test('二進位檔以 0 計', () => {
-    expect(parseNumstat('3\t1\ta.ts\n-\t-\timg.png\n')).toEqual({
-      files: 2, additions: 3, deletions: 1,
-      perFile: [{ path: 'a.ts', additions: 3, deletions: 1 }, { path: 'img.png', additions: 0, deletions: 0 }]
+    expect(parseNumstat('3\t1\ta.ts\0-\t-\timg.png\0')).toEqual({
+      files: 2,
+      additions: 3,
+      deletions: 1,
+      perFile: [
+        { path: 'a.ts', additions: 3, deletions: 1 },
+        { path: 'img.png', additions: 0, deletions: 0 }
+      ]
     })
   })
 })
@@ -2553,39 +2662,98 @@ describe('parseNumstat', () => {
 
 ```ts
 // src/main/git/gitService.ts
-import { execFile } from 'node:child_process'
-import { mkdir } from 'node:fs/promises'
-import { dirname } from 'node:path'
-import { promisify } from 'node:util'
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import type { DiffStats } from '@shared/types'
 
-const pexec = promisify(execFile)
-
 export class CommandError extends Error {
-  constructor(readonly command: string, readonly stderr: string) {
+  constructor(
+    readonly command: string,
+    readonly stderr: string
+  ) {
     super(`${command} 失敗：${stderr.trim()}`)
   }
 }
 
-export async function runCommand(cmd: string, args: string[], cwd: string): Promise<string> {
-  try {
-    const { stdout } = await pexec(cmd, args, { cwd, maxBuffer: 64 * 1024 * 1024 })
-    return stdout
-  } catch (e) {
-    const err = e as { stderr?: string; message: string }
-    throw new CommandError(`${cmd} ${args.join(' ')}`, err.stderr || err.message)
-  }
+export interface RunOptions {
+  /** 額外的環境變數（與 process.env 合併） */
+  env?: Record<string, string>
+  /** 寫入 stdin 的內容；沒給時 stdin 為空 */
+  input?: string
+}
+
+export function runCommand(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  opts: RunOptions = {}
+): Promise<string> {
+  const command = `${cmd} ${args.join(' ')}`
+  return new Promise((done, fail) => {
+    const child = spawn(cmd, args, {
+      cwd,
+      // GIT_TERMINAL_PROMPT=0：需要帳密時直接失敗，不要卡在看不到的提示
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...opts.env },
+      stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout?.setEncoding('utf8').on('data', (s: string) => (stdout += s))
+    child.stderr?.setEncoding('utf8').on('data', (s: string) => (stderr += s))
+    if (child.stdin) {
+      child.stdin.on('error', () => {
+        /* 程序提早結束時忽略 EPIPE，以 exit code 為準 */
+      })
+      child.stdin.end(opts.input)
+    }
+    child.on('error', (err) => fail(new CommandError(command, err.message)))
+    child.on('close', (code, signal) => {
+      if (code === 0) done(stdout)
+      else
+        fail(
+          new CommandError(command, stderr.trim() || stdout.trim() || `結束代碼 ${code ?? signal}`)
+        )
+    })
+  })
 }
 
 /** core.quotePath=false：非 ASCII 路徑原樣輸出，不用八進位跳脫 */
 const git = (cwd: string, ...args: string[]) =>
   runCommand('git', ['-c', 'core.quotePath=false', ...args], cwd)
 
+const gitEnv = (cwd: string, env: Record<string, string>, ...args: string[]) =>
+  runCommand('git', ['-c', 'core.quotePath=false', ...args], cwd, { env })
+
+/** diff 輸出固定格式：不上色、不走外部 diff 工具、改名視為刪除＋新增 */
+const DIFF_FLAGS = ['--no-color', '--no-ext-diff', '--no-renames']
+
+/** 擋掉會被 git 當成選項的名稱（如 `--output=...`）與不合法的分支名稱 */
+export async function assertRefName(cwd: string, name: string): Promise<void> {
+  const invalid = () => new CommandError('git check-ref-format', `不合法的分支名稱：${name}`)
+  if (!name || name.startsWith('-')) throw invalid()
+  try {
+    await git(cwd, 'check-ref-format', '--branch', name)
+  } catch {
+    throw invalid()
+  }
+}
+
+/** 解析 `git diff --numstat -z --no-renames`：每筆是 `add\tdel\tpath\0`，路徑不跳脫 */
 export function parseNumstat(out: string): DiffStats {
-  const perFile = out.split('\n').filter(Boolean).map((line) => {
-    const [a, d, ...rest] = line.split('\t')
-    return { path: rest.join('\t'), additions: a === '-' ? 0 : Number(a), deletions: d === '-' ? 0 : Number(d) }
-  })
+  const perFile = out
+    .split('\0')
+    .filter(Boolean)
+    .map((record) => {
+      const [a, d, ...rest] = record.split('\t')
+      return {
+        path: rest.join('\t'),
+        additions: a === '-' ? 0 : Number(a),
+        deletions: d === '-' ? 0 : Number(d)
+      }
+    })
   return {
     files: perFile.length,
     additions: perFile.reduce((s, f) => s + f.additions, 0),
@@ -2596,69 +2764,178 @@ export function parseNumstat(out: string): DiffStats {
 
 export class GitService {
   async isRepo(dir: string): Promise<boolean> {
-    try { return (await git(dir, 'rev-parse', '--is-inside-work-tree')).trim() === 'true' } catch { return false }
+    try {
+      return (await git(dir, 'rev-parse', '--is-inside-work-tree')).trim() === 'true'
+    } catch {
+      return false
+    }
   }
 
-  async repoRoot(dir: string) { return (await git(dir, 'rev-parse', '--show-toplevel')).trim() }
+  async repoRoot(dir: string) {
+    return (await git(dir, 'rev-parse', '--show-toplevel')).trim()
+  }
 
   async branches(repo: string) {
-    return (await git(repo, 'branch', '--format=%(refname:short)')).split('\n').map((s) => s.trim()).filter(Boolean)
+    return (await git(repo, 'branch', '--format=%(refname:short)'))
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean)
   }
 
-  async currentBranch(repo: string) { return (await git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')).trim() }
+  async currentBranch(repo: string) {
+    return (await git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')).trim()
+  }
 
   async createWorktree(repo: string, worktreePath: string, branch: string, base: string) {
+    await assertRefName(repo, branch)
+    await assertRefName(repo, base)
     await mkdir(dirname(worktreePath), { recursive: true })
-    await git(repo, 'worktree', 'add', '-b', branch, worktreePath, base)
+    await git(repo, 'worktree', 'add', '-b', branch, '--end-of-options', worktreePath, base)
   }
 
   async commitAll(wt: string, message: string): Promise<string | null> {
     await git(wt, 'add', '-A')
     if (!(await git(wt, 'diff', '--cached', '--name-only')).trim()) return null
+    // 刻意不加 --no-verify：repo 的 git hooks 照常執行
     await git(wt, 'commit', '-q', '-m', message)
     return (await git(wt, 'rev-parse', 'HEAD')).trim()
   }
 
-  /** --no-renames：改名一律視為刪除＋新增，與 diffStats 的逐檔路徑一致 */
-  diff(wt: string, base: string) { return git(wt, 'diff', '--no-renames', `${base}...HEAD`) }
+  diff(wt: string, base: string) {
+    return git(
+      wt,
+      'diff',
+      ...DIFF_FLAGS,
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
+      '--end-of-options',
+      `${base}...HEAD`
+    )
+  }
 
-  /** --no-renames：numstat 遇到改名會輸出 `old => new`，關掉後每列都是單純路徑 */
-  async diffStats(wt: string, base: string) { return parseNumstat(await git(wt, 'diff', '--numstat', '--no-renames', `${base}...HEAD`)) }
+  async diffStats(wt: string, base: string) {
+    return parseNumstat(
+      await git(wt, 'diff', '--numstat', '-z', ...DIFF_FLAGS, '--end-of-options', `${base}...HEAD`)
+    )
+  }
 
-  /** 含未 commit 與未追蹤檔案，相對於 base 的統計（實作中的「變更檔案」面板用） */
+  /**
+   * 含未 commit 與未追蹤檔案，相對於 base 的統計（實作中的「變更檔案」面板用）。
+   * `add -N` 在暫存的 index 複本上做，不改動 worktree 真正的 index。
+   */
   async workingStats(wt: string, base: string) {
-    await git(wt, 'add', '-A', '-N')
-    const mergeBase = (await git(wt, 'merge-base', base, 'HEAD')).trim()
-    return parseNumstat(await git(wt, 'diff', '--numstat', '--no-renames', mergeBase))
+    const mergeBase = (await git(wt, 'merge-base', '--end-of-options', base, 'HEAD')).trim()
+    const realIndex = resolve(wt, (await git(wt, 'rev-parse', '--git-path', 'index')).trim())
+    const tmp = await mkdtemp(join(tmpdir(), 'harness-index-'))
+    const env = { GIT_INDEX_FILE: join(tmp, 'index') }
+    try {
+      if (existsSync(realIndex)) await copyFile(realIndex, env.GIT_INDEX_FILE)
+      await gitEnv(wt, env, 'add', '-A', '-N')
+      return parseNumstat(
+        await gitEnv(
+          wt,
+          env,
+          'diff',
+          '--numstat',
+          '-z',
+          ...DIFF_FLAGS,
+          '--end-of-options',
+          mergeBase
+        )
+      )
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
   }
 
   async merge(repo: string, branch: string, base: string) {
+    await assertRefName(repo, branch)
+    await assertRefName(repo, base)
     if ((await git(repo, 'status', '--porcelain')).trim()) {
       throw new CommandError('git status', '原 repo 有未提交的變更，請先處理後再合併')
     }
     const current = await this.currentBranch(repo)
-    if (current !== base) throw new CommandError('git rev-parse', `原 repo 目前在 ${current}，請切回 ${base} 再合併`)
-    await git(repo, 'merge', '--no-ff', branch, '-m', `Merge ${branch}`)
+    if (current !== base)
+      throw new CommandError('git rev-parse', `原 repo 目前在 ${current}，請切回 ${base} 再合併`)
+    try {
+      // 刻意不加 --no-verify：repo 的 git hooks 照常執行
+      await git(repo, 'merge', '--no-ff', '-m', `Merge ${branch}`, '--end-of-options', branch)
+    } catch (e) {
+      // 衝突時還原成合併前的狀態，錯誤訊息保留 git 的 CONFLICT 輸出
+      await git(repo, 'merge', '--abort').catch(() => undefined)
+      const detail = e instanceof CommandError ? e.stderr : String(e)
+      throw new CommandError(
+        `git merge ${branch}`,
+        `${detail}\n已中止合併，原 repo 維持合併前的狀態`
+      )
+    }
   }
 
   async removeWorktree(repo: string, wt: string, branch: string) {
-    await git(repo, 'worktree', 'remove', '--force', wt).catch(() => git(repo, 'worktree', 'prune'))
-    await git(repo, 'branch', '-D', branch)
+    await assertRefName(repo, branch)
+    try {
+      await git(repo, 'worktree', 'remove', '--force', '--end-of-options', wt)
+    } catch (e) {
+      // 目錄已被手動刪掉時 remove 會失敗，prune 掉紀錄即可；目錄還在就是真的失敗
+      await git(repo, 'worktree', 'prune').catch(() => undefined)
+      if (existsSync(wt)) throw e
+    }
+    try {
+      await git(repo, 'branch', '-D', '--end-of-options', branch)
+    } catch (e) {
+      const exists = await git(repo, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`)
+        .then(() => true)
+        .catch(() => false)
+      if (exists) throw e
+    }
   }
 
-  async pushAndOpenPr(wt: string, branch: string, base: string, title: string, body: string): Promise<string> {
-    await git(wt, 'push', '-u', 'origin', branch)
-    const out = await runCommand('gh', ['pr', 'create', '--base', base, '--head', branch, '--title', title, '--body', body], wt)
+  async pushAndOpenPr(
+    wt: string,
+    branch: string,
+    base: string,
+    title: string,
+    body: string
+  ): Promise<string> {
+    await assertRefName(wt, branch)
+    await assertRefName(wt, base)
+    await git(wt, 'push', '-u', '--end-of-options', 'origin', branch)
+    const out = await runCommand(
+      'gh',
+      [
+        'pr',
+        'create',
+        `--base=${base}`,
+        `--head=${branch}`,
+        `--title=${title}`,
+        '--body-file',
+        '-'
+      ],
+      wt,
+      { input: body }
+    )
     return out.trim().split('\n').pop() ?? ''
   }
 }
 
-export type GitLike = Pick<GitService,
-  'isRepo' | 'repoRoot' | 'branches' | 'currentBranch' | 'createWorktree' | 'commitAll' |
-  'diff' | 'diffStats' | 'workingStats' | 'merge' | 'removeWorktree' | 'pushAndOpenPr'>
+export type GitLike = Pick<
+  GitService,
+  | 'isRepo'
+  | 'repoRoot'
+  | 'branches'
+  | 'currentBranch'
+  | 'createWorktree'
+  | 'commitAll'
+  | 'diff'
+  | 'diffStats'
+  | 'workingStats'
+  | 'merge'
+  | 'removeWorktree'
+  | 'pushAndOpenPr'
+>
 ```
 
-**Step 4: 確認通過** — `npx vitest run tests/main/gitService.test.ts` → 6 passed
+**Step 4: 確認通過** — `npx vitest run tests/main/gitService.test.ts` → 16 passed
 
 **Step 5: Commit**
 
