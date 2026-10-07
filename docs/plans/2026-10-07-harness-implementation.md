@@ -12558,83 +12558,492 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `src/renderer/src/screens/SpecScreen.tsx`
+- Modify: `src/renderer/src/components/Markdown.tsx`（加上 `InlineCode`）
 - Modify: `src/renderer/src/screens/TaskScreen.tsx`
+- Test: `tests/renderer/SpecScreen.test.tsx`
 
-**Step 1: SpecScreen.tsx（對照 `docs/design/B3-Spec.dc.html`）**
+規格頁依 `docs/design/B3-Spec.dc.html`：左邊是規格（摘要、包含／不包含、決策與來源、實作步驟、驗收條件），底部固定核准列，右邊是釐清紀錄。
+
+- 核准與要求修改共用一個 `usePending`：其中一個送出中兩個都停用，連點只送一次。修改意見用 `<form>`，Enter 也能送出；送出成功才清空（送出期間又改了內容就保留），失敗時保留內容並由 `act` 顯示 toast。
+- Claude 還在這一輪（`isBusy`）時停用兩個按鈕，並在核准列用 `LiveStatus` 說明原因。
+- 多個版本時「v2」換成版本下拉選單；選擇存成「選擇 + 當時的最新版本」，Claude 提出新版時自動回到最新版（render 時推導，不在 effect 裡 setState）。看舊版本時停用核准與要求修改（兩者都是針對最新版），並提供「回到 vN」。
+- 已核准後回看（目前階段是實作或報告）時標示「已核准的規格」，沒有核准列。
+- 規格條目裡的反引號用 `InlineCode` 顯示成 `<code>`（設計稿的決策與步驟都有程式碼片段）。決策列表是 `<ul aria-labelledby>`，邊框用 `chip` token。
+- 釐清紀錄：已回答的問題（含反問次數）與分岔；帶回的分岔指向規格中引用它的決策（「→ D2」）。設計稿的「回到對話繼續補充」改成「查看釐清對話」：規格待核准時釐清畫面只能回看，要補充需求請用「要求修改」。
+
+**Step 1: 寫失敗測試**
 
 ```tsx
-import { type ReactNode, useState } from 'react'
-import type { DecisionSource, Task } from '@shared/types'
+// tests/renderer/SpecScreen.test.tsx
+import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { beforeEach, expect, test, vi } from 'vitest'
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(async () => undefined),
+  onEvent: vi.fn(() => () => {}),
+  errorText: String
+}))
+import { call } from '@renderer/api'
+import { SpecScreen } from '@renderer/screens/SpecScreen'
+import { TaskScreen } from '@renderer/screens/TaskScreen'
+import { resetStoreInternals, useStore } from '@renderer/store'
+import type { Spec, Task } from '@shared/types'
+import { holdNextCall } from '../fixtures/hold'
+import { makeTask } from '../fixtures/task'
+
+const spec = (version: number, over: Partial<Spec> = {}): Spec => ({
+  version,
+  title: '以帳號 + IP 計數的登入失敗鎖定',
+  summary: '同一帳號從同一 IP 連續登入失敗 5 次，就鎖定 15 分鐘。',
+  inScope: ['失敗計數與鎖定的中介層'],
+  outOfScope: ['後台手動解鎖介面'],
+  decisions: [
+    { id: 'd1', text: '計數單位為帳號 + IP 組合', source: { type: 'question', ref: 'q1' } },
+    { id: 'd2', text: '計數存在 `lockout:{userId}`', source: { type: 'branch', ref: 'b1' } },
+    { id: 'd3', text: '錯誤訊息放進 i18n', source: { type: 'implementation', ref: '' } }
+  ],
+  steps: ['新增 `src/auth/lockout.ts`', '在 login.ts 掛上 lockoutGuard'],
+  acceptance: ['第 6 次請求回 429'],
+  createdAt: '',
+  ...over
+})
+
+const specTask = (over: Partial<Task> = {}) =>
+  makeTask({
+    status: 'spec_review',
+    specs: [spec(1)],
+    questions: [
+      {
+        id: 'q1',
+        text: '計數單位',
+        options: [{ id: 'combo', label: '帳號 + IP 組合' }],
+        allowFreeText: true,
+        status: 'answered',
+        answer: { optionId: 'combo', text: '共用 IP 也分開算' },
+        followups: [
+          { role: 'user', text: '共用 IP 呢？' },
+          { role: 'assistant', text: '會分開算。' }
+        ],
+        askedAt: ''
+      },
+      {
+        id: 'q2',
+        text: '還沒回答的問題',
+        options: [],
+        allowFreeText: true,
+        status: 'open',
+        followups: [],
+        askedAt: ''
+      }
+    ],
+    branches: [
+      {
+        id: 'b1',
+        title: '計數存放位置',
+        status: 'concluded',
+        running: false,
+        conclusion: { decision: '用既有 Redis', rationale: '', deferred: [] },
+        createdAt: ''
+      },
+      { id: 'b2', title: '通知使用者', status: 'open', running: false, createdAt: '' }
+    ],
+    ...over
+  })
+
+const renderSpec = (task: Task, readOnly = false) =>
+  render(<SpecScreen task={task} nav={null} readOnly={readOnly} onOpenStage={() => {}} />)
+
+beforeEach(() => {
+  vi.mocked(call).mockReset()
+  vi.mocked(call).mockResolvedValue(undefined)
+  resetStoreInternals()
+  useStore.setState({ timelines: {}, toast: undefined })
+})
+
+test('顯示規格內容與每個決策的來源', () => {
+  renderSpec(specTask())
+  expect(
+    screen.getByRole('heading', { name: '以帳號 + IP 計數的登入失敗鎖定' })
+  ).toBeInTheDocument()
+  expect(screen.getByText(/規格草稿/)).toHaveTextContent('根據 1 個問題、1 個分岔整理')
+  expect(screen.getByText('• 失敗計數與鎖定的中介層')).toBeInTheDocument()
+  expect(screen.getByText('• 後台手動解鎖介面')).toBeInTheDocument()
+  const decisions = screen.getByRole('list', { name: '決策' })
+  const rows = within(decisions).getAllByRole('listitem')
+  expect(rows.map((r) => r.textContent)).toEqual([
+    'D1計數單位為帳號 + IP 組合問題 1',
+    'D2計數存在 lockout:{userId}分岔',
+    'D3錯誤訊息放進 i18n實作'
+  ])
+  // 反引號包住的內容顯示成程式碼
+  expect(within(rows[1]).getByText('lockout:{userId}').tagName).toBe('CODE')
+  expect(screen.getByText('src/auth/lockout.ts').tagName).toBe('CODE')
+  expect(screen.getByText('• 第 6 次請求回 429')).toBeInTheDocument()
+})
+
+test('釐清紀錄列出已回答的問題與分岔', () => {
+  renderSpec(specTask())
+  const aside = screen.getByRole('complementary', { name: '釐清紀錄' })
+  expect(within(aside).getByText('問題 1 · 計數單位')).toBeInTheDocument()
+  expect(within(aside).getByText('帳號 + IP 組合；共用 IP 也分開算')).toBeInTheDocument()
+  expect(within(aside).getByText('含 1 次反問')).toBeInTheDocument()
+  expect(within(aside).queryByText(/還沒回答的問題/)).not.toBeInTheDocument()
+  // 帶回的分岔指向規格裡引用它的決策
+  expect(within(aside).getByText('分岔 · 計數存放位置')).toBeInTheDocument()
+  expect(within(aside).getByText('→ D2')).toBeInTheDocument()
+  expect(within(aside).getByText('尚未帶回')).toBeInTheDocument()
+})
+
+test('核准規格；進行中停用按鈕，連點只送一次', async () => {
+  const release = holdNextCall(vi.mocked(call))
+  renderSpec(specTask())
+  const approve = screen.getByRole('button', { name: '核准並開始實作' })
+  await userEvent.dblClick(approve)
+  expect(call).toHaveBeenCalledTimes(1)
+  expect(call).toHaveBeenCalledWith('spec:approve', 't1')
+  expect(approve).toBeDisabled()
+  expect(screen.getByRole('button', { name: '要求修改' })).toBeDisabled()
+  await release()
+  expect(approve).toBeEnabled()
+})
+
+test('要求修改：沒有內容時停用；送出後清空，Enter 也能送出', async () => {
+  renderSpec(specTask())
+  const input = screen.getByRole('textbox', { name: '修改意見' })
+  const button = screen.getByRole('button', { name: '要求修改' })
+  expect(button).toBeDisabled()
+  await userEvent.type(input, '   ')
+  expect(button).toBeDisabled()
+  await userEvent.clear(input)
+  await userEvent.type(input, '上限改成 10 次')
+  await userEvent.click(button)
+  expect(call).toHaveBeenCalledWith('spec:requestChanges', 't1', '上限改成 10 次')
+  expect(input).toHaveValue('')
+  await userEvent.type(input, '鎖定改 30 分鐘{Enter}')
+  expect(call).toHaveBeenLastCalledWith('spec:requestChanges', 't1', '鎖定改 30 分鐘')
+})
+
+test('要求修改失敗時保留內容並顯示錯誤', async () => {
+  vi.mocked(call).mockRejectedValueOnce(new Error('任務正在收尾，請稍候'))
+  renderSpec(specTask())
+  const input = screen.getByRole('textbox', { name: '修改意見' })
+  await userEvent.type(input, '上限改成 10 次{Enter}')
+  expect(input).toHaveValue('上限改成 10 次')
+  expect(useStore.getState().toast?.text).toContain('任務正在收尾')
+})
+
+test('Claude 還在執行時不能核准或要求修改，並說明原因', async () => {
+  renderSpec(specTask({ runState: 'running' }))
+  await userEvent.type(screen.getByRole('textbox', { name: '修改意見' }), '改')
+  expect(screen.getByRole('button', { name: '要求修改' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '核准並開始實作' })).toBeDisabled()
+  expect(screen.getByRole('status')).toHaveTextContent('Claude 正在處理')
+})
+
+test('可切換版本；看舊版本時不能核准；Claude 提出新版時回到最新版', async () => {
+  const task = specTask({ specs: [spec(1, { title: '第一版' }), spec(2, { title: '第二版' })] })
+  const { rerender } = renderSpec(task)
+  expect(screen.getByRole('heading', { name: '第二版' })).toBeInTheDocument()
+  await userEvent.selectOptions(screen.getByRole('combobox', { name: '規格版本' }), 'v1')
+  expect(screen.getByRole('heading', { name: '第一版' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '核准並開始實作' })).toBeDisabled()
+  expect(screen.getByText(/正在看 v1（舊版本）/)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '回到 v2' }))
+  expect(screen.getByRole('heading', { name: '第二版' })).toBeInTheDocument()
+
+  await userEvent.selectOptions(screen.getByRole('combobox', { name: '規格版本' }), 'v1')
+  rerender(
+    <SpecScreen
+      task={{ ...task, specs: [...task.specs, spec(3, { title: '第三版' })] }}
+      nav={null}
+      readOnly={false}
+      onOpenStage={() => {}}
+    />
+  )
+  expect(screen.getByRole('heading', { name: '第三版' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '核准並開始實作' })).toBeEnabled()
+})
+
+test('唯讀（已核准後回看）時沒有核准列，標示為已核准的規格', () => {
+  renderSpec(specTask({ status: 'implementing' }), true)
+  expect(screen.queryByRole('button', { name: '核准並開始實作' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('textbox', { name: '修改意見' })).not.toBeInTheDocument()
+  expect(screen.getByText(/已核准的規格/)).toBeInTheDocument()
+})
+
+test('從釐清紀錄回到釐清對話', async () => {
+  const onOpenStage = vi.fn()
+  render(<SpecScreen task={specTask()} nav={null} readOnly={false} onOpenStage={onOpenStage} />)
+  await userEvent.click(screen.getByRole('button', { name: '查看釐清對話' }))
+  expect(onOpenStage).toHaveBeenCalledWith('clarify')
+})
+
+test('TaskScreen：規格待核准時顯示規格畫面', () => {
+  useStore.setState({ tasks: { t1: specTask() } })
+  render(<TaskScreen taskId="t1" />)
+  expect(
+    screen.getByRole('heading', { name: '以帳號 + IP 計數的登入失敗鎖定' })
+  ).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '核准並開始實作' })).toBeInTheDocument()
+})
+
+test('TaskScreen：已丟棄的任務停在規格時唯讀', () => {
+  useStore.setState({ tasks: { t1: specTask({ status: 'discarded' }) } })
+  render(<TaskScreen taskId="t1" />)
+  expect(
+    screen.getByRole('heading', { name: '以帳號 + IP 計數的登入失敗鎖定' })
+  ).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '核准並開始實作' })).not.toBeInTheDocument()
+  expect(screen.getByText(/規格草稿/)).toBeInTheDocument()
+})
+```
+
+**Step 2: 確認失敗** — `npx vitest run tests/renderer/SpecScreen.test.tsx` → FAIL（模組不存在）
+
+**Step 3: Markdown.tsx 加上 InlineCode**
+
+```tsx
+/** 單行文字（規格條目、步驟標題）：只把反引號包住的部分顯示成程式碼，其餘照原文 */
+export function InlineCode({ text }: { text: string }) {
+  return (
+    <>
+      {text
+        .split(/(`[^`\n]+`)/)
+        .map((part, i) => (i % 2 === 1 ? <code key={i}>{part.slice(1, -1)}</code> : part || null))}
+    </>
+  )
+}
+```
+
+**Step 4: SpecScreen.tsx（對照 `docs/design/B3-Spec.dc.html`）**
+
+```tsx
+// src/renderer/src/screens/SpecScreen.tsx
+import { type FormEvent, type ReactNode, useId, useState } from 'react'
+import type { DecisionSource, Spec, Task } from '@shared/types'
 import { call } from '../api'
-import { Button, cx, inputClass, Pill } from '../components/ui'
+import { InlineCode } from '../components/Markdown'
+import { Button, cx, inputClass, LiveStatus, Pill } from '../components/ui'
+import { currentStage, isBusy } from '../lib/stage'
+import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
 
 function SourcePill({ task, source }: { task: Task; source: DecisionSource }) {
   if (source.type === 'branch') return <Pill tone="decision">分岔</Pill>
   if (source.type === 'question') {
     const i = task.questions.findIndex((q) => q.id === source.ref)
-    return <Pill>問題 {i >= 0 ? i + 1 : source.ref}</Pill>
+    return <Pill>{i >= 0 ? `問題 ${i + 1}` : '問題'}</Pill>
   }
   return <Pill tone="muted">實作</Pill>
 }
 
-export function SpecScreen({ task, nav, readOnly }: { task: Task; nav: ReactNode; readOnly: boolean }) {
+/** 右側的釐清紀錄：已回答的問題與分岔（分岔指向規格裡引用它的決策） */
+function ClarifyLog({
+  task,
+  spec,
+  onOpenClarify
+}: {
+  task: Task
+  spec: Spec
+  onOpenClarify: () => void
+}) {
+  const answered = task.questions.filter((q) => q.status === 'answered')
+  return (
+    <aside
+      aria-label="釐清紀錄"
+      className="flex w-[320px] flex-none flex-col gap-3 overflow-y-auto rounded-2xl bg-surface px-5 py-[18px] shadow-card"
+    >
+      <span className="text-[15px] font-bold">釐清紀錄</span>
+      <div className="flex flex-col gap-2.5 text-[13px]">
+        {answered.length === 0 && task.branches.length === 0 && (
+          <span className="text-muted">沒有回答過的問題或分岔。</span>
+        )}
+        {answered.map((q) => {
+          const label = q.answer?.optionId
+            ? q.options.find((o) => o.id === q.answer?.optionId)?.label
+            : undefined
+          const asked = q.followups.filter((f) => f.role === 'user').length
+          return (
+            <div key={q.id} className="flex flex-col gap-0.5 rounded-xl bg-fill-2 p-3">
+              <span className="text-muted">
+                問題 {task.questions.indexOf(q) + 1} · {q.text}
+              </span>
+              <span className="font-medium">
+                {[label, q.answer?.text].filter(Boolean).join('；')}
+              </span>
+              {asked > 0 && <span className="text-xs text-muted">含 {asked} 次反問</span>}
+            </div>
+          )
+        })}
+        {task.branches.map((b) => {
+          const d = spec.decisions.find((x) => x.source.type === 'branch' && x.source.ref === b.id)
+          return (
+            <div key={b.id} className="flex flex-col gap-0.5 rounded-xl bg-decision p-3">
+              <span className="text-decision-ink">分岔 · {b.title}</span>
+              <span>
+                {d
+                  ? `→ ${d.id.toUpperCase()}`
+                  : b.conclusion
+                    ? `→ ${b.conclusion.decision}`
+                    : '尚未帶回'}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+      {/* 規格待核准時釐清對話只能回看；要補充需求請用「要求修改」 */}
+      <button
+        type="button"
+        onClick={onOpenClarify}
+        className="mt-1 cursor-pointer self-start text-[13px] text-brand hover:text-brand-hover"
+      >
+        查看釐清對話
+      </button>
+    </aside>
+  )
+}
+
+export function SpecScreen({
+  task,
+  nav,
+  readOnly,
+  onOpenStage
+}: {
+  task: Task
+  nav: ReactNode
+  readOnly: boolean
+  onOpenStage: (s: 'clarify') => void
+}) {
   const act = useStore((s) => s.act)
+  const decisionsId = useId()
   // 使用者選的版本只在「最新版本」沒變時有效；Claude 提出新版規格時自動顯示最新版
   const latest = task.specs.length
   const [picked, setPicked] = useState<{ latest: number; version: number }>()
   const version = picked?.latest === latest ? picked.version : latest
   const [feedback, setFeedback] = useState('')
+  // 核准與要求修改共用：其中一個送出中時兩個都停用
+  const [pending, run] = usePending()
   const spec = task.specs[version - 1] ?? task.specs.at(-1)
-  if (!spec) return <main className="flex-1 rounded-2xl bg-surface p-7 shadow-card">{nav}還沒有規格。</main>
-  const answered = task.questions.filter((q) => q.status === 'answered')
+
+  const header = (
+    <div className="flex flex-wrap items-center gap-4 px-7 py-[18px]">
+      <span className="text-lg font-bold">{task.title}</span>
+      {nav}
+    </div>
+  )
+  if (!spec)
+    return (
+      <main className="relative flex min-w-0 flex-1 flex-col rounded-2xl bg-surface shadow-card">
+        {header}
+        <div className="px-7 text-muted">還沒有規格。</div>
+      </main>
+    )
+
+  const answered = task.questions.filter((q) => q.status === 'answered').length
+  const concluded = task.branches.filter((b) => b.status === 'concluded').length
+  const stage = currentStage(task)
+  const approved = stage === 'implement' || stage === 'report'
+  const viewingOld = spec.version !== latest
+  // Claude 還在這一輪（例如剛提出規格、還沒結束）：等它停下來再核准或要求修改
+  const busy = isBusy(task)
+  const blocked = pending || busy || viewingOld
+
+  const approve = () => run(() => act(() => call('spec:approve', task.id)))
+  const requestChanges = (e: FormEvent) => {
+    e.preventDefault()
+    const text = feedback.trim()
+    if (!text || blocked) return
+    void run(async () => {
+      const ok = await act(async () => {
+        await call('spec:requestChanges', task.id, text)
+        return true
+      })
+      // 送出期間又改了內容就保留
+      if (ok) setFeedback((cur) => (cur.trim() === text ? '' : cur))
+    })
+  }
 
   return (
     <>
-      <main className="flex min-w-0 flex-1 flex-col rounded-2xl bg-surface shadow-card">
-        <div className="flex flex-wrap items-center gap-4 px-7 py-[18px]">
-          <span className="text-lg font-bold">{task.title}</span>
-          {nav}
-        </div>
+      <main className="relative flex min-w-0 flex-1 flex-col rounded-2xl bg-surface shadow-card">
+        {header}
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-7 pt-2 pb-6">
           <div className="mx-auto flex w-full max-w-[800px] flex-col gap-[22px]">
             <div className="flex flex-col gap-1.5">
-              <span className="flex items-center gap-2 text-xs font-medium text-brand">
-                規格草稿
+              <span className="text-xs font-medium text-brand">
+                {approved && !viewingOld ? '已核准的規格' : '規格草稿'}{' '}
                 {task.specs.length > 1 ? (
-                  <select aria-label="規格版本" value={spec.version} onChange={(e) => setPicked({ latest, version: Number(e.target.value) })} className="rounded-md bg-fill px-1.5 py-0.5">
-                    {task.specs.map((s) => <option key={s.version} value={s.version}>v{s.version}</option>)}
+                  <select
+                    aria-label="規格版本"
+                    value={spec.version}
+                    onChange={(e) => setPicked({ latest, version: Number(e.target.value) })}
+                    className="cursor-pointer rounded-md bg-fill px-1.5 py-0.5 outline-none focus-visible:shadow-[0_0_0_2px_var(--color-brand)]"
+                  >
+                    {task.specs.map((s) => (
+                      <option key={s.version} value={s.version}>
+                        v{s.version}
+                      </option>
+                    ))}
                   </select>
-                ) : ` v${spec.version}`}
-                · 根據 {answered.length} 個問題、{task.branches.length} 個分岔整理
+                ) : (
+                  `v${spec.version}`
+                )}{' '}
+                · 根據 {answered} 個問題、{concluded} 個分岔整理
               </span>
               <h1 className="m-0 text-2xl font-bold">{spec.title}</h1>
-              <span className="text-ink-2">{spec.summary}</span>
+              <span className="text-ink-2">
+                <InlineCode text={spec.summary} />
+              </span>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
               <div className="flex flex-col gap-1.5 rounded-[14px] bg-brand-tint p-4">
                 <span className="text-[13px] font-bold text-brand-ink">包含</span>
-                {spec.inScope.map((s, i) => <span key={i} className="text-[13px]">• {s}</span>)}
+                {spec.inScope.map((s, i) => (
+                  <span key={i} className="text-[13px]">
+                    • <InlineCode text={s} />
+                  </span>
+                ))}
               </div>
               <div className="flex flex-col gap-1.5 rounded-[14px] bg-fill-2 p-4">
                 <span className="text-[13px] font-bold text-ink-2">不包含</span>
-                {spec.outOfScope.length ? spec.outOfScope.map((s, i) => <span key={i} className="text-[13px] text-ink-2">• {s}</span>) : <span className="text-[13px] text-muted">—</span>}
+                {spec.outOfScope.length ? (
+                  spec.outOfScope.map((s, i) => (
+                    <span key={i} className="text-[13px] text-ink-2">
+                      • <InlineCode text={s} />
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-[13px] text-muted">—</span>
+                )}
               </div>
             </div>
 
             {spec.decisions.length > 0 && (
               <div className="flex flex-col gap-2.5">
-                <span className="text-[15px] font-bold">決策</span>
-                <div className="flex flex-col overflow-hidden rounded-[14px] shadow-[0_0_0_1px_#e5e8ed]">
+                <span id={decisionsId} className="text-[15px] font-bold">
+                  決策
+                </span>
+                <ul
+                  aria-labelledby={decisionsId}
+                  className="m-0 flex list-none flex-col overflow-hidden rounded-[14px] p-0 shadow-[0_0_0_1px_var(--color-chip)]"
+                >
                   {spec.decisions.map((d, i) => (
-                    <div key={d.id} className={cx('grid grid-cols-[44px_minmax(0,1fr)_auto] items-center gap-2 px-3.5 py-3', i < spec.decisions.length - 1 && 'border-b border-line-soft')}>
+                    <li
+                      key={d.id}
+                      className={cx(
+                        'grid grid-cols-[44px_minmax(0,1fr)_auto] items-center gap-2 px-3.5 py-3',
+                        i < spec.decisions.length - 1 && 'border-b border-line-soft'
+                      )}
+                    >
                       <span className="font-mono text-xs text-muted">{d.id.toUpperCase()}</span>
-                      <span>{d.text}</span>
+                      <span>
+                        <InlineCode text={d.text} />
+                      </span>
                       <SourcePill task={task} source={d.source} />
-                    </div>
+                    </li>
                   ))}
-                </div>
+                </ul>
               </div>
             )}
 
@@ -12643,7 +13052,12 @@ export function SpecScreen({ task, nav, readOnly }: { task: Task; nav: ReactNode
               <ol className="m-0 flex list-none flex-col gap-2 p-0">
                 {spec.steps.map((s, i) => (
                   <li key={i} className="flex gap-3">
-                    <span className="flex size-6 flex-none items-center justify-center rounded-full bg-fill text-xs">{i + 1}</span><span>{s}</span>
+                    <span className="flex size-6 flex-none items-center justify-center rounded-full bg-fill text-xs">
+                      {i + 1}
+                    </span>
+                    <span>
+                      <InlineCode text={s} />
+                    </span>
                   </li>
                 ))}
               </ol>
@@ -12651,66 +13065,119 @@ export function SpecScreen({ task, nav, readOnly }: { task: Task; nav: ReactNode
 
             <div className="flex flex-col gap-2">
               <span className="text-[15px] font-bold">驗收條件</span>
-              {spec.acceptance.map((a, i) => <span key={i} className="text-[13px]">• {a}</span>)}
+              {spec.acceptance.map((a, i) => (
+                <span key={i} className="text-[13px]">
+                  • <InlineCode text={a} />
+                </span>
+              ))}
             </div>
           </div>
         </div>
 
         {!readOnly && task.status === 'spec_review' && (
           <div className="rounded-b-2xl border-t border-line-soft bg-surface px-7 py-4">
-            <div className="mx-auto flex max-w-[800px] flex-wrap items-center gap-2.5">
-              <label className="flex min-w-[260px] flex-1">
+            <form
+              onSubmit={requestChanges}
+              className="mx-auto flex max-w-[800px] flex-wrap items-center gap-2.5"
+            >
+              <label className="flex flex-[1_1_260px]">
                 <span className="sr-only">修改意見</span>
-                <input value={feedback} onChange={(e) => setFeedback(e.target.value)} placeholder="哪裡要改？例如：上限改成 10 次" className={cx(inputClass, 'h-11 flex-1')} />
+                <input
+                  value={feedback}
+                  onChange={(e) => setFeedback(e.target.value)}
+                  placeholder="哪裡要改？例如：上限改成 10 次"
+                  className={cx(inputClass, 'h-11 flex-1')}
+                />
               </label>
-              <Button disabled={!feedback.trim() || task.runState === 'running'} onClick={() => void act(async () => { await call('spec:requestChanges', task.id, feedback); setFeedback('') })}>要求修改</Button>
-              <Button variant="primary" disabled={task.runState === 'running'} onClick={() => void act(() => call('spec:approve', task.id))}>核准並開始實作</Button>
-            </div>
+              <Button type="submit" disabled={blocked || !feedback.trim()}>
+                要求修改
+              </Button>
+              <Button
+                variant="primary"
+                className="px-5"
+                disabled={blocked}
+                onClick={() => void approve()}
+              >
+                核准並開始實作
+              </Button>
+            </form>
             <div className="mx-auto mt-2 max-w-[800px] text-xs text-muted">
-              核准後 Claude 會在 worktree <code>{task.worktreePath}</code>（分支 <code>{task.branch}</code>）中修改程式碼。
+              {viewingOld ? (
+                <>
+                  正在看 v{spec.version}（舊版本），核准與修改意見都是針對最新的 v{latest}。{' '}
+                  <button
+                    type="button"
+                    onClick={() => setPicked(undefined)}
+                    className="cursor-pointer text-brand hover:text-brand-hover"
+                  >
+                    回到 v{latest}
+                  </button>
+                </>
+              ) : (
+                <>
+                  核准後 Claude 會在 worktree <code className="break-all">{task.worktreePath}</code>
+                  （分支 <code>{task.branch}</code>）中修改程式碼。
+                </>
+              )}
             </div>
+            <LiveStatus
+              text={busy && 'Claude 正在處理，這一輪結束後就能核准或要求修改'}
+              className={cx('mx-auto max-w-[800px] text-xs', busy && 'mt-2')}
+            />
           </div>
         )}
       </main>
 
-      <aside aria-label="釐清紀錄" className="flex w-[320px] flex-none flex-col gap-3 overflow-y-auto rounded-2xl bg-surface px-5 py-[18px] shadow-card">
-        <span className="text-[15px] font-bold">釐清紀錄</span>
-        <div className="flex flex-col gap-2.5 text-[13px]">
-          {answered.map((q) => {
-            const label = q.answer?.optionId ? q.options.find((o) => o.id === q.answer?.optionId)?.label : undefined
-            return (
-              <div key={q.id} className="flex flex-col gap-0.5 rounded-xl bg-fill-2 p-3">
-                <span className="text-muted">問題 {task.questions.indexOf(q) + 1} · {q.text}</span>
-                <span className="font-medium">{[label, q.answer?.text].filter(Boolean).join('；')}</span>
-                {q.followups.some((f) => f.role === 'user') && <span className="text-xs text-muted">含 {q.followups.filter((f) => f.role === 'user').length} 次反問</span>}
-              </div>
-            )
-          })}
-          {task.branches.map((b) => (
-            <div key={b.id} className="flex flex-col gap-0.5 rounded-xl bg-decision p-3">
-              <span className="text-decision-ink">分岔 · {b.title}</span>
-              <span>{b.conclusion ? `→ ${b.conclusion.decision}` : '尚未帶回'}</span>
-            </div>
-          ))}
-        </div>
-      </aside>
+      <ClarifyLog task={task} spec={spec} onOpenClarify={() => onOpenStage('clarify')} />
     </>
   )
 }
 ```
 
-**Step 2: TaskScreen 加入**
+**Step 5: TaskScreen 加入規格頁**
 
 ```tsx
-  if (shown === 'spec') return <SpecScreen task={task} nav={nav} readOnly={currentStage(task) !== 'spec'} />
+// src/renderer/src/screens/TaskScreen.tsx
+import { useState } from 'react'
+import { StageNav } from '../components/StageNav'
+import { currentStage, type Stage } from '../lib/stage'
+import { useStore } from '../store'
+import { ClarifyScreen } from './ClarifyScreen'
+import { SpecScreen } from './SpecScreen'
+
+export function TaskScreen({ taskId }: { taskId: string }) {
+  const task = useStore((s) => s.tasks[taskId])
+  // 使用者回看的階段，只對選它時的任務與狀態有效；換任務或狀態前進就回到目前階段
+  const [picked, setPicked] = useState<{ key: string; stage: Stage } | null>(null)
+  if (!task) return null
+  const key = `${taskId}:${task.status}`
+  const current = currentStage(task)
+  const shown = picked?.key === key ? picked.stage : current
+  const openStage = (s: Stage) => setPicked(s === current ? null : { key, stage: s })
+  const nav = <StageNav task={task} shown={shown} onSelect={openStage} />
+  // 已丟棄的任務停在哪個階段都只能看
+  const ended = task.status === 'discarded' || task.status === 'done'
+  const readOnly = ended || shown !== current
+  switch (shown) {
+    case 'clarify':
+      return <ClarifyScreen task={task} nav={nav} readOnly={readOnly} onOpenStage={openStage} />
+    case 'spec':
+      return <SpecScreen task={task} nav={nav} readOnly={readOnly} onOpenStage={openStage} />
+    default:
+      // Task 32–33 補上實作與報告
+      return <ClarifyScreen task={task} nav={nav} readOnly onOpenStage={openStage} />
+  }
+}
 ```
 
-**Step 3: 驗證** — `npm run typecheck` PASS；手動：在釐清中回答到 Claude 提出規格，畫面自動切到規格頁，可要求修改與核准。
+**Step 6: 確認通過** — `npx vitest run tests/renderer` 全部通過；`npm run typecheck`、`npm run lint` PASS
 
-**Step 4: Commit**
+**Step 7: 手動驗證** — 在釐清中回答到 Claude 提出規格，畫面自動切到規格頁，可要求修改（回到釐清）與核准（進入實作）。
+
+**Step 8: Commit**
 
 ```bash
-git add src/renderer/src
+git add src/renderer/src tests/renderer/SpecScreen.test.tsx docs/plans
 git commit -m "feat(ui): add spec review screen
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"

@@ -35,3 +35,14 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
     </div>
   )
 })
+
+/** 單行文字（規格條目、步驟標題）：只把反引號包住的部分顯示成程式碼，其餘照原文 */
+export function InlineCode({ text }: { text: string }) {
+  return (
+    <>
+      {text
+        .split(/(`[^`\n]+`)/)
+        .map((part, i) => (i % 2 === 1 ? <code key={i}>{part.slice(1, -1)}</code> : part || null))}
+    </>
+  )
+}

@@ -4,6 +4,7 @@ import { StageNav } from '../components/StageNav'
 import { currentStage, type Stage } from '../lib/stage'
 import { useStore } from '../store'
 import { ClarifyScreen } from './ClarifyScreen'
+import { SpecScreen } from './SpecScreen'
 
 export function TaskScreen({ taskId }: { taskId: string }) {
   const task = useStore((s) => s.tasks[taskId])
@@ -17,15 +18,14 @@ export function TaskScreen({ taskId }: { taskId: string }) {
   const nav = <StageNav task={task} shown={shown} onSelect={openStage} />
   // 已丟棄的任務停在哪個階段都只能看
   const ended = task.status === 'discarded' || task.status === 'done'
-  if (shown === 'clarify')
-    return (
-      <ClarifyScreen
-        task={task}
-        nav={nav}
-        readOnly={ended || current !== 'clarify'}
-        onOpenStage={openStage}
-      />
-    )
-  // Task 31–33 補上其他階段
-  return <ClarifyScreen task={task} nav={nav} readOnly onOpenStage={openStage} />
+  const readOnly = ended || shown !== current
+  switch (shown) {
+    case 'clarify':
+      return <ClarifyScreen task={task} nav={nav} readOnly={readOnly} onOpenStage={openStage} />
+    case 'spec':
+      return <SpecScreen task={task} nav={nav} readOnly={readOnly} onOpenStage={openStage} />
+    default:
+      // Task 32–33 補上實作與報告
+      return <ClarifyScreen task={task} nav={nav} readOnly onOpenStage={openStage} />
+  }
 }
