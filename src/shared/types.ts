@@ -1,0 +1,202 @@
+import type { ReportInput } from './report'
+
+export type ModelId = 'claude-opus-5-5' | 'claude-sonnet-5-5'
+export const MODELS: { id: ModelId; label: string; hint: string }[] = [
+  { id: 'claude-opus-5-5', label: 'Opus 5.5', hint: '預設，品質最好' },
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', hint: '較快，省訂閱額度' }
+]
+
+export type TaskStatus =
+  'clarifying' | 'spec_review' | 'implementing' | 'reviewing' | 'done' | 'discarded'
+/** 主線的執行狀態（分岔另有 Branch.running） */
+export type RunState =
+  'idle' | 'running' | 'waiting_permission' | 'finalizing' | 'interrupted' | 'error'
+export type Channel = 'main' | `branch:${string}`
+
+export interface Repo {
+  id: string
+  name: string
+  path: string
+  addedAt: string
+}
+
+export interface QuestionOption {
+  id: string
+  label: string
+  description?: string
+}
+export interface QuestionFollowup {
+  role: 'user' | 'assistant'
+  text: string
+}
+export interface Question {
+  /** Claude 給的 question_id，同一張卡片更新時沿用 */
+  id: string
+  text: string
+  options: QuestionOption[]
+  recommendedOptionId?: string
+  allowFreeText: boolean
+  context?: string
+  status: 'open' | 'answered'
+  answer?: { optionId?: string; text?: string }
+  followups: QuestionFollowup[]
+  askedAt: string
+}
+
+export interface DecisionSource {
+  type: 'question' | 'branch' | 'implementation'
+  ref: string
+}
+export interface Decision {
+  id: string
+  text: string
+  rationale?: string
+  deferred?: string[]
+  source: DecisionSource
+}
+
+export interface Spec {
+  version: number
+  title: string
+  summary: string
+  inScope: string[]
+  outOfScope: string[]
+  decisions: { id: string; text: string; source: DecisionSource }[]
+  steps: string[]
+  acceptance: string[]
+  createdAt: string
+}
+
+export interface PlanStep {
+  id: string
+  title: string
+  status: 'pending' | 'running' | 'done' | 'blocked'
+}
+
+export interface BranchConclusion {
+  decision: string
+  rationale: string
+  deferred: string[]
+}
+export interface Branch {
+  id: string
+  title: string
+  fromQuestionId?: string
+  sessionId?: string
+  status: 'open' | 'concluding' | 'concluded'
+  running: boolean
+  conclusion?: BranchConclusion
+  createdAt: string
+}
+
+export interface PermissionRequest {
+  id: string
+  taskId: string
+  toolName: string
+  input: Record<string, unknown>
+  suggestedPattern?: string
+  createdAt: string
+}
+export interface PermissionDecision {
+  allow: boolean
+  message?: string
+  rememberPattern?: string
+}
+
+export interface Task {
+  id: string
+  repoId: string
+  title: string
+  request: string
+  baseBranch: string
+  branch: string
+  worktreePath: string
+  model: ModelId
+  status: TaskStatus
+  runState: RunState
+  mainSessionId?: string
+  questions: Question[]
+  decisions: Decision[]
+  specs: Spec[]
+  plan: PlanStep[]
+  branches: Branch[]
+  /** 本任務允許的指令樣式（如 `npm test *`） */
+  allowedCommands: string[]
+  /** 使用者至少核准過一次的完整指令 */
+  approvedCommands: string[]
+  reportVersions: number[]
+  pendingPermission?: PermissionRequest
+  prUrl?: string
+  error?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type TimelineKind =
+  | 'user_text'
+  | 'assistant_text'
+  | 'tool_call'
+  | 'tool_result'
+  | 'question'
+  | 'decision'
+  | 'spec'
+  | 'report'
+  | 'system'
+export interface TimelineEvent {
+  id: string
+  ts: string
+  channel: Channel
+  kind: TimelineKind
+  text?: string
+  tool?: { id: string; name: string; input?: Record<string, unknown>; isError?: boolean }
+  /** question id / decision id / spec 版本 / report 版本 */
+  ref?: string
+}
+
+export interface Settings {
+  defaultModel: ModelId
+  worktreeRoot: string
+  branchPrefix: string
+  alwaysAllowedCommands: string[]
+  loadProjectSettings: boolean
+  claudePath?: string
+}
+
+export interface ClaudeStatus {
+  found: boolean
+  path?: string
+  version?: string
+  loggedIn: boolean
+  subscriptionType?: string
+  email?: string
+  error?: string
+}
+
+export interface VerificationResult {
+  command: string
+  exitCode: number | null
+  durationMs: number
+  outputTail: string
+  skipped?: string
+}
+export interface DiffStats {
+  files: number
+  additions: number
+  deletions: number
+  perFile: { path: string; additions: number; deletions: number }[]
+}
+export interface Report {
+  version: number
+  taskId: string
+  input: ReportInput
+  diff: string
+  stats: DiffStats
+  verification: VerificationResult[]
+  commit?: string
+  createdAt: string
+}
+export interface FeedbackItem {
+  anchor: string
+  label: string
+  text: string
+}
