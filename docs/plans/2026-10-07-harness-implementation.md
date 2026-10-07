@@ -4015,62 +4015,198 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Step 1: 寫失敗測試**
 
 ```ts
-import { describe, expect, test } from 'vitest'
-import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import { describe, expect, test, vi } from 'vitest'
+import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { AgentRun, mapMessage, type QueryFn, type RunnerEvent } from '../../src/main/agent/agentRun'
 
 const m = (x: unknown) => x as SDKMessage
+const success = (extra: Record<string, unknown> = {}) =>
+  m({ type: 'result', subtype: 'success', is_error: false, ...extra })
+
+/** 把 async generator 包成 QueryFn 的回傳值 */
+const wrap = (
+  gen: AsyncGenerator<SDKMessage>,
+  interrupt: () => Promise<unknown> = async () => undefined
+) => Object.assign(gen, { interrupt })
 
 describe('mapMessage', () => {
   test('init → session', () => {
-    expect(mapMessage(m({ type: 'system', subtype: 'init', session_id: 's1' }))).toEqual([{ type: 'session', sessionId: 's1' }])
+    expect(mapMessage(m({ type: 'system', subtype: 'init', session_id: 's1' }))).toEqual([
+      { type: 'session', sessionId: 's1' }
+    ])
   })
   test('assistant 的文字與 tool_use', () => {
-    expect(mapMessage(m({ type: 'assistant', parent_tool_use_id: null, message: { content: [
-      { type: 'text', text: '你好' }, { type: 'text', text: '  ' },
-      { type: 'tool_use', id: 'tu1', name: 'Read', input: { file_path: 'a' } }
-    ] } }))).toEqual([
+    expect(
+      mapMessage(
+        m({
+          type: 'assistant',
+          parent_tool_use_id: null,
+          message: {
+            content: [
+              { type: 'text', text: '你好' },
+              { type: 'text', text: '  ' },
+              { type: 'tool_use', id: 'tu1', name: 'Read', input: { file_path: 'a' } }
+            ]
+          }
+        })
+      )
+    ).toEqual([
       { type: 'assistant_text', text: '你好' },
       { type: 'tool_call', id: 'tu1', name: 'Read', input: { file_path: 'a' } }
     ])
   })
   test('子代理的訊息略過', () => {
-    expect(mapMessage(m({ type: 'assistant', parent_tool_use_id: 'x', message: { content: [{ type: 'text', text: 'hi' }] } }))).toEqual([])
+    expect(
+      mapMessage(
+        m({
+          type: 'assistant',
+          parent_tool_use_id: 'x',
+          message: { content: [{ type: 'text', text: 'hi' }] }
+        })
+      )
+    ).toEqual([])
+  })
+  test('assistant 的 error 轉成 notice', () => {
+    const auth = mapMessage(
+      m({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        error: 'authentication_failed',
+        message: { content: [{ type: 'text', text: 'Invalid API key' }] }
+      })
+    )
+    expect(auth).toEqual([
+      { type: 'notice', message: 'Claude Code 驗證失敗，請重新登入' },
+      { type: 'assistant_text', text: 'Invalid API key' }
+    ])
+    const [billing] = mapMessage(
+      m({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        error: 'billing_error',
+        message: { content: [] }
+      })
+    )
+    expect(billing).toEqual({ type: 'notice', message: '訂閱或帳單有問題' })
+    const [other] = mapMessage(
+      m({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        error: 'server_error',
+        message: { content: [] }
+      })
+    )
+    expect(other.type).toBe('notice')
   })
   test('tool_result', () => {
-    expect(mapMessage(m({ type: 'user', parent_tool_use_id: null, message: { content: [
-      { type: 'tool_result', tool_use_id: 'tu1', is_error: true, content: [{ type: 'text', text: 'denied' }] }
-    ] } }))).toEqual([{ type: 'tool_result', id: 'tu1', isError: true, text: 'denied' }])
+    expect(
+      mapMessage(
+        m({
+          type: 'user',
+          parent_tool_use_id: null,
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'tu1',
+                is_error: true,
+                content: [{ type: 'text', text: 'denied' }]
+              }
+            ]
+          }
+        })
+      )
+    ).toEqual([{ type: 'tool_result', id: 'tu1', isError: true, text: 'denied' }])
   })
   test('result', () => {
-    expect(mapMessage(m({ type: 'result', subtype: 'success', is_error: false }))).toEqual([{ type: 'turn_end', ok: true }])
-    expect(mapMessage(m({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['boom'] }))).toEqual([{ type: 'turn_end', ok: false, error: 'boom' }])
+    expect(mapMessage(success())).toEqual([{ type: 'turn_end', ok: true }])
+    expect(
+      mapMessage(
+        m({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['boom'] })
+      )
+    ).toEqual([{ type: 'turn_end', ok: false, error: 'boom' }])
   })
-  test('rate limit 只有非 allowed 才回報', () => {
-    expect(mapMessage(m({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed' } }))).toEqual([])
-    const [e] = mapMessage(m({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1791400000 } }))
-    expect(e.type).toBe('rate_limit')
+  test('result 錯誤訊息：errors → result 文字 → 依 subtype 的繁中說明', () => {
+    expect(mapMessage(success({ is_error: true, result: 'API Error: 500' }))).toEqual([
+      { type: 'turn_end', ok: false, error: 'API Error: 500' }
+    ])
+    expect(mapMessage(success({ is_error: true }))).toEqual([
+      { type: 'turn_end', ok: false, error: 'Claude 執行失敗' }
+    ])
+    expect(
+      mapMessage(m({ type: 'result', subtype: 'error_max_turns', is_error: true, errors: [] }))
+    ).toEqual([{ type: 'turn_end', ok: false, error: '超過最大回合數' }])
+    expect(
+      mapMessage(m({ type: 'result', subtype: 'error_during_execution', is_error: true }))
+    ).toEqual([{ type: 'turn_end', ok: false, error: '執行時發生錯誤' }])
+    expect(
+      mapMessage(m({ type: 'result', subtype: 'error_max_budget_usd', is_error: true }))
+    ).toEqual([{ type: 'turn_end', ok: false, error: '超過預算上限' }])
+    expect(
+      mapMessage(
+        m({ type: 'result', subtype: 'error_max_structured_output_retries', is_error: true })
+      )
+    ).toEqual([{ type: 'turn_end', ok: false, error: '結構化輸出重試次數過多' }])
+  })
+  test('rate limit 只有非 allowed 才回報，秒與毫秒的 resetsAt 結果相同', () => {
+    expect(
+      mapMessage(m({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed' } }))
+    ).toEqual([])
+    const [sec] = mapMessage(
+      m({
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'rejected', resetsAt: 1791400000, rateLimitType: 'five_hour' }
+      })
+    )
+    const [ms] = mapMessage(
+      m({
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'rejected', resetsAt: 1791400000000, rateLimitType: 'five_hour' }
+      })
+    )
+    expect(sec.type).toBe('notice')
+    expect(sec).toEqual(ms)
+    expect(sec.type === 'notice' && sec.message).toContain('5 小時')
+    expect(sec.type === 'notice' && sec.message).toContain('已達到')
+    const [warn] = mapMessage(
+      m({
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'allowed_warning', rateLimitType: 'seven_day' }
+      })
+    )
+    expect(warn.type === 'notice' && warn.message).toContain('7 天')
+    expect(warn.type === 'notice' && warn.message).toContain('即將')
+    const [raw] = mapMessage(
+      m({
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'rejected', rateLimitType: 'seven_day_opus' }
+      })
+    )
+    expect(raw.type === 'notice' && raw.message).toContain('seven_day_opus')
   })
 })
 
 describe('AgentRun', () => {
   test('送出第一則訊息、轉發事件，turn_end 後關閉輸入', async () => {
     const prompts: string[] = []
-    const fake: QueryFn = ({ prompt }) => {
-      const gen = (async function* () {
-        for await (const u of prompt as AsyncIterable<SDKUserMessage>) {
-          prompts.push(String(u.message.content))
-          yield m({ type: 'system', subtype: 'init', session_id: 's1' })
-          yield m({ type: 'result', subtype: 'success', is_error: false })
-        }
-      })()
-      return Object.assign(gen, { interrupt: async () => undefined })
-    }
+    const fake: QueryFn = ({ prompt }) =>
+      wrap(
+        (async function* () {
+          for await (const u of prompt) {
+            prompts.push(String(u.message.content))
+            yield m({ type: 'system', subtype: 'init', session_id: 's1' })
+            yield success()
+          }
+        })()
+      )
     const events: RunnerEvent[] = []
     const run = new AgentRun(fake, { options: {}, firstPrompt: 'hello' }, (e) => events.push(e))
     await run.done
     expect(prompts).toEqual(['hello'])
-    expect(events.map((e) => e.type)).toEqual(['session', 'turn_end'])
+    expect(events).toEqual([
+      { type: 'session', sessionId: 's1' },
+      { type: 'turn_end', ok: true, final: true }
+    ])
     expect(run.active).toBe(false)
     expect(run.send('late')).toBe(false)
   })
@@ -4078,22 +4214,223 @@ describe('AgentRun', () => {
   test('執行中可以插話', async () => {
     const prompts: string[] = []
     let release!: () => void
-    const gate = new Promise<void>((r) => { release = r })
-    const fake: QueryFn = ({ prompt }) => {
-      const gen = (async function* () {
-        const it = (prompt as AsyncIterable<SDKUserMessage>)[Symbol.asyncIterator]()
-        prompts.push(String((await it.next()).value.message.content))
-        await gate
-        prompts.push(String((await it.next()).value.message.content))
-        yield m({ type: 'result', subtype: 'success', is_error: false })
-      })()
-      return Object.assign(gen, { interrupt: async () => undefined })
-    }
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const fake: QueryFn = ({ prompt }) =>
+      wrap(
+        (async function* () {
+          const it = prompt[Symbol.asyncIterator]()
+          prompts.push(String((await it.next()).value.message.content))
+          await gate
+          prompts.push(String((await it.next()).value.message.content))
+          yield success()
+        })()
+      )
     const run = new AgentRun(fake, { options: {}, firstPrompt: 'a' }, () => {})
     expect(run.send('b')).toBe(true)
     release()
     await run.done
     expect(prompts).toEqual(['a', 'b'])
+  })
+
+  test('每則訊息帶 uuid；插話未被第一個 result 涵蓋時保持輸入開啟，直到第二個 result', async () => {
+    const seen: SDKUserMessage[] = []
+    const fake: QueryFn = ({ prompt }) =>
+      wrap(
+        (async function* () {
+          const it = prompt[Symbol.asyncIterator]()
+          const first = (await it.next()).value
+          seen.push(first)
+          yield success({ user_message_uuids: [first.uuid], queued_turn_count: 1 })
+          const second = (await it.next()).value
+          seen.push(second)
+          yield success({ user_message_uuid: second.uuid })
+        })()
+      )
+    const events: RunnerEvent[] = []
+    let activeAfterFirst: boolean | undefined
+    const run = new AgentRun(fake, { options: {}, firstPrompt: 'a' }, (e) => {
+      events.push(e)
+      if (events.length === 1) activeAfterFirst = run.active
+    })
+    expect(run.send('b')).toBe(true)
+    await run.done
+    expect(seen.map((u) => u.message.content)).toEqual(['a', 'b'])
+    expect(seen[0].uuid).toMatch(/^[0-9a-f-]{36}$/)
+    expect(seen[0].uuid).not.toBe(seen[1].uuid)
+    expect(events).toEqual([
+      { type: 'turn_end', ok: true, final: false },
+      { type: 'turn_end', ok: true, final: true }
+    ])
+    expect(activeAfterFirst).toBe(true)
+    expect(run.active).toBe(false)
+  })
+
+  test('result 沒有 uuid 欄位時，queued_turn_count > 0 保持輸入開啟', async () => {
+    const fake: QueryFn = ({ prompt }) =>
+      wrap(
+        (async function* () {
+          const it = prompt[Symbol.asyncIterator]()
+          await it.next()
+          yield success({ queued_turn_count: 1 })
+          await it.next()
+          yield success({ queued_turn_count: 0 })
+        })()
+      )
+    const events: RunnerEvent[] = []
+    const run = new AgentRun(fake, { options: {}, firstPrompt: 'a' }, (e) => events.push(e))
+    run.send('b')
+    await run.done
+    expect(events.map((e) => e.type === 'turn_end' && e.final)).toEqual([false, true])
+  })
+
+  test('options 會合併內部的 abortController', async () => {
+    let got: Options | undefined
+    const fake: QueryFn = ({ prompt, options }) =>
+      wrap(
+        (async function* () {
+          got = options
+          await prompt[Symbol.asyncIterator]().next()
+          yield success()
+        })()
+      )
+    const run = new AgentRun(fake, { options: { model: 'x' }, firstPrompt: 'a' }, () => {})
+    await run.done
+    expect(got?.model).toBe('x')
+    expect(got?.abortController).toBeInstanceOf(AbortController)
+  })
+
+  test('interrupt 後的 turn_end 標記 interrupted 且不是錯誤', async () => {
+    let interrupted!: () => void
+    const stopped = new Promise<void>((r) => {
+      interrupted = r
+    })
+    const fake: QueryFn = ({ prompt }) =>
+      wrap(
+        (async function* () {
+          await prompt[Symbol.asyncIterator]().next()
+          yield m({ type: 'system', subtype: 'init', session_id: 's1' })
+          await stopped
+          yield m({
+            type: 'result',
+            subtype: 'error_during_execution',
+            is_error: true,
+            errors: ['aborted']
+          })
+        })(),
+        async () => interrupted()
+      )
+    const events: RunnerEvent[] = []
+    const run = new AgentRun(fake, { options: {}, firstPrompt: 'a' }, (e) => events.push(e))
+    await vi.waitFor(() => expect(events).toHaveLength(1))
+    await run.interrupt()
+    expect(run.active).toBe(false)
+    await run.done
+    expect(events.at(-1)).toEqual({ type: 'turn_end', ok: true, interrupted: true, final: true })
+  })
+
+  test('interrupt 沒有回應時改用 abort', async () => {
+    let signal: AbortSignal | undefined
+    const fake: QueryFn = ({ prompt, options }) => {
+      signal = options.abortController?.signal
+      return wrap(
+        (async function* () {
+          await prompt[Symbol.asyncIterator]().next()
+          yield m({ type: 'system', subtype: 'init', session_id: 's1' })
+          await new Promise<void>((_, reject) =>
+            signal!.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+          )
+        })(),
+        () => new Promise(() => {})
+      )
+    }
+    const events: RunnerEvent[] = []
+    const run = new AgentRun(fake, { options: {}, firstPrompt: 'a', interruptTimeoutMs: 10 }, (e) =>
+      events.push(e)
+    )
+    await vi.waitFor(() => expect(events).toHaveLength(1))
+    await run.interrupt()
+    expect(signal?.aborted).toBe(true)
+    await expect(run.done).resolves.toBeUndefined()
+    expect(run.active).toBe(false)
+  })
+
+  test('abort() 直接中止', async () => {
+    let signal: AbortSignal | undefined
+    const fake: QueryFn = ({ prompt, options }) => {
+      signal = options.abortController?.signal
+      return wrap(
+        (async function* () {
+          await prompt[Symbol.asyncIterator]().next()
+          yield m({ type: 'system', subtype: 'init', session_id: 's1' })
+          await new Promise<void>((_, reject) =>
+            signal!.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+          )
+        })()
+      )
+    }
+    const events: RunnerEvent[] = []
+    const run = new AgentRun(fake, { options: {}, firstPrompt: 'a' }, (e) => events.push(e))
+    await vi.waitFor(() => expect(events).toHaveLength(1))
+    run.abort()
+    expect(signal?.aborted).toBe(true)
+    await expect(run.done).resolves.toBeUndefined()
+  })
+
+  test('迭代器丟錯時 done 會 reject', async () => {
+    const fake: QueryFn = ({ prompt }) =>
+      wrap(
+        (async function* () {
+          await prompt[Symbol.asyncIterator]().next()
+          yield m({ type: 'system', subtype: 'init', session_id: 's1' })
+          throw new Error('process exited')
+        })()
+      )
+    const run = new AgentRun(fake, { options: {}, firstPrompt: 'a' }, () => {})
+    await expect(run.done).rejects.toThrow('process exited')
+    expect(run.active).toBe(false)
+  })
+
+  test('onEvent 丟錯不會中斷執行', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fake: QueryFn = ({ prompt }) =>
+      wrap(
+        (async function* () {
+          await prompt[Symbol.asyncIterator]().next()
+          yield m({ type: 'system', subtype: 'init', session_id: 's1' })
+          yield success()
+        })()
+      )
+    const types: string[] = []
+    const run = new AgentRun(fake, { options: {}, firstPrompt: 'a' }, (e) => {
+      types.push(e.type)
+      if (e.type === 'session') throw new Error('callback bug')
+    })
+    await expect(run.done).resolves.toBeUndefined()
+    expect(types).toEqual(['session', 'turn_end'])
+    expect(log).toHaveBeenCalled()
+    log.mockRestore()
+  })
+
+  test('同一種 rate limit 狀態每次執行只回報一次', async () => {
+    const rl = (status: string) =>
+      m({ type: 'rate_limit_event', rate_limit_info: { status, rateLimitType: 'five_hour' } })
+    const fake: QueryFn = ({ prompt }) =>
+      wrap(
+        (async function* () {
+          await prompt[Symbol.asyncIterator]().next()
+          yield rl('allowed_warning')
+          yield rl('allowed_warning')
+          yield rl('rejected')
+          yield rl('rejected')
+          yield success()
+        })()
+      )
+    const events: RunnerEvent[] = []
+    const run = new AgentRun(fake, { options: {}, firstPrompt: 'a' }, (e) => events.push(e))
+    await run.done
+    expect(events.filter((e) => e.type === 'notice')).toHaveLength(2)
   })
 })
 ```
@@ -4104,90 +4441,258 @@ describe('AgentRun', () => {
 
 ```ts
 // src/main/agent/agentRun.ts
+import { randomUUID } from 'node:crypto'
 import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { AsyncQueue } from './asyncQueue'
 
-export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) =>
-  AsyncIterable<SDKMessage> & { interrupt(): Promise<unknown> }
+export type QueryFn = (params: {
+  prompt: AsyncIterable<SDKUserMessage>
+  options: Options
+}) => AsyncIterable<SDKMessage> & { interrupt(): Promise<unknown> }
+
+/**
+ * turn_end：final 表示這個 result 之後輸入已關閉（這次執行即將結束）；
+ * interrupted 表示是使用者停止造成的結束，呼叫端不應視為錯誤。
+ */
+export type TurnEnd = {
+  type: 'turn_end'
+  ok: boolean
+  error?: string
+  interrupted?: boolean
+  final: boolean
+}
 
 export type RunnerEvent =
   | { type: 'session'; sessionId: string }
   | { type: 'assistant_text'; text: string }
   | { type: 'tool_call'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; id: string; isError: boolean; text: string }
-  | { type: 'turn_end'; ok: boolean; error?: string }
-  | { type: 'rate_limit'; message: string }
+  | TurnEnd
+  | { type: 'notice'; message: string }
 
-type Block = { type: string; text?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; is_error?: boolean; content?: unknown }
+/** mapMessage 只看單一訊息，turn_end 的 final / interrupted 由 AgentRun 補上 */
+export type MappedEvent =
+  Exclude<RunnerEvent, TurnEnd> | { type: 'turn_end'; ok: boolean; error?: string }
+
+type Block = {
+  type: string
+  text?: string
+  id?: string
+  name?: string
+  input?: unknown
+  tool_use_id?: string
+  is_error?: boolean
+  content?: unknown
+}
 type Loose = {
-  type: string; subtype?: string; session_id?: string; parent_tool_use_id?: string | null
-  message?: { content?: string | Block[] }; is_error?: boolean; errors?: string[]
-  rate_limit_info?: { status: string; resetsAt?: number }
+  type: string
+  subtype?: string
+  session_id?: string
+  parent_tool_use_id?: string | null
+  message?: { content?: string | Block[] }
+  error?: string
+  is_error?: boolean
+  errors?: string[]
+  result?: string
+  user_message_uuid?: string
+  user_message_uuids?: string[]
+  queued_turn_count?: number
+  rate_limit_info?: { status: string; resetsAt?: number; rateLimitType?: string }
 }
 
 const blockText = (c: unknown): string =>
-  typeof c === 'string' ? c : Array.isArray(c) ? c.map((x: Block) => (x.type === 'text' ? x.text ?? '' : '')).join('') : ''
+  typeof c === 'string'
+    ? c
+    : Array.isArray(c)
+      ? c.map((x: Block) => (x.type === 'text' ? (x.text ?? '') : '')).join('')
+      : ''
 
-export function mapMessage(raw: SDKMessage): RunnerEvent[] {
+const RESULT_ERRORS: Record<string, string> = {
+  error_max_turns: '超過最大回合數',
+  error_during_execution: '執行時發生錯誤',
+  error_max_budget_usd: '超過預算上限',
+  error_max_structured_output_retries: '結構化輸出重試次數過多',
+  success: 'Claude 執行失敗'
+}
+
+const ASSISTANT_ERRORS: Record<string, string> = {
+  authentication_failed: 'Claude Code 驗證失敗，請重新登入',
+  oauth_org_not_allowed: '這個帳號的組織不允許使用 Claude Code',
+  account_on_hold: 'Claude 帳號目前被暫停使用',
+  verification_required: 'Claude 帳號需要先完成驗證',
+  billing_error: '訂閱或帳單有問題',
+  rate_limit: '已達到用量上限，請稍後再試',
+  overloaded: 'Claude 目前負載過高，請稍後再試',
+  model_not_found: '找不到指定的模型',
+  max_output_tokens: '回應超過輸出長度上限'
+}
+
+const RATE_LIMIT_TYPES: Record<string, string> = { five_hour: '5 小時', seven_day: '7 天' }
+
+function rateLimitNotice(info: NonNullable<Loose['rate_limit_info']>): string {
+  const kind = info.rateLimitType
+    ? `（${RATE_LIMIT_TYPES[info.rateLimitType] ?? info.rateLimitType}）`
+    : ''
+  // resetsAt 的單位沒有文件說明：小於 1e12 視為秒
+  const ms = info.resetsAt
+    ? info.resetsAt < 1e12
+      ? info.resetsAt * 1000
+      : info.resetsAt
+    : undefined
+  const when = ms ? `，約 ${new Date(ms).toLocaleString('zh-TW')} 重置` : ''
+  return info.status === 'rejected'
+    ? `已達到訂閱方案的用量上限${kind}${when}。`
+    : `即將達到訂閱方案的用量上限${kind}${when}。`
+}
+
+export function mapMessage(raw: SDKMessage): MappedEvent[] {
   const m = raw as unknown as Loose
   switch (m.type) {
     case 'system':
-      return m.subtype === 'init' && m.session_id ? [{ type: 'session', sessionId: m.session_id }] : []
+      return m.subtype === 'init' && m.session_id
+        ? [{ type: 'session', sessionId: m.session_id }]
+        : []
     case 'assistant': {
       if (m.parent_tool_use_id) return []
+      const events: MappedEvent[] = m.error
+        ? [
+            {
+              type: 'notice',
+              message: ASSISTANT_ERRORS[m.error] ?? `Claude 回應時發生錯誤（${m.error}）`
+            }
+          ]
+        : []
       const content = Array.isArray(m.message?.content) ? m.message.content : []
-      return content.flatMap((b): RunnerEvent[] => {
-        if (b.type === 'text' && b.text?.trim()) return [{ type: 'assistant_text', text: b.text }]
-        if (b.type === 'tool_use') return [{ type: 'tool_call', id: b.id ?? '', name: b.name ?? '', input: (b.input ?? {}) as Record<string, unknown> }]
-        return []
-      })
+      for (const b of content) {
+        if (b.type === 'text' && b.text?.trim())
+          events.push({ type: 'assistant_text', text: b.text })
+        if (b.type === 'tool_use') {
+          events.push({
+            type: 'tool_call',
+            id: b.id ?? '',
+            name: b.name ?? '',
+            input: (b.input ?? {}) as Record<string, unknown>
+          })
+        }
+      }
+      return events
     }
     case 'user': {
       if (m.parent_tool_use_id || !Array.isArray(m.message?.content)) return []
-      return m.message.content.flatMap((b): RunnerEvent[] =>
-        b.type === 'tool_result' ? [{ type: 'tool_result', id: b.tool_use_id ?? '', isError: !!b.is_error, text: blockText(b.content) }] : [])
+      return m.message.content.flatMap((b): MappedEvent[] =>
+        b.type === 'tool_result'
+          ? [
+              {
+                type: 'tool_result',
+                id: b.tool_use_id ?? '',
+                isError: !!b.is_error,
+                text: blockText(b.content)
+              }
+            ]
+          : []
+      )
     }
     case 'result': {
       const ok = m.subtype === 'success' && !m.is_error
-      return [ok ? { type: 'turn_end', ok } : { type: 'turn_end', ok, error: (m.errors ?? []).join('\n') || m.subtype }]
+      if (ok) return [{ type: 'turn_end', ok }]
+      const error =
+        (m.errors ?? []).join('\n') ||
+        (m.is_error && m.result) ||
+        RESULT_ERRORS[m.subtype ?? ''] ||
+        m.subtype ||
+        'Claude 執行失敗'
+      return [{ type: 'turn_end', ok, error }]
     }
     case 'rate_limit_event': {
       const info = m.rate_limit_info
       if (!info || info.status === 'allowed') return []
-      const when = info.resetsAt ? `，約 ${new Date(info.resetsAt * 1000).toLocaleString('zh-TW')} 重置` : ''
-      return [{ type: 'rate_limit', message: info.status === 'rejected' ? `已達到訂閱方案的用量上限${when}。` : `即將達到訂閱方案的用量上限${when}。` }]
+      return [{ type: 'notice', message: rateLimitNotice(info) }]
     }
     default:
       return []
   }
 }
 
-export function userMessage(text: string): SDKUserMessage {
-  return { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null } as SDKUserMessage
+export function userMessage(text: string): SDKUserMessage & { uuid: string } {
+  return {
+    type: 'user',
+    message: { role: 'user', content: text },
+    parent_tool_use_id: null,
+    uuid: randomUUID()
+  }
 }
 
-export interface RunConfig { options: Options; firstPrompt: string }
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`等待超過 ${ms}ms`)), ms)
+  })
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
+}
 
-/** 一輪對話：送出第一則訊息，可插話，收到 result 後關閉輸入讓程序結束 */
+export interface RunConfig {
+  options: Options
+  firstPrompt: string
+  /** interrupt() 等待 SDK 回應的上限，逾時改用 abort（預設 5000ms） */
+  interruptTimeoutMs?: number
+}
+
+/**
+ * 一段對話：送出第一則訊息，可插話；每則送出的訊息都被 result 回應過之後關閉輸入，讓程序結束。
+ */
 export class AgentRun {
   private queue = new AsyncQueue<SDKUserMessage>()
   private readonly q: ReturnType<QueryFn>
+  private readonly abortController = new AbortController()
+  private readonly interruptTimeoutMs: number
+  private readonly pending = new Set<string>()
+  private readonly noticed = new Set<string>()
   private ended = false
+  private stopping = false
   readonly done: Promise<void>
 
   constructor(queryFn: QueryFn, cfg: RunConfig, onEvent: (e: RunnerEvent) => void) {
-    this.queue.push(userMessage(cfg.firstPrompt))
+    this.interruptTimeoutMs = cfg.interruptTimeoutMs ?? 5000
+    const external = cfg.options.abortController
+    if (external) {
+      if (external.signal.aborted) this.abortController.abort()
+      else external.signal.addEventListener('abort', () => this.abort(), { once: true })
+    }
+    const emit = (e: RunnerEvent) => {
+      try {
+        onEvent(e)
+      } catch (err) {
+        console.error('[AgentRun] onEvent 回呼失敗', err)
+      }
+    }
+    this.enqueue(cfg.firstPrompt)
     // 用區域變數迭代：TS 會把建構子內的 async IIFE 視為立即執行，直接讀 this.q 會報 TS2565
-    const q = queryFn({ prompt: this.queue, options: cfg.options })
+    const q = queryFn({
+      prompt: this.queue,
+      options: { ...cfg.options, abortController: this.abortController }
+    })
     this.q = q
     this.done = (async () => {
       try {
-        for await (const msg of q) {
-          for (const e of mapMessage(msg)) {
-            onEvent(e)
-            if (e.type === 'turn_end') this.closeInput()
+        for await (const raw of q) {
+          for (const e of mapMessage(raw)) {
+            if (e.type === 'notice' && !this.firstNotice(raw)) continue
+            if (e.type !== 'turn_end') {
+              emit(e)
+              continue
+            }
+            const final = this.stopping || this.turnComplete(raw)
+            if (final) this.closeInput()
+            emit(
+              this.stopping
+                ? { type: 'turn_end', ok: true, interrupted: true, final }
+                : { ...e, final }
+            )
           }
         }
+      } catch (err) {
+        // 使用者停止（interrupt / abort）造成的結束不算錯誤
+        if (!this.stopping) throw err
       } finally {
         this.ended = true
         this.closeInput()
@@ -4195,20 +4700,64 @@ export class AgentRun {
     })()
   }
 
-  get active() { return !this.ended && !this.queue.isClosed }
+  get active() {
+    return !this.ended && !this.queue.isClosed
+  }
 
   send(text: string): boolean {
     if (!this.active) return false
-    this.queue.push(userMessage(text))
+    this.enqueue(text)
     return true
   }
 
+  /** 請 SDK 中斷目前這一輪；沒有在時限內回應就直接 abort */
   async interrupt() {
-    await this.q.interrupt().catch(() => undefined)
+    this.stopping = true
+    try {
+      await withTimeout(this.q.interrupt(), this.interruptTimeoutMs)
+    } catch {
+      this.abortController.abort()
+    } finally {
+      this.closeInput()
+    }
+  }
+
+  /** 立即中止底層程序 */
+  abort() {
+    this.stopping = true
+    this.abortController.abort()
     this.closeInput()
   }
 
-  private closeInput() { if (!this.queue.isClosed) this.queue.close() }
+  private enqueue(text: string) {
+    const msg = userMessage(text)
+    this.pending.add(msg.uuid)
+    this.queue.push(msg)
+  }
+
+  /** 這個 result 之後是否已沒有待回應的訊息 */
+  private turnComplete(raw: SDKMessage): boolean {
+    const m = raw as unknown as Loose
+    const answered =
+      m.user_message_uuids ?? (m.user_message_uuid ? [m.user_message_uuid] : undefined)
+    if (!answered) return !(m.queued_turn_count && m.queued_turn_count > 0)
+    for (const id of answered) this.pending.delete(id)
+    return this.pending.size === 0
+  }
+
+  /** rate limit 通知每種狀態每次執行只回報一次 */
+  private firstNotice(raw: SDKMessage): boolean {
+    const m = raw as unknown as Loose
+    if (m.type !== 'rate_limit_event' || !m.rate_limit_info) return true
+    const key = m.rate_limit_info.status
+    if (this.noticed.has(key)) return false
+    this.noticed.add(key)
+    return true
+  }
+
+  private closeInput() {
+    if (!this.queue.isClosed) this.queue.close()
+  }
 }
 ```
 
@@ -4570,7 +5119,11 @@ export class TaskManager {
     const t = this.get(taskId)
     if (t.status === 'done' || t.status === 'discarded') throw new Error('任務已結束')
     if (!opts.silent) await this.addTimeline(taskId, { channel, kind: 'user_text', text: opts.display ?? text })
-    if (this.runs.get(runKey(taskId, channel))?.send(text)) return
+    const key = runKey(taskId, channel)
+    const prev = this.runs.get(key)
+    if (prev?.send(text)) return
+    // 上一段執行已關閉輸入但程序還沒結束：等它結束，同一個 channel 永遠只有一個 run
+    if (prev) await prev.done.catch(() => undefined)
     await this.startTurn(taskId, channel, text)
   }
 
@@ -4633,19 +5186,23 @@ export class TaskManager {
   private onRunDone(taskId: string, channel: Channel, run: AgentRun, err?: unknown) {
     return this.enqueue(taskId, async () => {
       const key = runKey(taskId, channel)
-      if (this.runs.get(key) === run) this.runs.delete(key)
+      // send() 可能已在這段收尾排到之前開了下一段執行：那時不要動執行狀態，只記錄錯誤
+      const current = this.runs.get(key) === run
+      if (current) this.runs.delete(key)
       const branchId = branchIdOf(channel)
-      if (!branchId) this.pendingCounter.delete(taskId)
+      if (current && !branchId) this.pendingCounter.delete(taskId)
       await this.update(taskId, (t) => {
-        if (branchId) {
-          const b = t.branches.find((x) => x.id === branchId)
-          if (b) b.running = false
-        } else if (t.runState === 'running' || t.runState === 'waiting_permission') {
-          t.runState = 'idle'
+        if (current) {
+          if (branchId) {
+            const b = t.branches.find((x) => x.id === branchId)
+            if (b) b.running = false
+          } else if (t.runState === 'running' || t.runState === 'waiting_permission') {
+            t.runState = 'idle'
+          }
         }
         if (err) {
           t.error = errorMessage(err)
-          if (!branchId) t.runState = 'error'
+          if (current && !branchId) t.runState = 'error'
         }
       })
     })
@@ -4687,9 +5244,10 @@ export class TaskManager {
         if (e.isError) await this.addTimeline(taskId, { channel, kind: 'tool_result', text: e.text.slice(0, 2000), tool: { id: e.id, name: '', isError: true } })
         return
       case 'turn_end':
-        if (!e.ok) await this.update(taskId, (t) => { t.error = e.error || 'Claude 執行失敗' })
+        // 使用者停止造成的結束（interrupted）不算錯誤
+        if (!e.ok && !e.interrupted) await this.update(taskId, (t) => { t.error = e.error || 'Claude 執行失敗' })
         return
-      case 'rate_limit':
+      case 'notice':
         await this.addTimeline(taskId, { channel, kind: 'system', text: e.message })
     }
   }
