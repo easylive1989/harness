@@ -1,0 +1,55 @@
+@import 'tailwindcss';
+@import '@fontsource/noto-sans-tc/400.css';
+@import '@fontsource/noto-sans-tc/500.css';
+@import '@fontsource/noto-sans-tc/700.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
+@theme {
+  --font-sans: 'Noto Sans TC', -apple-system, 'PingFang TC', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  --color-canvas: #eef0f3;
+  --color-surface: #ffffff;
+  --color-ink: #1c2430;
+  --color-ink-2: #3a4350;
+  --color-muted: #5b6472;
+  --color-muted-2: #6b7480;
+  --color-line: #dde1e7;
+  --color-line-soft: #eef0f3;
+  --color-fill: #f1f3f6;
+  --color-fill-2: #f6f8f9;
+  --color-chip: #e6e9ee;
+
+  --color-brand: #0f766e;
+  --color-brand-hover: #115e59;
+  --color-brand-ink: #0f5f58;
+  --color-brand-tint: #ecf6f4;
+  --color-brand-soft: #d5ebe8;
+  --color-brand-ring: #cfe3e0;
+  --color-brand-muted: #3f5f5b;
+
+  --color-decision: #fdf6e7;
+  --color-decision-ink: #8a5300;
+  --color-decision-body: #5c4a2a;
+  --color-progress: #9a5b00;
+  --color-progress-bar: #c27c0e;
+  --color-review: #2563eb;
+  --color-danger: #b42318;
+  --color-ok: #15803d;
+  --color-note: #fef9c3;
+  --color-note-ink: #713f12;
+  --color-code: #1c2430;
+  --color-code-ink: #e7ecef;
+
+  --shadow-card: 0 1px 3px rgba(16, 24, 40, 0.06);
+  --shadow-raised: 0 1px 2px rgba(16, 24, 40, 0.06), 0 2px 8px rgba(16, 24, 40, 0.05);
+  --shadow-focus: 0 0 0 1px #cfe3e0, 0 6px 24px rgba(15, 118, 110, 0.1);
+  --shadow-dialog: 0 20px 60px rgba(16, 24, 40, 0.25);
+}
+
+html, body, #root { height: 100%; }
+body { margin: 0; background: var(--color-canvas); color: var(--color-ink); font-family: var(--font-sans); font-size: 14px; line-height: 1.65; -webkit-font-smoothing: antialiased; }
+code { font-family: var(--font-mono); font-size: 12px; background: #eef2f1; padding: 1px 6px; border-radius: 5px; color: #134e4a; }
+.drag { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }
