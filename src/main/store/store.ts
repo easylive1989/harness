@@ -1,7 +1,16 @@
 // src/main/store/store.ts
 import { randomUUID } from 'node:crypto'
-import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import {
+  appendFile,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile
+} from 'node:fs/promises'
+import { dirname, resolve, sep } from 'node:path'
 
 // ENOTDIR：路徑中間是檔案（例如 tasks/.DS_Store/task.json），一樣視為不存在
 const isMissing = (e: unknown) => {
@@ -9,11 +18,39 @@ const isMissing = (e: unknown) => {
   return code === 'ENOENT' || code === 'ENOTDIR'
 }
 
+/** 檔案存在、非空且最後一個字元不是換行（上次寫到一半） */
+async function endsMidLine(file: string): Promise<boolean> {
+  let fh
+  try {
+    fh = await open(file, 'r')
+  } catch (e) {
+    if (isMissing(e)) return false
+    throw e
+  }
+  try {
+    const { size } = await fh.stat()
+    if (size === 0) return false
+    const buf = Buffer.alloc(1)
+    await fh.read(buf, 0, 1, size - 1)
+    return buf[0] !== 0x0a
+  } finally {
+    await fh.close()
+  }
+}
+
 export class Store {
-  constructor(readonly root: string) {}
+  readonly root: string
+
+  constructor(root: string) {
+    this.root = resolve(root)
+  }
 
   private path(rel: string) {
-    return join(this.root, rel)
+    const p = resolve(this.root, rel)
+    if (p !== this.root && !p.startsWith(this.root + sep)) {
+      throw new Error(`路徑超出資料夾範圍：${rel}`)
+    }
+    return p
   }
 
   async readJson<T>(rel: string, fallback: T): Promise<T> {
@@ -29,14 +66,20 @@ export class Store {
     const file = this.path(rel)
     await mkdir(dirname(file), { recursive: true })
     const tmp = `${file}.${randomUUID()}.tmp`
-    await writeFile(tmp, JSON.stringify(data, null, 2))
-    await rename(tmp, file)
+    try {
+      await writeFile(tmp, JSON.stringify(data, null, 2))
+      await rename(tmp, file)
+    } catch (e) {
+      await unlink(tmp).catch(() => {})
+      throw e
+    }
   }
 
   async appendJsonl(rel: string, obj: unknown): Promise<void> {
     const file = this.path(rel)
     await mkdir(dirname(file), { recursive: true })
-    await appendFile(file, `${JSON.stringify(obj)}\n`)
+    const lead = (await endsMidLine(file)) ? '\n' : ''
+    await appendFile(file, `${lead}${JSON.stringify(obj)}\n`)
   }
 
   async readJsonl<T>(rel: string): Promise<T[]> {

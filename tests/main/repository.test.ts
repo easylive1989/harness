@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { beforeEach, describe, expect, test } from 'vitest'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { Repository } from '../../src/main/store/repository'
 import { Store } from '../../src/main/store/store'
 import { makeTask } from '../fixtures/task'
@@ -37,6 +37,16 @@ describe('Repository', () => {
     await writeFile(join(root, 'tasks/.DS_Store'), '')
     await writeFile(join(root, 'tasks/stray.txt'), '')
     expect((await repo.listTasks()).map((t) => t.id)).toEqual(['a'])
+  })
+
+  test('壞掉的 task.json 會被略過，不影響其他任務', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await repo.saveTask(makeTask({ id: 'a' }))
+    await mkdir(join(root, 'tasks/bad'), { recursive: true })
+    await writeFile(join(root, 'tasks/bad/task.json'), '{"id":')
+    expect((await repo.listTasks()).map((t) => t.id)).toEqual(['a'])
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
   })
 
   test('時間軸 append 與讀取', async () => {

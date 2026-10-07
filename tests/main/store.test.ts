@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, test } from 'vitest'
@@ -48,5 +48,28 @@ describe('Store', () => {
     expect(await store.readJson('f/x.json', 'fb')).toBe('fb')
     expect(await store.readJsonl('f/x.jsonl')).toEqual([])
     expect(await store.list('f/sub')).toEqual([])
+  })
+
+  test('上一行寫到一半時，append 會從新的一行開始', async () => {
+    await store.appendJsonl('t/log.jsonl', { n: 1 })
+    await writeFile(
+      join(root, 't/log.jsonl'),
+      (await readFile(join(root, 't/log.jsonl'), 'utf8')) + '{"n":'
+    )
+    await store.appendJsonl('t/log.jsonl', { n: 2 })
+    expect(await store.readJsonl('t/log.jsonl')).toEqual([{ n: 1 }, { n: 2 }])
+  })
+
+  test('writeJson 失敗時清掉暫存檔', async () => {
+    await mkdir(join(root, 'd/sub'), { recursive: true })
+    await expect(store.writeJson('d', { x: 1 })).rejects.toThrow()
+    expect((await readdir(root)).filter((n) => n.endsWith('.tmp'))).toEqual([])
+  })
+
+  test('路徑不能跳出 store 根目錄', async () => {
+    await expect(store.readJson('../x.json', null)).rejects.toThrow('超出')
+    await expect(store.writeJson('a/../../evil.json', {})).rejects.toThrow('超出')
+    await expect(store.appendJsonl('/etc/x.jsonl', {})).rejects.toThrow('超出')
+    await expect(store.list('..')).rejects.toThrow('超出')
   })
 })

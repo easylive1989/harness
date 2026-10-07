@@ -1,11 +1,32 @@
+import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type {
+  HookJSONOutput,
+  PreToolUseHookSpecificOutput,
+  SyncHookJSONOutput
+} from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, test, vi } from 'vitest'
-import { createPermissionGate, type GateContext } from '../../src/main/permissions/gate'
+import {
+  createPermissionGate,
+  createPreToolUseHook,
+  type GateContext
+} from '../../src/main/permissions/gate'
 import type { GatePhase } from '../../src/main/tasks/stateMachine'
 
-function setup(phase: GatePhase, decision = { allow: true }, patterns: string[] = []) {
+type McpServer = { name: string; source: string }
+const OURS: McpServer = { name: 'harness', source: 'sdk' }
+
+function setup(
+  phase: GatePhase,
+  decision = { allow: true },
+  patterns: string[] = [],
+  worktreePath = '/wt/t1'
+) {
+  const state = { phase }
   const ctx: GateContext = {
-    getPhase: () => phase,
-    worktreePath: '/wt/t1',
+    getPhase: () => state.phase,
+    worktreePath,
     getAllowedPatterns: () => patterns,
     requestApproval: vi.fn(async () => decision),
     onApproved: vi.fn()
@@ -14,17 +35,40 @@ function setup(phase: GatePhase, decision = { allow: true }, patterns: string[] 
   const call = (
     tool: string,
     input: Record<string, unknown>,
-    mcpServer?: { name: string; source: string }
-  ) => gate(tool, input, { signal: new AbortController().signal, mcpServer } as never)
-  return { ctx, call }
+    mcpServer?: McpServer,
+    signal = new AbortController().signal
+  ) => gate(tool, input, { signal, mcpServer } as never)
+  const hook = createPreToolUseHook(ctx)
+  const callHook = async (tool: string, toolInput: unknown, mcpServer?: McpServer) =>
+    hookDecision(
+      await hook(
+        {
+          hook_event_name: 'PreToolUse',
+          tool_name: tool,
+          tool_input: toolInput,
+          tool_use_id: 'u1',
+          session_id: 's1',
+          transcript_path: '',
+          cwd: worktreePath,
+          mcp_server: mcpServer
+        },
+        'u1',
+        { signal: new AbortController().signal }
+      )
+    )
+  return { ctx, state, call, hook, callHook }
+}
+
+function hookDecision(out: HookJSONOutput) {
+  const specific = (out as SyncHookJSONOutput).hookSpecificOutput as
+    PreToolUseHookSpecificOutput | undefined
+  return specific?.permissionDecision
 }
 
 describe('PermissionGate', () => {
   test('harness 工具與 TodoWrite 永遠允許', async () => {
     const { call } = setup('clarify')
-    expect(
-      (await call('mcp__harness__ask_user', {}, { name: 'harness', source: 'sdk' })).behavior
-    ).toBe('allow')
+    expect((await call('mcp__harness__ask_user', {}, OURS)).behavior).toBe('allow')
     expect((await call('TodoWrite', {})).behavior).toBe('allow')
   })
 
@@ -48,6 +92,48 @@ describe('PermissionGate', () => {
     expect((await call('Grep', { pattern: 'x' })).behavior).toBe('allow')
   })
 
+  test('~ 開頭的路徑一律拒絕', async () => {
+    const { call } = setup('implement')
+    expect((await call('Read', { file_path: '~/x' })).behavior).toBe('deny')
+    expect((await call('Write', { file_path: '~/x' })).behavior).toBe('deny')
+  })
+
+  test('路徑參數不是字串、或寫入工具沒有路徑時拒絕', async () => {
+    const { call } = setup('implement')
+    expect((await call('Read', { file_path: 123 })).behavior).toBe('deny')
+    expect((await call('Grep', { pattern: 'x', path: ['/etc'] })).behavior).toBe('deny')
+    expect((await call('Read', { file_path: null })).behavior).toBe('deny')
+    expect((await call('Write', { content: 'x' })).behavior).toBe('deny')
+  })
+
+  test('Glob 的絕對路徑或含 .. 的 pattern 必須落在 worktree 內', async () => {
+    const { call } = setup('clarify')
+    expect((await call('Glob', { pattern: 'src/**/*.ts' })).behavior).toBe('allow')
+    expect((await call('Glob', { pattern: '/wt/t1/src/**' })).behavior).toBe('allow')
+    expect((await call('Glob', { pattern: '/etc/**' })).behavior).toBe('deny')
+    expect((await call('Glob', { pattern: '../**/*.ts' })).behavior).toBe('deny')
+    expect((await call('Glob', { pattern: 'src/../../**' })).behavior).toBe('deny')
+    expect((await call('Glob', { pattern: 'src/../lib/*.ts' })).behavior).toBe('allow')
+  })
+
+  test('symlink 指到 worktree 外時拒絕', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'harness-gate-'))
+    const wt = join(base, 'wt')
+    const outside = join(base, 'outside')
+    await mkdir(wt)
+    await mkdir(outside)
+    await writeFile(join(outside, 'secret'), 's')
+    await writeFile(join(wt, 'ok.ts'), '')
+    await symlink(outside, join(wt, 'link'))
+    await symlink(join(outside, 'not-yet'), join(wt, 'dangling'))
+    const { call } = setup('implement', { allow: true }, [], wt)
+    expect((await call('Read', { file_path: join(wt, 'ok.ts') })).behavior).toBe('allow')
+    expect((await call('Write', { file_path: join(wt, 'new.ts') })).behavior).toBe('allow')
+    expect((await call('Read', { file_path: join(wt, 'link/secret') })).behavior).toBe('deny')
+    expect((await call('Write', { file_path: 'link/new.ts' })).behavior).toBe('deny')
+    expect((await call('Write', { file_path: join(wt, 'dangling') })).behavior).toBe('deny')
+  })
+
   test('釐清與分岔階段不能寫檔或執行指令', async () => {
     for (const phase of ['clarify', 'branch'] as const) {
       const { call, ctx } = setup(phase)
@@ -60,7 +146,25 @@ describe('PermissionGate', () => {
   test('實作階段 worktree 內寫檔自動允許', async () => {
     const { call } = setup('implement')
     expect((await call('Write', { file_path: '/wt/t1/new.ts' })).behavior).toBe('allow')
+    expect((await call('Write', { file_path: '/wt/t1/.gitignore' })).behavior).toBe('allow')
     expect((await call('Edit', { file_path: '/other/a.ts' })).behavior).toBe('deny')
+  })
+
+  test('寫入 .git、.claude/、.mcp.json 需要使用者核准', async () => {
+    for (const file_path of [
+      '/wt/t1/.git',
+      '/wt/t1/.git/hooks/pre-commit',
+      '/wt/t1/.claude/settings.json',
+      '/wt/t1/pkg/.mcp.json'
+    ]) {
+      const { call, ctx } = setup('implement')
+      expect((await call('Write', { file_path })).behavior).toBe('allow')
+      expect(ctx.requestApproval).toHaveBeenCalledTimes(1)
+    }
+    const { call } = setup('implement', { allow: false } as never)
+    expect((await call('Edit', { file_path: '/wt/t1/.claude/settings.json' })).behavior).toBe(
+      'deny'
+    )
   })
 
   test('符合允許樣式的指令直接允許', async () => {
@@ -100,8 +204,97 @@ describe('PermissionGate', () => {
     })
   })
 
+  test('等待核准期間任務狀態改變時拒絕', async () => {
+    for (const next of ['clarify', 'closed'] as const) {
+      const { call, ctx, state } = setup('implement')
+      vi.mocked(ctx.requestApproval).mockImplementation(async () => {
+        state.phase = next
+        return { allow: true }
+      })
+      expect(await call('Bash', { command: 'npm run build' })).toEqual({
+        behavior: 'deny',
+        message: '任務狀態已改變'
+      })
+      expect(ctx.onApproved).not.toHaveBeenCalled()
+    }
+  })
+
+  test('signal 已中止時直接拒絕，不詢問使用者', async () => {
+    const { call, ctx } = setup('implement')
+    const ac = new AbortController()
+    ac.abort()
+    expect((await call('Bash', { command: 'npm run build' }, undefined, ac.signal)).behavior).toBe(
+      'deny'
+    )
+    expect(ctx.requestApproval).not.toHaveBeenCalled()
+  })
+
   test('任務結束後一律拒絕；未知工具拒絕', async () => {
     expect((await setup('closed').call('Read', {})).behavior).toBe('deny')
     expect((await setup('implement').call('KillShell', {})).behavior).toBe('deny')
+  })
+})
+
+describe('PreToolUse hook', () => {
+  test('釐清階段 Edit 被 hook 拒絕', async () => {
+    const { callHook } = setup('clarify')
+    expect(await callHook('Edit', { file_path: '/wt/t1/a.ts' })).toBe('deny')
+  })
+
+  test('不在允許清單的 Bash 交給使用者核准（ask）', async () => {
+    const { callHook, ctx } = setup('implement', { allow: true }, ['npm test *'])
+    expect(await callHook('Bash', { command: 'npm run build' })).toBe('ask')
+    expect(await callHook('Bash', { command: 'npm test -- auth' })).toBe('allow')
+    expect(ctx.requestApproval).not.toHaveBeenCalled()
+  })
+
+  test('受保護路徑回傳 ask', async () => {
+    const { callHook } = setup('implement')
+    expect(await callHook('Write', { file_path: '/wt/t1/.claude/settings.json' })).toBe('ask')
+  })
+
+  test('harness MCP 工具：有來源資訊就判斷，沒有就交給 canUseTool', async () => {
+    const { hook, callHook } = setup('clarify')
+    expect(await callHook('mcp__harness__ask_user', {}, OURS)).toBe('allow')
+    expect(
+      await callHook('mcp__harness__ask_user', {}, { name: 'harness', source: 'project' })
+    ).toBe('deny')
+    expect(
+      await hook(
+        {
+          hook_event_name: 'PreToolUse',
+          tool_name: 'mcp__harness__ask_user',
+          tool_input: {},
+          tool_use_id: 'u1',
+          session_id: 's1',
+          transcript_path: '',
+          cwd: '/wt/t1'
+        },
+        'u1',
+        { signal: new AbortController().signal }
+      )
+    ).toEqual({})
+  })
+
+  test('tool_input 不是物件時拒絕', async () => {
+    const { callHook } = setup('implement')
+    expect(await callHook('Read', 'oops')).toBe('deny')
+  })
+
+  test('非 PreToolUse 事件不做決定', async () => {
+    const { hook } = setup('implement')
+    expect(
+      await hook(
+        {
+          hook_event_name: 'Stop',
+          session_id: 's1',
+          transcript_path: '',
+          cwd: '/wt/t1',
+          stop_hook_active: false
+        } as never,
+        undefined,
+        { signal: new AbortController().signal }
+      )
+    ).toEqual({})
   })
 })

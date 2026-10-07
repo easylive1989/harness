@@ -38,7 +38,15 @@ export class Repository {
   async listTasks(): Promise<Task[]> {
     const ids = await this.store.list('tasks')
     const tasks = await Promise.all(
-      ids.map((id) => this.store.readJson<Task | null>(`tasks/${id}/task.json`, null))
+      ids.map(async (id) => {
+        try {
+          return await this.store.readJson<Task | null>(`tasks/${id}/task.json`, null)
+        } catch (e) {
+          // 單一任務檔壞掉不應讓整個清單載入失敗
+          console.warn(`略過無法讀取的任務 ${id}:`, e)
+          return null
+        }
+      })
     )
     return tasks
       .filter((t): t is Task => !!t)
