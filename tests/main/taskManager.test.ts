@@ -3,11 +3,12 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
+import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AppEvent } from '@shared/ipc'
 import { Repository } from '../../src/main/store/repository'
 import { Store } from '../../src/main/store/store'
 import { TaskManager, type TaskManagerDeps } from '../../src/main/tasks/taskManager'
-import { assistantText, FakeClaude, fakeGit } from './fakeClaude'
+import { assistantText, FakeClaude, fakeGit, until } from './fakeClaude'
 
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'harness-tm-'))
@@ -260,5 +261,182 @@ describe('TaskManager：分岔', () => {
     await tm.send(id, 'main', '結束')
     await tm.whenIdle(id)
     expect(String(error)).toContain('只能在分岔中使用')
+  })
+})
+
+const spec = {
+  title: '帳號鎖定',
+  summary: 's',
+  in_scope: ['a'],
+  out_of_scope: [],
+  decisions: [],
+  steps: ['實作'],
+  acceptance: ['測試通過']
+}
+const signalOf = () => ({ signal: new AbortController().signal }) as never
+
+describe('TaskManager：規格與實作', () => {
+  test('propose_spec → spec_review；要求修改回到 clarifying；核准進入 implementing', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    expect(tm.get(id)).toMatchObject({ status: 'spec_review', title: '帳號鎖定' })
+    expect(tm.get(id).specs[0].version).toBe(1)
+
+    claude.script = async ({ sink }) => {
+      await sink.proposeSpec({ ...spec, summary: 's2' })
+    }
+    await tm.requestSpecChanges(id, '上限改 10 次')
+    await tm.whenIdle(id)
+    expect(claude.calls.at(-1)!.prompt).toBe('[spec_feedback] 上限改 10 次')
+    expect(tm.get(id)).toMatchObject({ status: 'spec_review' })
+    expect(tm.get(id).specs).toHaveLength(2)
+
+    claude.script = async ({ sink }) => {
+      await sink.updatePlan({ steps: [{ id: 's1', title: '寫程式', status: 'running' }] })
+    }
+    await tm.approveSpec(id)
+    await tm.whenIdle(id)
+    expect(claude.calls.at(-1)!.prompt).toContain('[spec_approved]')
+    expect(tm.get(id).status).toBe('implementing')
+    expect(tm.get(id).plan).toEqual([{ id: 's1', title: '寫程式', status: 'running' }])
+    await expect(tm.approveSpec(id)).rejects.toThrow()
+  })
+
+  test('shell 指令等待核准，核准並記住樣式', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    let result: PermissionResult | null | undefined
+    claude.script = async ({ options }) => {
+      result = await options.canUseTool!('Bash', { command: 'npm test -- auth' }, signalOf())
+    }
+    await tm.approveSpec(id)
+    await until(() => !!tm.get(id).pendingPermission)
+    const req = tm.get(id).pendingPermission!
+    expect(req).toMatchObject({ toolName: 'Bash', suggestedPattern: 'npm test *' })
+    expect(tm.get(id).runState).toBe('waiting_permission')
+    await tm.resolvePermission(id, req.id, { allow: true, rememberPattern: 'npm test *' })
+    await tm.whenIdle(id)
+    expect(result?.behavior).toBe('allow')
+    expect(tm.get(id)).toMatchObject({
+      allowedCommands: ['npm test *'],
+      approvedCommands: ['npm test -- auth'],
+      runState: 'idle'
+    })
+    expect(tm.get(id).pendingPermission).toBeUndefined()
+    await expect(tm.resolvePermission(id, req.id, { allow: true })).rejects.toThrow('失效')
+  })
+
+  test('同時有多個核准請求時依序顯示', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    const results: (PermissionResult | null)[] = []
+    claude.script = async ({ options }) => {
+      results.push(
+        ...(await Promise.all([
+          options.canUseTool!('Bash', { command: 'npm test' }, signalOf()),
+          options.canUseTool!('Bash', { command: 'npm run lint' }, signalOf())
+        ]))
+      )
+    }
+    await tm.approveSpec(id)
+    await until(() => !!tm.get(id).pendingPermission)
+    const first = tm.get(id).pendingPermission!
+    expect(first.input).toEqual({ command: 'npm test' })
+    await tm.resolvePermission(id, first.id, { allow: false, message: '不要跑' })
+    await until(
+      () => tm.get(id).pendingPermission?.id !== first.id && !!tm.get(id).pendingPermission
+    )
+    const second = tm.get(id).pendingPermission!
+    expect(second.input).toEqual({ command: 'npm run lint' })
+    expect(tm.get(id).runState).toBe('waiting_permission')
+    await tm.resolvePermission(id, second.id, { allow: true })
+    await tm.whenIdle(id)
+    expect(results.map((r) => r?.behavior)).toEqual(['deny', 'allow'])
+    expect(results[0]).toMatchObject({ message: '不要跑' })
+    expect(tm.get(id)).toMatchObject({ runState: 'idle', approvedCommands: ['npm run lint'] })
+  })
+
+  test('停止會拒絕等待中的核准並結束這一輪，不算錯誤', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    let result: PermissionResult | null | undefined
+    claude.script = async ({ options }) => {
+      result = await options.canUseTool!('Bash', { command: 'npm test' }, signalOf())
+      await new Promise(() => undefined) // 卡住，直到被停止
+    }
+    await tm.approveSpec(id)
+    await until(() => !!tm.get(id).pendingPermission)
+    await tm.stop(id, 'main')
+    await tm.whenIdle(id)
+    expect(result).toMatchObject({ behavior: 'deny', message: '使用者停止了執行' })
+    expect(tm.get(id).pendingPermission).toBeUndefined()
+    expect(tm.get(id).runState).toBe('idle')
+    expect(tm.get(id).error).toBeUndefined()
+  })
+
+  test('分岔的核准請求不影響主線的執行狀態', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    let result: PermissionResult | null | undefined
+    claude.script = async ({ options }) => {
+      result = await options.canUseTool!('WebFetch', { url: 'https://example.com' }, signalOf())
+    }
+    await tm.openBranch(id, { title: '查資料' })
+    await until(() => !!tm.get(id).pendingPermission)
+    expect(tm.get(id).runState).toBe('idle')
+    expect(tm.get(id).branches[0].running).toBe(true)
+    await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: true })
+    await tm.whenIdle(id)
+    expect(result?.behavior).toBe('allow')
+    expect(tm.get(id)).toMatchObject({ runState: 'idle', approvedCommands: [] })
+    expect(tm.get(id).branches[0].running).toBe(false)
+  })
+
+  test('執行中插話會送進同一輪', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    let release!: () => void
+    claude.script = async () => {
+      await new Promise<void>((r) => {
+        release = r
+      })
+    }
+    await tm.send(id, 'main', '開始')
+    await until(() => tm.get(id).runState === 'running' && !!release)
+    const before = claude.calls.length
+    await tm.send(id, 'main', '順便改錯誤訊息')
+    expect(claude.calls.length).toBe(before)
+    release()
+    await tm.whenIdle(id)
+    expect(
+      (await tm.timeline(id)).filter((e) => e.kind === 'user_text').map((e) => e.text)
+    ).toContain('順便改錯誤訊息')
+  })
+
+  test('init 把執行中的任務標為中斷；resume 送出 [resume]', async () => {
+    const { tm, claude, repo } = await setup()
+    const { makeTask } = await import('../fixtures/task')
+    await repo.saveTask(makeTask({ id: 'x', runState: 'running', mainSessionId: 's9' }))
+    await tm.init()
+    expect(tm.get('x').runState).toBe('interrupted')
+    await tm.resume('x')
+    await tm.whenIdle('x')
+    expect(claude.calls.at(-1)).toMatchObject({
+      prompt: expect.stringContaining('[resume]'),
+      options: { resume: 's9' }
+    })
+    expect(tm.get('x').runState).toBe('idle')
   })
 })

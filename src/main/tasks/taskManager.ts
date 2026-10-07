@@ -10,6 +10,7 @@ import type {
   BranchConclusion,
   Channel,
   PermissionDecision,
+  PermissionRequest,
   Task,
   TimelineEvent,
   VerificationResult
@@ -45,6 +46,13 @@ export interface TaskManagerDeps {
   newId?: () => string
 }
 
+interface PermissionWaiter {
+  taskId: string
+  channel: Channel
+  request: PermissionRequest
+  resolve: (d: PermissionDecision) => void
+}
+
 const MAIN_TOOLS: HarnessToolName[] = ['ask_user', 'propose_spec', 'update_plan', 'submit_report']
 const runKey = (taskId: string, channel: Channel) => `${taskId}|${channel}`
 const branchIdOf = (channel: Channel) =>
@@ -63,6 +71,8 @@ export class TaskManager {
   private timelineWrites = new Map<string, Promise<void>>()
   /** 每個 channel 的「決定插話或開新一輪」依序進行，避免同時開出兩段執行 */
   private turnLocks = new Map<string, Promise<unknown>>()
+  /** 等待使用者核准的請求，依提出順序；UI 一次顯示最早的一個 */
+  private permissionWaiters = new Map<string, PermissionWaiter>()
   /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
   private finalizing = new Map<string, Promise<void>>()
@@ -172,6 +182,11 @@ export class TaskManager {
     return snapshot
   }
 
+  /** 不等待寫入的 update（用在同步回呼裡），寫入失敗只記錄 */
+  private persist(taskId: string, fn: (t: Task) => void) {
+    this.update(taskId, fn).catch((e: unknown) => console.error('[TaskManager] 儲存任務失敗', e))
+  }
+
   private addTimeline(taskId: string, e: Omit<TimelineEvent, 'id' | 'ts'>): Promise<void> {
     const event: TimelineEvent = { id: this.newId(), ts: this.now(), ...e }
     const prev = this.timelineWrites.get(taskId) ?? Promise.resolve()
@@ -272,7 +287,7 @@ export class TaskManager {
       ],
       requestApproval: (req, signal) => this.requestApproval(taskId, channel, req, signal),
       onApproved: (command, pattern) => {
-        void this.update(taskId, (x) => {
+        this.persist(taskId, (x) => {
           if (command && !x.approvedCommands.includes(command)) x.approvedCommands.push(command)
           if (pattern && !x.allowedCommands.includes(pattern)) x.allowedCommands.push(pattern)
         })
@@ -602,7 +617,36 @@ export class TaskManager {
     await this.send(taskId, 'main', msg.branchConclusion(branchId, c), { silent: true })
   }
 
-  // ───────── 暫時的 stub（Task 23、24 取代） ─────────
+  // ───────── 規格 ─────────
+
+  async approveSpec(taskId: string) {
+    await this.update(taskId, (t) => {
+      t.status = transition(t.status, 'SPEC_APPROVED')
+    })
+    await this.send(taskId, 'main', msg.specApproved(), { display: '核准規格，開始實作' })
+  }
+
+  async requestSpecChanges(taskId: string, text: string) {
+    const body = text.trim()
+    if (!body) throw new Error('請說明要修改的地方')
+    await this.update(taskId, (t) => {
+      t.status = transition(t.status, 'SPEC_CHANGES_REQUESTED')
+    })
+    await this.send(taskId, 'main', msg.specFeedback(body), { display: `要求修改規格：${body}` })
+  }
+
+  // ───────── 指令核准 ─────────
+
+  /** 依等待中的請求更新卡片與主線狀態（分岔的請求不改變主線的 runState） */
+  private syncPermission(t: Task) {
+    const waiting = [...this.permissionWaiters.values()].filter((w) => w.taskId === t.id)
+    t.pendingPermission = waiting[0]?.request
+    if (waiting.some((w) => w.channel === 'main')) {
+      if (t.runState === 'running') t.runState = 'waiting_permission'
+    } else if (t.runState === 'waiting_permission') {
+      t.runState = 'running'
+    }
+  }
 
   private requestApproval(
     taskId: string,
@@ -610,9 +654,64 @@ export class TaskManager {
     req: ApprovalRequest,
     signal: AbortSignal
   ): Promise<PermissionDecision> {
-    void [taskId, channel, req, signal]
-    return Promise.resolve({ allow: false, message: '尚未實作' })
+    if (signal.aborted) return Promise.resolve({ allow: false, message: '已取消' })
+    const id = this.newId()
+    return new Promise((resolve) => {
+      let settled = false
+      const onAbort = () => finish({ allow: false, message: '已取消' })
+      const finish = (d: PermissionDecision) => {
+        if (settled) return
+        settled = true
+        signal.removeEventListener('abort', onAbort)
+        this.permissionWaiters.delete(id)
+        this.persist(taskId, (t) => this.syncPermission(t))
+        resolve(d)
+      }
+      this.permissionWaiters.set(id, {
+        taskId,
+        channel,
+        request: {
+          id,
+          taskId,
+          toolName: req.toolName,
+          input: req.input,
+          suggestedPattern: req.suggestedPattern,
+          createdAt: this.now()
+        },
+        resolve: finish
+      })
+      signal.addEventListener('abort', onAbort, { once: true })
+      this.persist(taskId, (t) => this.syncPermission(t))
+    })
   }
+
+  async resolvePermission(taskId: string, requestId: string, decision: PermissionDecision) {
+    const w = this.permissionWaiters.get(requestId)
+    if (!w || w.taskId !== taskId) throw new Error('這個核准請求已經失效')
+    w.resolve(decision)
+  }
+
+  // ───────── 停止與續接 ─────────
+
+  async stop(taskId: string, channel: Channel) {
+    for (const w of [...this.permissionWaiters.values()]) {
+      if (w.taskId === taskId && w.channel === channel)
+        w.resolve({ allow: false, message: '使用者停止了執行' })
+    }
+    await this.runs.get(runKey(taskId, channel))?.interrupt()
+  }
+
+  async resume(taskId: string) {
+    const t = this.get(taskId)
+    // 第一輪還沒拿到 session 就中斷：沒有可續接的對話，重新送出需求
+    if (!t.mainSessionId) {
+      await this.send(taskId, 'main', t.request, { display: '繼續執行' })
+      return
+    }
+    await this.send(taskId, 'main', msg.resume(), { display: '繼續執行' })
+  }
+
+  // ───────── 暫時的 stub（Task 24 取代） ─────────
 
   private async finalizeReport(taskId: string, input: ReportInput, run?: AgentRun) {
     void [taskId, input, run]
