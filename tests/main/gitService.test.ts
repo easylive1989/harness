@@ -30,6 +30,27 @@ describe('GitService', () => {
     expect(await git.currentBranch(repo)).toBe('main')
   })
 
+  test('detached HEAD：branches 只列真正的分支，branchInfo 的 current 取第一個分支', async () => {
+    sh(repo, 'branch', 'develop')
+    sh(repo, 'tag', 'main')
+    sh(repo, 'checkout', '-q', '--detach')
+    expect(await git.branches(repo)).toEqual(['develop', 'main'])
+    expect(await git.currentBranch(repo)).toBe('HEAD')
+    expect(await git.branchInfo(repo)).toEqual({
+      branches: ['develop', 'main'],
+      current: 'develop'
+    })
+    sh(repo, 'checkout', '-q', 'main')
+    expect(await git.branchInfo(repo)).toEqual({ branches: ['develop', 'main'], current: 'main' })
+  })
+
+  test('沒有任何 commit 的 repo：沒有分支，current 為空字串', async () => {
+    const empty = await mkdtemp(join(tmpdir(), 'harness-git-empty-'))
+    sh(empty, 'init', '-q', '-b', 'main')
+    expect(await git.branches(empty)).toEqual([])
+    expect(await git.branchInfo(empty)).toEqual({ branches: [], current: '' })
+  })
+
   test('建立 worktree、commit、diff 與統計', async () => {
     await git.createWorktree(repo, wt, 'harness/t1', 'main')
     expect(await git.commitAll(wt, 'noop')).toBeNull()

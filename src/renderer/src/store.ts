@@ -27,7 +27,15 @@ interface State {
   removeFeedback(taskId: string, anchor: string): void
   clearFeedback(taskId: string): void
   dismissToast(): void
+  /** 視窗重新取得焦點時呼叫：Claude Code 未就緒就重新偵測（最多每 5 秒一次） */
+  recheckClaude(): Promise<void>
 }
+
+/** 視窗取得焦點時重新偵測 Claude Code 的最短間隔 */
+export const CLAUDE_RECHECK_MS = 5000
+
+// 上次因視窗取得焦點而重新偵測的時間（只在這個模組內用來節流）
+let lastClaudeRecheck = -Infinity
 
 export const useStore = create<State>((set, get) => ({
   ready: false,
@@ -40,6 +48,9 @@ export const useStore = create<State>((set, get) => ({
 
   init() {
     const off = onEvent((e) => get().apply(e))
+    // 使用者可能切到終端機登入 Claude Code 後再回來：回到視窗時重新偵測
+    const onFocus = () => void get().recheckClaude()
+    window.addEventListener('focus', onFocus)
     void (async () => {
       try {
         const [claude, settings, repos, tasks] = await Promise.all([
@@ -64,7 +75,10 @@ export const useStore = create<State>((set, get) => ({
         set({ toast: errorText(e), ready: true })
       }
     })()
-    return off
+    return () => {
+      off()
+      window.removeEventListener('focus', onFocus)
+    }
   },
 
   apply(e) {
@@ -117,5 +131,18 @@ export const useStore = create<State>((set, get) => ({
       }
     })),
   clearFeedback: (taskId) => set((s) => ({ feedback: { ...s.feedback, [taskId]: [] } })),
-  dismissToast: () => set({ toast: undefined })
+  dismissToast: () => set({ toast: undefined }),
+
+  async recheckClaude() {
+    const { ready, claude } = get()
+    if (!ready || !claude || claude.loggedIn) return
+    const now = Date.now()
+    if (now - lastClaudeRecheck < CLAUDE_RECHECK_MS) return
+    lastClaudeRecheck = now
+    try {
+      set({ claude: await call('claude:status', true) })
+    } catch {
+      // 背景偵測失敗不打擾使用者；橫幅上的「重新檢查」會顯示錯誤
+    }
+  }
 }))

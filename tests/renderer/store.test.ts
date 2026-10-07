@@ -75,9 +75,10 @@ describe('store.init / open / act', () => {
 
   test('載入失敗時仍進入畫面並顯示錯誤', async () => {
     vi.mocked(call).mockRejectedValue(ipcError('repos:list', '讀取失敗'))
-    useStore.getState().init()
+    const unsubscribe = useStore.getState().init()
     await vi.waitFor(() => expect(useStore.getState().ready).toBe(true))
     expect(useStore.getState().toast).toBe('讀取失敗')
+    unsubscribe()
   })
 
   test('時間軸讀取失敗時顯示 toast，不丟出未處理的錯誤', async () => {
@@ -97,5 +98,53 @@ describe('store.init / open / act', () => {
     expect(useStore.getState().toast).toBe('尚未登入')
     useStore.getState().dismissToast()
     expect(useStore.getState().toast).toBeUndefined()
+  })
+})
+
+describe('store.recheckClaude（視窗取得焦點時）', () => {
+  const focus = () => window.dispatchEvent(new Event('focus'))
+  const statusCalls = () =>
+    vi.mocked(call).mock.calls.filter((c) => c[0] === 'claude:status' && c[1] === true).length
+
+  test('未登入時重新偵測，最多每 5 秒一次；登入後或取消訂閱後不再偵測', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-10-07T00:00:00Z'))
+      let loggedIn = false
+      const replies: Record<string, () => unknown> = {
+        'claude:status': () => ({ found: true, loggedIn }),
+        'settings:get': () => ({ defaultModel: 'claude-opus-5-5' }),
+        'repos:list': () => [],
+        'tasks:list': () => []
+      }
+      vi.mocked(call).mockImplementation((async (ch: string) => replies[ch]()) as typeof call)
+      const unsubscribe = useStore.getState().init()
+      await vi.waitFor(() => expect(useStore.getState().ready).toBe(true))
+
+      focus()
+      await vi.waitFor(() => expect(statusCalls()).toBe(1))
+      focus()
+      // waitFor 的輪詢也會推進假的 Date，第一次偵測約在 00:00:00.1
+      vi.setSystemTime(new Date('2026-10-07T00:00:04Z'))
+      focus()
+      expect(statusCalls()).toBe(1)
+
+      loggedIn = true
+      vi.setSystemTime(new Date('2026-10-07T00:00:06Z'))
+      focus()
+      await vi.waitFor(() => expect(useStore.getState().claude?.loggedIn).toBe(true))
+      expect(statusCalls()).toBe(2)
+
+      vi.setSystemTime(new Date('2026-10-07T00:01:00Z'))
+      focus()
+      useStore.setState({ claude: { found: true, loggedIn: false } })
+      unsubscribe()
+      vi.setSystemTime(new Date('2026-10-07T00:02:00Z'))
+      focus()
+      await Promise.resolve()
+      expect(statusCalls()).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -2513,6 +2513,27 @@ describe('GitService', () => {
     expect(await git.currentBranch(repo)).toBe('main')
   })
 
+  test('detached HEAD：branches 只列真正的分支，branchInfo 的 current 取第一個分支', async () => {
+    sh(repo, 'branch', 'develop')
+    sh(repo, 'tag', 'main')
+    sh(repo, 'checkout', '-q', '--detach')
+    expect(await git.branches(repo)).toEqual(['develop', 'main'])
+    expect(await git.currentBranch(repo)).toBe('HEAD')
+    expect(await git.branchInfo(repo)).toEqual({
+      branches: ['develop', 'main'],
+      current: 'develop'
+    })
+    sh(repo, 'checkout', '-q', 'main')
+    expect(await git.branchInfo(repo)).toEqual({ branches: ['develop', 'main'], current: 'main' })
+  })
+
+  test('沒有任何 commit 的 repo：沒有分支，current 為空字串', async () => {
+    const empty = await mkdtemp(join(tmpdir(), 'harness-git-empty-'))
+    sh(empty, 'init', '-q', '-b', 'main')
+    expect(await git.branches(empty)).toEqual([])
+    expect(await git.branchInfo(empty)).toEqual({ branches: [], current: '' })
+  })
+
   test('建立 worktree、commit、diff 與統計', async () => {
     await git.createWorktree(repo, wt, 'harness/t1', 'main')
     expect(await git.commitAll(wt, 'noop')).toBeNull()
@@ -2796,15 +2817,35 @@ export class GitService {
     return (await git(dir, 'rev-parse', '--show-toplevel')).trim()
   }
 
+  /**
+   * 本地分支名稱。用 for-each-ref 只列 refs/heads/：`git branch` 在 detached HEAD 時
+   * 會多出「(HEAD detached at …)」這種不是分支的項目；lstrip=2 在分支和 tag 同名時也不會變成 heads/x。
+   */
   async branches(repo: string) {
-    return (await git(repo, 'branch', '--format=%(refname:short)'))
+    return (await git(repo, 'for-each-ref', '--format=%(refname:lstrip=2)', 'refs/heads/'))
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean)
   }
 
+  /**
+   * 目前所在的分支；detached HEAD 時是 'HEAD'。
+   * 用 symbolic-ref 而不是 `rev-parse --abbrev-ref`：後者在分支和 tag 同名時會回 heads/x。
+   */
   async currentBranch(repo: string) {
-    return (await git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')).trim()
+    try {
+      return (await git(repo, 'symbolic-ref', '--quiet', 'HEAD'))
+        .trim()
+        .replace(/^refs\/heads\//, '')
+    } catch {
+      return 'HEAD'
+    }
+  }
+
+  /** 給「從哪個分支開始」用：current 一定是 branches 之一（detached HEAD 時取第一個分支，沒有分支時為空字串） */
+  async branchInfo(repo: string): Promise<{ branches: string[]; current: string }> {
+    const [branches, current] = await Promise.all([this.branches(repo), this.currentBranch(repo)])
+    return { branches, current: branches.includes(current) ? current : (branches[0] ?? '') }
   }
 
   async createWorktree(repo: string, worktreePath: string, branch: string, base: string) {
@@ -2945,6 +2986,7 @@ export type GitLike = Pick<
   | 'repoRoot'
   | 'branches'
   | 'currentBranch'
+  | 'branchInfo'
   | 'createWorktree'
   | 'commitAll'
   | 'diff'
@@ -5004,6 +5046,7 @@ export function fakeGit(): GitLike & { calls: string[] } {
     repoRoot: async (d) => d,
     branches: async () => ['main'],
     currentBranch: async () => 'main',
+    branchInfo: async () => ({ branches: ['main'], current: 'main' }),
     createWorktree: async (_repo, wt, branch, base) => {
       calls.push(`worktree ${wt} ${branch} ${base}`)
     },
@@ -8042,7 +8085,7 @@ export function registerIpc(d: IpcDeps) {
       assertId(repoId, 'repo')
       const r = (await d.repo.listRepos()).find((x) => x.id === repoId)
       if (!r) throw new Error('找不到 repo')
-      return { branches: await d.git.branches(r.path), current: await d.git.currentBranch(r.path) }
+      return d.git.branchInfo(r.path)
     },
     'tasks:list': () => d.tasks.list(),
     'tasks:create': async (raw: CreateTaskInput) => {
@@ -8516,9 +8559,10 @@ describe('store.init / open / act', () => {
 
   test('載入失敗時仍進入畫面並顯示錯誤', async () => {
     vi.mocked(call).mockRejectedValue(ipcError('repos:list', '讀取失敗'))
-    useStore.getState().init()
+    const unsubscribe = useStore.getState().init()
     await vi.waitFor(() => expect(useStore.getState().ready).toBe(true))
     expect(useStore.getState().toast).toBe('讀取失敗')
+    unsubscribe()
   })
 
   test('時間軸讀取失敗時顯示 toast，不丟出未處理的錯誤', async () => {
@@ -8538,6 +8582,54 @@ describe('store.init / open / act', () => {
     expect(useStore.getState().toast).toBe('尚未登入')
     useStore.getState().dismissToast()
     expect(useStore.getState().toast).toBeUndefined()
+  })
+})
+
+describe('store.recheckClaude（視窗取得焦點時）', () => {
+  const focus = () => window.dispatchEvent(new Event('focus'))
+  const statusCalls = () =>
+    vi.mocked(call).mock.calls.filter((c) => c[0] === 'claude:status' && c[1] === true).length
+
+  test('未登入時重新偵測，最多每 5 秒一次；登入後或取消訂閱後不再偵測', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-10-07T00:00:00Z'))
+      let loggedIn = false
+      const replies: Record<string, () => unknown> = {
+        'claude:status': () => ({ found: true, loggedIn }),
+        'settings:get': () => ({ defaultModel: 'claude-opus-5-5' }),
+        'repos:list': () => [],
+        'tasks:list': () => []
+      }
+      vi.mocked(call).mockImplementation((async (ch: string) => replies[ch]()) as typeof call)
+      const unsubscribe = useStore.getState().init()
+      await vi.waitFor(() => expect(useStore.getState().ready).toBe(true))
+
+      focus()
+      await vi.waitFor(() => expect(statusCalls()).toBe(1))
+      focus()
+      // waitFor 的輪詢也會推進假的 Date，第一次偵測約在 00:00:00.1
+      vi.setSystemTime(new Date('2026-10-07T00:00:04Z'))
+      focus()
+      expect(statusCalls()).toBe(1)
+
+      loggedIn = true
+      vi.setSystemTime(new Date('2026-10-07T00:00:06Z'))
+      focus()
+      await vi.waitFor(() => expect(useStore.getState().claude?.loggedIn).toBe(true))
+      expect(statusCalls()).toBe(2)
+
+      vi.setSystemTime(new Date('2026-10-07T00:01:00Z'))
+      focus()
+      useStore.setState({ claude: { found: true, loggedIn: false } })
+      unsubscribe()
+      vi.setSystemTime(new Date('2026-10-07T00:02:00Z'))
+      focus()
+      await Promise.resolve()
+      expect(statusCalls()).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 ```
@@ -8613,7 +8705,15 @@ interface State {
   removeFeedback(taskId: string, anchor: string): void
   clearFeedback(taskId: string): void
   dismissToast(): void
+  /** 視窗重新取得焦點時呼叫：Claude Code 未就緒就重新偵測（最多每 5 秒一次） */
+  recheckClaude(): Promise<void>
 }
+
+/** 視窗取得焦點時重新偵測 Claude Code 的最短間隔 */
+export const CLAUDE_RECHECK_MS = 5000
+
+// 上次因視窗取得焦點而重新偵測的時間（只在這個模組內用來節流）
+let lastClaudeRecheck = -Infinity
 
 export const useStore = create<State>((set, get) => ({
   ready: false,
@@ -8626,6 +8726,9 @@ export const useStore = create<State>((set, get) => ({
 
   init() {
     const off = onEvent((e) => get().apply(e))
+    // 使用者可能切到終端機登入 Claude Code 後再回來：回到視窗時重新偵測
+    const onFocus = () => void get().recheckClaude()
+    window.addEventListener('focus', onFocus)
     void (async () => {
       try {
         const [claude, settings, repos, tasks] = await Promise.all([
@@ -8650,7 +8753,10 @@ export const useStore = create<State>((set, get) => ({
         set({ toast: errorText(e), ready: true })
       }
     })()
-    return off
+    return () => {
+      off()
+      window.removeEventListener('focus', onFocus)
+    }
   },
 
   apply(e) {
@@ -8703,11 +8809,24 @@ export const useStore = create<State>((set, get) => ({
       }
     })),
   clearFeedback: (taskId) => set((s) => ({ feedback: { ...s.feedback, [taskId]: [] } })),
-  dismissToast: () => set({ toast: undefined })
+  dismissToast: () => set({ toast: undefined }),
+
+  async recheckClaude() {
+    const { ready, claude } = get()
+    if (!ready || !claude || claude.loggedIn) return
+    const now = Date.now()
+    if (now - lastClaudeRecheck < CLAUDE_RECHECK_MS) return
+    lastClaudeRecheck = now
+    try {
+      set({ claude: await call('claude:status', true) })
+    } catch {
+      // 背景偵測失敗不打擾使用者；橫幅上的「重新檢查」會顯示錯誤
+    }
+  }
 }))
 ```
 
-`store.init()` 同步訂閱事件、回傳取消訂閱函式，資料在背景載入（App 的 `useEffect` 直接回傳它當 cleanup，StrictMode 重跑時不會重複訂閱）；載入失敗時仍設 `ready` 並顯示 toast。`open()` 讀時間軸失敗時走 `act` 顯示 toast。
+`store.init()` 同步訂閱事件、回傳取消訂閱函式，資料在背景載入（App 的 `useEffect` 直接回傳它當 cleanup，StrictMode 重跑時不會重複訂閱）；載入失敗時仍設 `ready` 並顯示 toast。`open()` 讀時間軸失敗時走 `act` 顯示 toast。視窗重新取得焦點（`window` 的 `focus`）時，若 Claude Code 未就緒就以 `claude:status(true)` 重新偵測，最多每 5 秒一次（`recheckClaude`），使用者到終端機登入後回來不必手動按「重新檢查」；init 回傳的 cleanup 也會移除這個監聽。
 
 **Step 5: lib/stage.ts**
 

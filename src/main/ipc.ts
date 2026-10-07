@@ -82,7 +82,7 @@ export function registerIpc(d: IpcDeps) {
       assertId(repoId, 'repo')
       const r = (await d.repo.listRepos()).find((x) => x.id === repoId)
       if (!r) throw new Error('找不到 repo')
-      return { branches: await d.git.branches(r.path), current: await d.git.currentBranch(r.path) }
+      return d.git.branchInfo(r.path)
     },
     'tasks:list': () => d.tasks.list(),
     'tasks:create': async (raw: CreateTaskInput) => {

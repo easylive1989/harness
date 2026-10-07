@@ -116,6 +116,7 @@ export function fakeGit(): GitLike & { calls: string[] } {
     repoRoot: async (d) => d,
     branches: async () => ['main'],
     currentBranch: async () => 'main',
+    branchInfo: async () => ({ branches: ['main'], current: 'main' }),
     createWorktree: async (_repo, wt, branch, base) => {
       calls.push(`worktree ${wt} ${branch} ${base}`)
     },

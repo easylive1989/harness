@@ -112,15 +112,35 @@ export class GitService {
     return (await git(dir, 'rev-parse', '--show-toplevel')).trim()
   }
 
+  /**
+   * 本地分支名稱。用 for-each-ref 只列 refs/heads/：`git branch` 在 detached HEAD 時
+   * 會多出「(HEAD detached at …)」這種不是分支的項目；lstrip=2 在分支和 tag 同名時也不會變成 heads/x。
+   */
   async branches(repo: string) {
-    return (await git(repo, 'branch', '--format=%(refname:short)'))
+    return (await git(repo, 'for-each-ref', '--format=%(refname:lstrip=2)', 'refs/heads/'))
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean)
   }
 
+  /**
+   * 目前所在的分支；detached HEAD 時是 'HEAD'。
+   * 用 symbolic-ref 而不是 `rev-parse --abbrev-ref`：後者在分支和 tag 同名時會回 heads/x。
+   */
   async currentBranch(repo: string) {
-    return (await git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')).trim()
+    try {
+      return (await git(repo, 'symbolic-ref', '--quiet', 'HEAD'))
+        .trim()
+        .replace(/^refs\/heads\//, '')
+    } catch {
+      return 'HEAD'
+    }
+  }
+
+  /** 給「從哪個分支開始」用：current 一定是 branches 之一（detached HEAD 時取第一個分支，沒有分支時為空字串） */
+  async branchInfo(repo: string): Promise<{ branches: string[]; current: string }> {
+    const [branches, current] = await Promise.all([this.branches(repo), this.currentBranch(repo)])
+    return { branches, current: branches.includes(current) ? current : (branches[0] ?? '') }
   }
 
   async createWorktree(repo: string, worktreePath: string, branch: string, base: string) {
@@ -261,6 +281,7 @@ export type GitLike = Pick<
   | 'repoRoot'
   | 'branches'
   | 'currentBranch'
+  | 'branchInfo'
   | 'createWorktree'
   | 'commitAll'
   | 'diff'
