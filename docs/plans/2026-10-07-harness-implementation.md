@@ -505,6 +505,15 @@ describe('ReportInputSchema', () => {
     expect(ReportInputSchema.safeParse(bad).success).toBe(false)
   })
 
+  test('custom block id 最長 64 字元（與 harness-block:// 網址的檢查一致）', () => {
+    const ok = structuredClone(sampleReport)
+    ok.custom_blocks[0].id = 'a'.repeat(64)
+    expect(ReportInputSchema.safeParse(ok).success).toBe(true)
+    const bad = structuredClone(sampleReport)
+    bad.custom_blocks[0].id = 'a'.repeat(65)
+    expect(ReportInputSchema.safeParse(bad).success).toBe(false)
+  })
+
   test('同一張圖裡節點 id 重複時失敗', () => {
     const bad = structuredClone(sampleReport)
     bad.architecture.before.nodes.push({
@@ -544,7 +553,8 @@ Run: `npx vitest run tests/shared/report.test.ts` → Expected: FAIL（找不到
 // src/shared/report.ts
 import { z } from 'zod'
 
-const id = z.string().regex(/^[a-z0-9_-]+$/)
+/** custom block id：也用在 harness-block:// 網址裡，主程序以相同規則（最長 64）檢查 */
+const id = z.string().max(64).regex(/^[a-z0-9_-]+$/)
 
 const NodeSchema = z.object({
   id: z.string().min(1),
@@ -651,7 +661,7 @@ export type ReportInput = z.infer<typeof ReportInputSchema>
 
 **Step 5: 確認通過**
 
-Run: `npx vitest run tests/shared/report.test.ts` → Expected: 7 passed
+Run: `npx vitest run tests/shared/report.test.ts` → Expected: 8 passed
 Run: `npm run typecheck` → PASS
 
 **Step 6: Commit**
@@ -3016,6 +3026,42 @@ describe('verifyRunner', () => {
     expect(r.outputTail).toBe('中')
   })
 
+  test('中止會終止整個 process group，並標示已取消', async () => {
+    const ac = new AbortController()
+    const started = Date.now()
+    setTimeout(() => ac.abort(), 100)
+    const r = await runShell(tmpdir(), 'sleep 5; echo done', 60_000, ac.signal)
+    expect(Date.now() - started).toBeLessThan(1500)
+    expect(r.outputTail.endsWith('[Harness] 已取消')).toBe(true)
+    expect(r.outputTail).not.toContain('done')
+  })
+
+  test('中止時忽略 SIGTERM 的指令很快以 SIGKILL 終止', async () => {
+    const ac = new AbortController()
+    const started = Date.now()
+    setTimeout(() => ac.abort(), 100)
+    const r = await runShell(tmpdir(), "trap '' TERM; sleep 5; echo done", 60_000, ac.signal)
+    expect(Date.now() - started).toBeLessThan(1500)
+    expect(r.outputTail).toContain('[Harness] 已取消')
+  })
+
+  test('已中止的 signal 不會啟動指令', async () => {
+    const ac = new AbortController()
+    ac.abort()
+    const r = await runShell(tmpdir(), 'echo should-not-run', 60_000, ac.signal)
+    expect(r).toMatchObject({ exitCode: null, durationMs: 0 })
+    expect(r.outputTail).toContain('[Harness] 已取消')
+    expect(r.outputTail).not.toContain('should-not-run')
+  })
+
+  test('runVerification 中止後其餘指令不執行', async () => {
+    const ac = new AbortController()
+    setTimeout(() => ac.abort(), 100)
+    const r = await runVerification(tmpdir(), ['sleep 5', 'echo b'], () => true, ac.signal)
+    expect(r[0].outputTail).toContain('[Harness] 已取消')
+    expect(r[1]).toMatchObject({ command: 'echo b', exitCode: null, skipped: '已取消，未執行' })
+  })
+
   test('未核准的指令不執行', async () => {
     const r = await runVerification(tmpdir(), ['echo a', 'echo b'], (c) => c === 'echo a')
     expect(r[0].exitCode).toBe(0)
@@ -3036,15 +3082,30 @@ import type { VerificationResult } from '@shared/types'
 
 /** 逾時送出 SIGTERM 後，等這麼久還沒結束就送 SIGKILL */
 const KILL_GRACE_MS = 2000
+/** 中止（關閉 app）時的寬限較短，才能在關閉的時間上限內結束 */
+const ABORT_KILL_GRACE_MS = 500
 const TAIL_CHARS = 4000
 const TIMEOUT_MARKER = '\n[Harness] 執行逾時，已終止'
+const ABORT_MARKER = '\n[Harness] 已取消'
 
+/**
+ * 在 cwd 以 login shell 執行指令，回傳 exit code 與輸出結尾。
+ * signal 中止時終止整個 process group（先 TERM，寬限後 KILL），輸出結尾標示已取消。
+ */
 export function runShell(
   cwd: string,
   command: string,
-  timeoutMs = 10 * 60_000
+  timeoutMs = 10 * 60_000,
+  signal?: AbortSignal
 ): Promise<VerificationResult> {
   const started = Date.now()
+  if (signal?.aborted)
+    return Promise.resolve({
+      command,
+      exitCode: null,
+      durationMs: 0,
+      outputTail: ABORT_MARKER.trim()
+    })
   return new Promise((resolve) => {
     // detached：子程序自成 process group，逾時才能連同孫程序一起終止
     // stdin 為空：讀 stdin 的指令立刻拿到 EOF，不會卡住
@@ -3056,6 +3117,7 @@ export function runShell(
     })
     let out = ''
     let timedOut = false
+    let aborted = false
     // utf8 decoder 會保留跨 chunk 的多位元組字元
     const onData = (s: string) => {
       out = (out + s).slice(-2 * TAIL_CHARS)
@@ -3072,25 +3134,37 @@ export function runShell(
       }
     }
     let killTimer: NodeJS.Timeout | undefined
-    const timer = setTimeout(() => {
-      timedOut = true
+    const terminate = (graceMs: number) => {
+      if (killTimer) return
       killGroup('SIGTERM')
       // 忽略 SIGTERM 的程序在寬限期後強制終止
-      killTimer = setTimeout(() => killGroup('SIGKILL'), KILL_GRACE_MS)
+      killTimer = setTimeout(() => killGroup('SIGKILL'), graceMs)
+    }
+    const timer = setTimeout(() => {
+      timedOut = true
+      terminate(KILL_GRACE_MS)
     }, timeoutMs)
-    /** 逾時標記在結算時才接上，確保一定留在 tail 裡 */
-    const tail = () =>
-      timedOut
-        ? out.slice(-(TAIL_CHARS - TIMEOUT_MARKER.length)) + TIMEOUT_MARKER
-        : out.slice(-TAIL_CHARS)
-    child.on('close', (code) => {
+    const onAbort = () => {
+      aborted = true
+      terminate(ABORT_KILL_GRACE_MS)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    const cleanup = () => {
       clearTimeout(timer)
       clearTimeout(killTimer)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    /** 逾時／取消標記在結算時才接上，確保一定留在 tail 裡 */
+    const tail = () => {
+      const marker = aborted ? ABORT_MARKER : timedOut ? TIMEOUT_MARKER : ''
+      return out.slice(-(TAIL_CHARS - marker.length)) + marker
+    }
+    child.on('close', (code) => {
+      cleanup()
       resolve({ command, exitCode: code, durationMs: Date.now() - started, outputTail: tail() })
     })
     child.on('error', (err) => {
-      clearTimeout(timer)
-      clearTimeout(killTimer)
+      cleanup()
       resolve({
         command,
         exitCode: null,
@@ -3105,10 +3179,21 @@ export async function runVerification(
   cwd: string,
   commands: string[],
   isAllowed: (command: string) => boolean,
+  signal?: AbortSignal,
   timeoutMs?: number
 ): Promise<VerificationResult[]> {
   const results: VerificationResult[] = []
   for (const command of commands) {
+    if (signal?.aborted) {
+      results.push({
+        command,
+        exitCode: null,
+        durationMs: 0,
+        outputTail: '',
+        skipped: '已取消，未執行'
+      })
+      continue
+    }
     if (!isAllowed(command)) {
       results.push({
         command,
@@ -3119,7 +3204,7 @@ export async function runVerification(
       })
       continue
     }
-    results.push(await runShell(cwd, command, timeoutMs))
+    results.push(await runShell(cwd, command, timeoutMs, signal))
   }
   return results
 }
@@ -5190,7 +5275,9 @@ export interface TaskManagerDeps {
   verify: (
     cwd: string,
     commands: string[],
-    isAllowed: (c: string) => boolean
+    isAllowed: (c: string) => boolean,
+    /** 關閉 app 時中止進行中的驗證指令 */
+    signal?: AbortSignal
   ) => Promise<VerificationResult[]>
   now?: () => string
   newId?: () => string
@@ -5259,8 +5346,12 @@ export class TaskManager {
   private finalizing = new Set<string>()
   /** 報告整理的 promise，整個流程（含之後的時間軸寫入）結束才移除；whenIdle 用 */
   private reportJobs = new Map<string, Promise<void>>()
+  /** 每個報告整理流程的 AbortController；關閉 app 時用來中止驗證指令 */
+  private reportAborts = new Map<string, AbortController>()
   /** 正在開 PR／合併／丟棄的任務 */
   private finishing = new Set<string>()
+  /** 收尾操作的 promise；關閉 app 時等它們（有上限） */
+  private finishJobs = new Map<string, Promise<unknown>>()
   private readonly now: () => string
   private readonly newId: () => string
   private readonly prevRunTimeoutMs: number
@@ -6531,8 +6622,8 @@ export function prBody(r: Report): string {
 檔頭加上 `import { sampleReport } from '../fixtures/report'`。`get()` 回傳複本，測試不能直接改內部狀態：要讓 `npm test` 算「核准過」，就真的走一次核准流程。
 
 ```ts
-async function toImplementing() {
-  const ctx = await setup()
+async function toImplementing(over: Partial<TaskManagerDeps> = {}) {
+  const ctx = await setup(over)
   ctx.claude.script = async ({ call, sink }) => {
     if (call === 0) await sink.proposeSpec(spec)
   }
@@ -6560,7 +6651,12 @@ describe('TaskManager：報告與收尾', () => {
     const r = await repo.getReport(id, 1)
     expect(r).toMatchObject({ version: 1, commit: 'abc123', stats: { files: 1 } })
     expect(await tm.getReport(id, 1)).toEqual(r)
-    expect(verify).toHaveBeenCalledWith(t.worktreePath, ['npm test'], expect.any(Function))
+    expect(verify).toHaveBeenCalledWith(
+      t.worktreePath,
+      ['npm test'],
+      expect.any(Function),
+      expect.any(AbortSignal)
+    )
     const isAllowed = verify.mock.calls[0][2]
     expect(isAllowed('npm test')).toBe(true)
     expect(isAllowed('git status')).toBe(true) // 全域允許清單
@@ -7087,8 +7183,14 @@ describe('TaskManager：審查補強', () => {
 
   /** 等提交報告的那段執行結束後：commit、算 diff、實跑驗證指令、存報告 */
   private async finalizeReport(taskId: string, input: ReportInput, run?: AgentRun) {
+    const abort = new AbortController()
+    this.reportAborts.set(taskId, abort)
+    const assertNotAborted = () => {
+      if (abort.signal.aborted) throw new Error('Harness 正在關閉')
+    }
     try {
       await run?.done.catch(() => undefined)
+      assertNotAborted()
       const t = this.task(taskId)
       const version = t.reportVersions.length + 1
       const commit =
@@ -7111,8 +7213,11 @@ describe('TaskManager：審查補強', () => {
       const verification = await this.d.verify(
         t.worktreePath,
         input.verification.map((v) => v.command),
-        isAllowed
+        isAllowed,
+        abort.signal
       )
+      // 驗證被中止的結果不完整：不存報告，下次啟動可「繼續」重新整理
+      assertNotAborted()
       const report: Report = {
         version,
         taskId,
@@ -7135,11 +7240,14 @@ describe('TaskManager：審查補強', () => {
       })
       await this.addTimeline(taskId, { channel: 'main', kind: 'report', ref: String(version) })
     } catch (e) {
+      const aborted = abort.signal.aborted
       await this.update(taskId, (x) => {
-        x.runState = 'error'
-        x.error = `整理報告失敗：${errorMessage(e)}`
+        x.runState = aborted ? 'interrupted' : 'error'
+        x.error = aborted ? '關閉 app 時報告尚未整理完成' : `整理報告失敗：${errorMessage(e)}`
         this.finalizing.delete(taskId)
       }).catch(logError('儲存任務失敗'))
+    } finally {
+      if (this.reportAborts.get(taskId) === abort) this.reportAborts.delete(taskId)
     }
   }
 
@@ -7170,10 +7278,13 @@ describe('TaskManager：審查補強', () => {
     this.task(taskId)
     if (this.finishing.has(taskId)) throw new Error('另一個收尾操作正在進行，請稍候')
     this.finishing.add(taskId)
+    const job = fn()
+    this.finishJobs.set(taskId, job)
     try {
-      return await fn()
+      return await job
     } finally {
       this.finishing.delete(taskId)
+      this.finishJobs.delete(taskId)
     }
   }
 
@@ -7267,17 +7378,23 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `src/main/ipcGuards.ts`（IPC 邊界的輸入檢查，純函式）
 - Create: `src/main/report/blockHtml.ts`
 - Create: `src/main/ipc.ts`
-- Modify: `src/main/tasks/taskManager.ts`（加 `shutdown()`）
+- Modify: `src/main/tasks/taskManager.ts`（加 `shutdown()`；報告整理的驗證可中止、收尾操作可等待，見 Task 24）
+- Modify: `src/main/verify/verifyRunner.ts`（`runShell`／`runVerification` 接受 AbortSignal，見 Task 15）
+- Modify: `src/shared/report.ts`（custom block id 最長 64，見 Task 4）
 - Modify: `src/main/index.ts`
 - Modify: `src/preload/index.ts`、`src/preload/index.d.ts`；移除 `@electron-toolkit/preload` 依賴
-- Test: `tests/main/ipcGuards.test.ts`、`tests/main/blockHtml.test.ts`、`tests/main/taskManager.test.ts`
+- Test: `tests/main/ipcGuards.test.ts`、`tests/main/blockHtml.test.ts`、`tests/main/taskManager.test.ts`、`tests/main/verifyRunner.test.ts`、`tests/shared/report.test.ts`
 
 設計重點：
-- renderer 傳進來的任務／repo id 在 IPC 邊界先檢查格式（`/^[A-Za-z0-9_-]{1,64}$/`），再交給會組出 Store 路徑的模組（Store 本身也擋路徑穿越）。報告版本必須是正整數，channel 只能是 `main` 或 `branch:<id>`，`settings:set` 只保留已知欄位。
+- renderer 傳進來的任務／repo id 在 IPC 邊界先檢查格式（`/^[A-Za-z0-9_-]{1,64}$/`），再交給會組出 Store 路徑的模組（Store 本身也擋路徑穿越）。報告版本必須是正整數，channel 只能是 `main` 或 `branch:<id>`；文字參數（訊息、需求、base branch、問題／分岔／核准請求 id）必須是非空白字串並有長度上限，model 必須是支援的模型。
+- `settings:set` 只保留已知欄位並逐欄檢查型別（worktree 位置必須是絕對路徑、claudePath 空字串代表自動偵測）。
+- 只接受主視窗 main frame 送來的 IPC（`e.senderFrame === win.webContents.mainFrame`）；session 的權限請求與檢查一律拒絕。
+- `shell:showInFolder` 只能打開已加入的 repo 或任務 worktree 裡的路徑；`report:saveHtml` 的預設路徑只取檔名。
+- 啟動失敗（例如資料夾無法讀取）時顯示錯誤對話框並結束。
 - Claude Code 未登入時 `tasks:create` 以偵測的錯誤訊息拒絕（快取狀態未登入時先重新偵測一次）。
 - `ipc.ts` 只做對應與檢查；可測的邏輯放 `ipcGuards.ts`／`blockHtml.ts`（tests/main 不 import electron）。
-- `harness-block://report/<taskId>/<version>/<blockId>`：先用 `parseBlockUrl` 檢查格式，不符就 404；回應帶 CSP header，HTML 內也有同樣的 CSP meta。
-- 關閉 app（`before-quit`）時呼叫 `TaskManager.shutdown()` 中止所有執行，有時間上限，不讓關閉卡住；收尾後用 `app.exit(0)`（由 SIGTERM 觸發、又被 preventDefault 擋下的關閉，在 macOS 上再 `app.quit()` 只會關掉視窗、程序不會結束）。
+- `harness-block://report/<taskId>/<version>/<blockId>`：先用 `parseBlockUrl` 檢查格式（blockId 規則與 `@shared/report` 一致，最長 64），不符就 404；回應帶 CSP header，HTML 內也有同樣的 CSP meta 與轉義過的 `<title>`。
+- 關閉 app（`before-quit`）時呼叫 `TaskManager.shutdown(1200)`：中止所有執行與報告整理中的驗證指令（TERM，0.5 秒後 KILL），等執行、報告整理與進行中的收尾操作結束後寫入狀態；兩段各最多 1.2 秒，外層再有 3 秒硬上限，不讓關閉卡住。收尾後用 `app.exit(0)`（由 SIGTERM 觸發、又被 preventDefault 擋下的關閉，在 macOS 上再 `app.quit()` 只會關掉視窗、程序不會結束）。
 
 **Step 1: ipcGuards 測試**
 
@@ -7288,10 +7405,13 @@ import type { ClaudeStatus } from '@shared/types'
 import {
   assertChannel,
   assertId,
+  assertModel,
+  assertString,
   assertVersion,
   ensureClaudeReady,
+  isPathInside,
   isSafeId,
-  pickSettingsPatch
+  validateSettingsPatch
 } from '../../src/main/ipcGuards'
 
 describe('id 檢查', () => {
@@ -7322,12 +7442,98 @@ test('channel 只接受 main 或 branch:<id>', () => {
     expect(() => assertChannel(c)).toThrow('無效的對話頻道')
 })
 
-test('設定只保留已知欄位', () => {
-  expect(pickSettingsPatch({ branchPrefix: 'x/', evil: 1, claudePath: '/bin/claude' })).toEqual({
-    branchPrefix: 'x/',
-    claudePath: '/bin/claude'
+describe('validateSettingsPatch', () => {
+  test('只保留已知欄位，並整理值', () => {
+    expect(
+      validateSettingsPatch({
+        branchPrefix: 'x/',
+        evil: 1,
+        claudePath: '/bin/claude',
+        alwaysAllowedCommands: [' npm test ', 'ls'],
+        loadProjectSettings: false,
+        defaultModel: 'claude-sonnet-5-5',
+        worktreeRoot: '/tmp/wt'
+      })
+    ).toEqual({
+      branchPrefix: 'x/',
+      claudePath: '/bin/claude',
+      alwaysAllowedCommands: ['npm test', 'ls'],
+      loadProjectSettings: false,
+      defaultModel: 'claude-sonnet-5-5',
+      worktreeRoot: '/tmp/wt'
+    })
   })
-  expect(() => pickSettingsPatch(null)).toThrow('無效的設定')
+
+  test('claudePath 空字串或 undefined 代表自動偵測', () => {
+    expect(validateSettingsPatch({ claudePath: '  ' })).toEqual({ claudePath: undefined })
+    expect(validateSettingsPatch({ claudePath: undefined })).toEqual({ claudePath: undefined })
+  })
+
+  test.each([
+    [null, '無效的設定'],
+    [{ worktreeRoot: '' }, 'worktree 位置'],
+    [{ worktreeRoot: 'relative/dir' }, 'worktree 位置'],
+    [{ worktreeRoot: 3 }, 'worktree 位置'],
+    [{ branchPrefix: ' ' }, '分支前綴'],
+    [{ claudePath: 1 }, 'claude 路徑'],
+    [{ alwaysAllowedCommands: 'ls' }, '允許清單'],
+    [{ alwaysAllowedCommands: ['ls', ' '] }, '允許清單'],
+    [{ alwaysAllowedCommands: ['ls', 1] }, '允許清單'],
+    [{ loadProjectSettings: 'yes' }, '載入專案設定'],
+    [{ defaultModel: 'gpt-4' }, '模型']
+  ])('拒絕 %j', (patch, msg) => {
+    expect(() => validateSettingsPatch(patch)).toThrow(msg)
+  })
+})
+
+describe('assertString', () => {
+  test('回傳原字串', () => {
+    expect(assertString('hi', '訊息')).toBe('hi')
+    expect(assertString('', '訊息', { allowEmpty: true })).toBe('')
+  })
+
+  test.each([
+    [undefined, {}],
+    [3, {}],
+    ['', {}],
+    ['   ', {}],
+    ['abcd', { max: 3 }]
+  ])('拒絕 %j', (v, opts) => {
+    expect(() => assertString(v, '訊息', opts)).toThrow('無效的訊息')
+  })
+
+  test('預設上限 100000 字元', () => {
+    expect(assertString('a'.repeat(100_000), '訊息')).toHaveLength(100_000)
+    expect(() => assertString('a'.repeat(100_001), '訊息')).toThrow('無效的訊息')
+  })
+})
+
+test('model 必須是支援的模型', () => {
+  expect(assertModel('claude-opus-5-5')).toBe('claude-opus-5-5')
+  for (const m of ['gpt-4', '', 1, undefined]) expect(() => assertModel(m)).toThrow('無效的模型')
+})
+
+describe('isPathInside', () => {
+  const roots = ['/repos/shop-api', '/home/me/.harness/worktrees/shop-api/20261007-ab12']
+
+  test.each([
+    '/repos/shop-api',
+    '/repos/shop-api/src/a.ts',
+    '/home/me/.harness/worktrees/shop-api/20261007-ab12/x'
+  ])('允許 %s', (p) => {
+    expect(isPathInside(p, roots)).toBe(true)
+  })
+
+  test.each([
+    '/repos/shop-api-evil/a.ts',
+    '/repos/shop-api/../other',
+    '/etc/passwd',
+    'relative/path',
+    '',
+    3
+  ])('拒絕 %s', (p) => {
+    expect(isPathInside(p, roots)).toBe(false)
+  })
 })
 
 describe('ensureClaudeReady', () => {
@@ -7362,7 +7568,8 @@ describe('ensureClaudeReady', () => {
 ```ts
 // src/main/ipcGuards.ts
 // IPC 邊界的輸入檢查（純函式，不依賴 electron，可單元測試）
-import type { Channel, ClaudeStatus, Settings } from '@shared/types'
+import { isAbsolute, resolve, sep } from 'node:path'
+import { type Channel, type ClaudeStatus, MODELS, type ModelId, type Settings } from '@shared/types'
 
 const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/
 
@@ -7390,21 +7597,74 @@ export function assertChannel(value: unknown): Channel {
   throw new Error('無效的對話頻道')
 }
 
-const SETTINGS_KEYS: (keyof Settings)[] = [
-  'defaultModel',
-  'worktreeRoot',
-  'branchPrefix',
-  'alwaysAllowedCommands',
-  'loadProjectSettings',
-  'claudePath'
-]
+/** 字串參數：預設不可為空白、最長 100000 字元 */
+export function assertString(
+  value: unknown,
+  what: string,
+  { max = 100_000, allowEmpty = false }: { max?: number; allowEmpty?: boolean } = {}
+): string {
+  if (typeof value !== 'string' || value.length > max || (!allowEmpty && !value.trim()))
+    throw new Error(`無效的${what}`)
+  return value
+}
 
-/** 只保留已知的設定欄位，其他欄位不寫進 settings.json */
-export function pickSettingsPatch(patch: unknown): Partial<Settings> {
-  if (!patch || typeof patch !== 'object') throw new Error('無效的設定')
+export function assertModel(value: unknown): ModelId {
+  if (!MODELS.some((m) => m.id === value)) throw new Error('無效的模型')
+  return value as ModelId
+}
+
+const nonEmpty = (v: unknown, what: string) => {
+  if (typeof v !== 'string' || !v.trim()) throw new Error(`${what}必須是非空白的文字`)
+  return v
+}
+
+/** 每個已知設定欄位的檢查與整理；未知欄位不寫進 settings.json */
+const SETTINGS_VALIDATORS: { [K in keyof Settings]-?: (v: unknown) => Settings[K] } = {
+  defaultModel: (v) => {
+    if (!MODELS.some((m) => m.id === v)) throw new Error('不支援的模型')
+    return v as ModelId
+  },
+  worktreeRoot: (v) => {
+    const p = nonEmpty(v, 'worktree 位置')
+    if (!isAbsolute(p)) throw new Error('worktree 位置必須是絕對路徑')
+    return p
+  },
+  branchPrefix: (v) => nonEmpty(v, '分支前綴'),
+  alwaysAllowedCommands: (v) => {
+    if (!Array.isArray(v) || v.some((c) => typeof c !== 'string' || !c.trim()))
+      throw new Error('允許清單必須是非空白指令的清單')
+    return v.map((c: string) => c.trim())
+  },
+  loadProjectSettings: (v) => {
+    if (typeof v !== 'boolean') throw new Error('載入專案設定必須是開或關')
+    return v
+  },
+  claudePath: (v) => {
+    if (v === undefined || v === null) return undefined
+    if (typeof v !== 'string') throw new Error('claude 路徑必須是文字')
+    // 空字串代表改回自動偵測
+    return v.trim() || undefined
+  }
+}
+
+export function validateSettingsPatch(patch: unknown): Partial<Settings> {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('無效的設定')
   const out: Record<string, unknown> = {}
-  for (const k of SETTINGS_KEYS) if (k in patch) out[k] = (patch as Record<string, unknown>)[k]
+  for (const [k, validate] of Object.entries(SETTINGS_VALIDATORS)) {
+    if (k in patch)
+      out[k] = (validate as (v: unknown) => unknown)((patch as Record<string, unknown>)[k])
+  }
   return out as Partial<Settings>
+}
+
+/** path 是否位於 roots 其中之一（含本身）；只接受絕對路徑，`..` 會先解析掉 */
+export function isPathInside(path: unknown, roots: string[]): boolean {
+  if (typeof path !== 'string' || !isAbsolute(path)) return false
+  const p = resolve(path)
+  return roots.some((root) => {
+    const r = resolve(root)
+    return p === r || p.startsWith(r.endsWith(sep) ? r : r + sep)
+  })
 }
 
 /**
@@ -7437,6 +7697,16 @@ test('包住區塊 HTML 並回報高度', () => {
   expect(html).toContain(`content="${BLOCK_CSP}"`)
 })
 
+test('標題轉義後放進 <title>', () => {
+  const html = wrapBlockHtml({ id: 'x', title: '狀態機 <script>&"\'', html: '' })
+  expect(html).toContain('<title>狀態機 &lt;script&gt;&amp;&quot;&#39;</title>')
+  expect(html).not.toContain('<title>狀態機 <script>')
+})
+
+test('區塊 id 最長 64 字元', () => {
+  expect(parseBlockUrl(`harness-block://report/ab12/1/${'a'.repeat(64)}`)?.blockId).toHaveLength(64)
+})
+
 test('id 裡的 < 不會結束 script', () => {
   const html = wrapBlockHtml({ id: '</script>', title: 't', html: '' })
   expect(html).not.toContain('"</script>"')
@@ -7463,6 +7733,7 @@ test.each([
   'harness-block://report/..%2f..%2fetc/1/x',
   'harness-block://report/ab12/1/..',
   'harness-block://report/ab12/1/X%20Y',
+  `harness-block://report/ab12/1/${'a'.repeat(65)}`,
   'harness-block://report/ab12/1',
   'harness-block://report/ab12/1/x/extra',
   'harness-block://other/ab12/1/x',
@@ -7483,18 +7754,26 @@ import { isSafeId } from '../ipcGuards'
 export const BLOCK_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'"
 
+const escapeHtml = (s: string) =>
+  s.replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!
+  )
+
 export function wrapBlockHtml(block: { id: string; title: string; html: string }): string {
   // 避免 id 裡的 `</script>` 提早結束 script（id 已經過 zod 檢查，這裡再保險一次）
   const id = JSON.stringify(block.id).replace(/</g, '\\u003c')
   return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="${BLOCK_CSP}">
+<title>${escapeHtml(block.title)}</title>
 <style>html,body{margin:0;background:transparent;color:#1c2430;font-family:'Noto Sans TC',-apple-system,'PingFang TC',sans-serif;font-size:14px;line-height:1.6}</style>
 </head><body>${block.html}
 <script>(function(){var post=function(){parent.postMessage({type:"harness-block-height",id:${id},height:document.documentElement.scrollHeight},"*")};new ResizeObserver(post).observe(document.documentElement);addEventListener("load",post);post()})()</script>
 </body></html>`
 }
 
-const BLOCK_ID = /^[a-z0-9_-]{1,128}$/
+/** 與 @shared/report 的 custom block id 規則一致 */
+const BLOCK_ID = /^[a-z0-9_-]{1,64}$/
 
 /** 解析 `harness-block://report/<taskId>/<version>/<blockId>`，格式不符回傳 null */
 export function parseBlockUrl(
@@ -7561,6 +7840,54 @@ describe('TaskManager：關閉 app', () => {
     claude.releaseHang()
   })
 
+  test('shutdown 中止進行中的驗證指令，報告不存檔，主線標為中斷', async () => {
+    let seen: AbortSignal | undefined
+    const verify = vi.fn<TaskManagerDeps['verify']>(async (_cwd, commands, _ok, signal) => {
+      seen = signal
+      await new Promise((r) => signal!.addEventListener('abort', r, { once: true }))
+      return commands.map((command) => ({
+        command,
+        exitCode: null,
+        durationMs: 1,
+        outputTail: '[Harness] 已取消'
+      }))
+    })
+    const { tm, claude, repo, id } = await toImplementing({ verify })
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await until(() => verify.mock.calls.length === 1)
+    const started = Date.now()
+    await tm.shutdown(500)
+    expect(Date.now() - started).toBeLessThan(1500)
+    expect(seen?.aborted).toBe(true)
+    expect(tm.get(id)).toMatchObject({
+      status: 'implementing',
+      runState: 'interrupted',
+      reportVersions: []
+    })
+    await expect(repo.getReport(id, 1)).rejects.toThrow()
+  })
+
+  test('shutdown 等進行中的合併完成（有上限）', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    const merge = git.merge
+    git.merge = async (...a) => {
+      await new Promise((r) => setTimeout(r, 150))
+      await merge(...a)
+    }
+    const merging = tm.merge(id)
+    await tm.shutdown(1000)
+    expect(tm.get(id).status).toBe('done')
+    await merging
+  })
+
   test('沒有執行時 shutdown 立即結束，閒置任務狀態不變', async () => {
     const { tm, create } = await setup()
     const id = await create()
@@ -7570,12 +7897,13 @@ describe('TaskManager：關閉 app', () => {
 })
 ```
 
-實作：TaskManager 加 `private shuttingDown = false`；`assertCanSend` 與 `createTask` 開頭在關閉中時丟出 `new Error('Harness 正在關閉')`；在 `stop()` 之後加：
+實作：TaskManager 加 `private shuttingDown = false`；`assertCanSend` 與 `createTask` 開頭在關閉中時丟出 `new Error('Harness 正在關閉')`。`reportAborts`（finalizeReport 傳給 `verify` 的 AbortSignal）與 `finishJobs`（`exclusive` 的收尾操作）見 Task 24 的程式碼。在 `stop()` 之後加：
 
 ```ts
   /**
-   * 關閉 app 前呼叫：之後拒絕新任務與新訊息，拒絕等待中的核准、中止所有執行。
-   * 等執行結束與狀態寫入各最多 timeoutMs，不讓關閉卡住；被中止的主線標為已中斷，下次啟動可「繼續」。
+   * 關閉 app 前呼叫：之後拒絕新任務與新訊息，拒絕等待中的核准、中止所有執行與報告整理中的驗證指令。
+   * 先等執行、報告整理與進行中的收尾操作（開 PR／合併／丟棄）結束，再寫入狀態；兩段各最多 timeoutMs，
+   * 總共不超過 2 × timeoutMs，不讓關閉卡住。被中止的主線標為已中斷，下次啟動可「繼續」。
    */
   async shutdown(timeoutMs = this.abortGraceMs) {
     this.shuttingDown = true
@@ -7583,7 +7911,15 @@ describe('TaskManager：關閉 app', () => {
       w.resolve({ allow: false, message: 'Harness 正在關閉' })
     const runs = [...this.runs.entries()]
     runs.forEach(([, r]) => r.abort())
-    await settlesWithin(Promise.all(runs.map(([, r]) => r.done.catch(() => undefined))), timeoutMs)
+    this.reportAborts.forEach((a) => a.abort())
+    await settlesWithin(
+      Promise.all([
+        ...runs.map(([, r]) => r.done.catch(() => undefined)),
+        ...this.reportJobs.values(),
+        ...[...this.finishJobs.values()].map((p) => p.catch(() => undefined))
+      ]),
+      timeoutMs
+    )
     const taskIds = new Set(runs.map(([key]) => key.slice(0, key.indexOf('|'))))
     const marks = [...taskIds].map((taskId) =>
       // 排在 onRunDone 的收尾之後，才不會被它改回 idle
@@ -7623,9 +7959,12 @@ import type { GitService } from './git/gitService'
 import {
   assertChannel,
   assertId,
+  assertModel,
+  assertString,
   assertVersion,
   ensureClaudeReady,
-  pickSettingsPatch
+  isPathInside,
+  validateSettingsPatch
 } from './ipcGuards'
 import type { Repository } from './store/repository'
 import type { TaskManager } from './tasks/taskManager'
@@ -7646,13 +7985,19 @@ type Handlers = {
 }
 
 const task = (id: unknown) => assertId(id, '任務')
+/** 訊息內容（使用者輸入的文字） */
+const text = (v: unknown, what = '訊息') => assertString(v, what)
+/** Claude 或 app 產生的 id（問題、分岔、核准請求），不會用來組路徑 */
+const ref = (v: unknown, what: string) => assertString(v, what, { max: 200 })
+/** 匯出的 HTML 可能很大（含 diff），只擋非字串與極端大小 */
+const MAX_HTML = 50_000_000
 
 export function registerIpc(d: IpcDeps) {
   const handlers: Handlers = {
     'claude:status': (refresh) => d.claudeStatus(refresh === true),
     'settings:get': () => d.repo.getSettings(),
     'settings:set': async (raw) => {
-      const patch = pickSettingsPatch(raw)
+      const patch = validateSettingsPatch(raw)
       const next = { ...(await d.repo.getSettings()), ...patch }
       await d.repo.saveSettings(next)
       if ('claudePath' in patch) await d.claudeStatus(true)
@@ -7689,35 +8034,50 @@ export function registerIpc(d: IpcDeps) {
       return { branches: await d.git.branches(r.path), current: await d.git.currentBranch(r.path) }
     },
     'tasks:list': () => d.tasks.list(),
-    'tasks:create': async (input: CreateTaskInput) => {
-      assertId(input?.repoId, 'repo')
+    'tasks:create': async (raw: CreateTaskInput) => {
+      if (!raw || typeof raw !== 'object') throw new Error('無效的任務內容')
+      const input: CreateTaskInput = {
+        repoId: assertId(raw.repoId, 'repo'),
+        request: text(raw.request, '需求'),
+        baseBranch: assertString(raw.baseBranch, 'base branch', { max: 255 }),
+        model: assertModel(raw.model)
+      }
       await ensureClaudeReady(d.claudeStatus)
       return d.tasks.createTask(input)
     },
     'tasks:timeline': (taskId) => d.tasks.timeline(task(taskId)),
-    'tasks:send': (taskId, channel, text) =>
-      d.tasks.send(task(taskId), assertChannel(channel), text),
-    'tasks:answer': (taskId, qid, answer) => d.tasks.answerQuestion(task(taskId), qid, answer),
-    'tasks:counter': (taskId, qid, text) => d.tasks.counterQuestion(task(taskId), qid, text),
+    'tasks:send': (taskId, channel, msg) =>
+      d.tasks.send(task(taskId), assertChannel(channel), text(msg)),
+    'tasks:answer': (taskId, qid, answer) =>
+      d.tasks.answerQuestion(task(taskId), ref(qid, '問題 id'), answer),
+    'tasks:counter': (taskId, qid, msg) =>
+      d.tasks.counterQuestion(task(taskId), ref(qid, '問題 id'), text(msg)),
     'tasks:changedFiles': (taskId) => d.tasks.changedFiles(task(taskId)),
-    'branch:open': (taskId, input) => d.tasks.openBranch(task(taskId), input),
-    'branch:conclude': (taskId, branchId) => d.tasks.concludeBranch(task(taskId), branchId),
+    'branch:open': (taskId, input) => {
+      if (!input || typeof input !== 'object') throw new Error('無效的分岔內容')
+      text(input.title, '分岔標題')
+      return d.tasks.openBranch(task(taskId), input)
+    },
+    'branch:conclude': (taskId, branchId) =>
+      d.tasks.concludeBranch(task(taskId), ref(branchId, '分岔 id')),
     'branch:confirm': (taskId, branchId, edited) =>
-      d.tasks.confirmBranch(task(taskId), branchId, edited),
+      d.tasks.confirmBranch(task(taskId), ref(branchId, '分岔 id'), edited),
     'spec:approve': (taskId) => d.tasks.approveSpec(task(taskId)),
-    'spec:requestChanges': (taskId, text) => d.tasks.requestSpecChanges(task(taskId), text),
+    'spec:requestChanges': (taskId, msg) => d.tasks.requestSpecChanges(task(taskId), text(msg)),
     'run:stop': (taskId, channel) => d.tasks.stop(task(taskId), assertChannel(channel)),
     'run:resume': (taskId) => d.tasks.resume(task(taskId)),
     'permission:resolve': (taskId, requestId, decision) =>
-      d.tasks.resolvePermission(task(taskId), requestId, decision),
+      d.tasks.resolvePermission(task(taskId), ref(requestId, '核准請求 id'), decision),
     'report:get': (taskId, version) => d.tasks.getReport(task(taskId), assertVersion(version)),
     'report:feedback': (taskId, items, overall) =>
       d.tasks.submitReportFeedback(task(taskId), items, overall),
     'report:saveHtml': async (suggestedName, html) => {
+      assertString(html, 'HTML', { max: MAX_HTML })
       const w = d.win()
       if (!w) return null
       const res = await dialog.showSaveDialog(w, {
-        defaultPath: suggestedName,
+        // 只取檔名：建議名稱不能把儲存對話框預設到其他資料夾
+        defaultPath: basename(String(suggestedName)),
         filters: [{ name: 'HTML', extensions: ['html'] }]
       })
       if (res.canceled || !res.filePath) return null
@@ -7727,8 +8087,14 @@ export function registerIpc(d: IpcDeps) {
     'finish:pr': (taskId) => d.tasks.createPullRequest(task(taskId)),
     'finish:merge': (taskId) => d.tasks.merge(task(taskId)),
     'finish:discard': (taskId) => d.tasks.discard(task(taskId)),
-    'shell:showInFolder': (path) => {
-      if (typeof path === 'string' && path) shell.showItemInFolder(path)
+    'shell:showInFolder': async (path) => {
+      // 只能打開已加入的 repo 或任務 worktree 裡的位置
+      const roots = [
+        ...(await d.repo.listRepos()).map((r) => r.path),
+        ...d.tasks.list().map((t) => t.worktreePath)
+      ]
+      if (!isPathInside(path, roots)) throw new Error('只能顯示 repo 或 worktree 裡的檔案')
+      shell.showItemInFolder(path)
     },
     'shell:openExternal': async (url) => {
       if (typeof url === 'string' && /^https:\/\//.test(url)) await shell.openExternal(url)
@@ -7736,9 +8102,13 @@ export function registerIpc(d: IpcDeps) {
   }
 
   for (const [channel, fn] of Object.entries(handlers)) {
-    ipcMain.handle(channel, async (_e, ...args: unknown[]) =>
-      (fn as (...a: unknown[]) => unknown)(...args)
-    )
+    ipcMain.handle(channel, async (e, ...args: unknown[]) => {
+      // 只接受主視窗本身（不是 iframe 或其他視窗）送來的請求
+      const main = d.win()?.webContents.mainFrame
+      if (!e.senderFrame || !main || e.senderFrame !== main)
+        throw new Error('拒絕來自未知來源的請求')
+      return (fn as (...a: unknown[]) => unknown)(...args)
+    })
   }
 }
 ```
@@ -7749,7 +8119,7 @@ export function registerIpc(d: IpcDeps) {
 // src/main/index.ts
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, protocol, session, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { APP_EVENT_CHANNEL, type AppEvent } from '@shared/ipc'
@@ -7770,8 +8140,13 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'harness-block', privileges: { standard: true, secure: true } }
 ])
 
-/** 關閉 app 時等執行停下來的上限（TaskManager 內每個階段各自也有上限） */
-const SHUTDOWN_TIMEOUT_MS = 3000
+/**
+ * 關閉 app 的時間預算：TaskManager.shutdown 分兩段（等執行／報告整理／收尾操作結束、寫入狀態），
+ * 每段最多 SHUTDOWN_STEP_MS，合計 2.4 秒，在硬上限 SHUTDOWN_HARD_LIMIT_MS 之內。
+ * 驗證指令被中止後 0.5 秒內會被 SIGKILL，也在預算之內。
+ */
+const SHUTDOWN_STEP_MS = 1200
+const SHUTDOWN_HARD_LIMIT_MS = 3000
 
 let mainWindow: BrowserWindow | null = null
 let tasks: TaskManager | null = null
@@ -7814,8 +8189,11 @@ function createWindow() {
   return win
 }
 
-app.whenReady().then(async () => {
+async function start() {
   electronApp.setAppUserModelId('com.harness.app')
+  // renderer 與自訂區塊都不需要相機、麥克風、通知等權限，一律拒絕
+  session.defaultSession.setPermissionRequestHandler((_wc, _permission, cb) => cb(false))
+  session.defaultSession.setPermissionCheckHandler(() => false)
   app.on('browser-window-created', (_, w) => optimizer.watchWindowShortcuts(w))
   // 必須在 detectClaude 之前：從 Finder 啟動時 PATH 不含 homebrew / nvm
   await applyLoginShellPath()
@@ -7879,7 +8257,16 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow()
   })
-})
+}
+
+app
+  .whenReady()
+  .then(start)
+  .catch((err: unknown) => {
+    console.error('[Harness] 啟動失敗', err)
+    dialog.showErrorBox('Harness 無法啟動', err instanceof Error ? err.message : String(err))
+    app.exit(1)
+  })
 
 // 關閉前中止所有執行（有時間上限，不讓關閉卡住）；被中止的任務標為已中斷，下次啟動可「繼續」。
 // 收尾後用 app.exit 而不是再呼叫 app.quit：由 SIGTERM 觸發、又被 preventDefault 擋下的關閉，
@@ -7890,10 +8277,11 @@ app.on('before-quit', (e) => {
   e.preventDefault()
   if (quitting) return
   quitting = true
-  const hardLimit = new Promise((r) => setTimeout(r, SHUTDOWN_TIMEOUT_MS))
-  void Promise.race([tasks.shutdown().catch((err) => console.error(err)), hardLimit]).finally(() =>
-    app.exit(0)
-  )
+  const hardLimit = new Promise((r) => setTimeout(r, SHUTDOWN_HARD_LIMIT_MS))
+  void Promise.race([
+    tasks.shutdown(SHUTDOWN_STEP_MS).catch((err) => console.error(err)),
+    hardLimit
+  ]).finally(() => app.exit(0))
 })
 
 app.on('window-all-closed', () => {
@@ -7939,8 +8327,8 @@ export {}
 
 **Step 9: 驗證**
 
-Run: `npx vitest run tests/main/ipcGuards.test.ts tests/main/blockHtml.test.ts` → 36 passed
-Run: `npx vitest run tests/main/taskManager.test.ts` → 46 passed（含 3 個 shutdown 測試）
+Run: `npx vitest run tests/main/ipcGuards.test.ts tests/main/blockHtml.test.ts` → 68 passed
+Run: `npx vitest run tests/main/taskManager.test.ts tests/main/verifyRunner.test.ts` → 60 passed（含 5 個 shutdown 測試、4 個中止驗證指令的測試）
 Run: `npm test`、`npm run typecheck`、`npm run lint`（0 errors）
 Run: `npx electron-vite build` → `out/preload/index.cjs` 只 require `electron`
 Run: `npm run dev` → 視窗正常開啟；在 DevTools Console 執行 `await window.harness.invoke('claude:status')` → 回傳 `{ found: true, loggedIn: true, subscriptionType: 'max', ... }`；`await window.harness.invoke('tasks:list')` → `[]`；`await window.harness.invoke('tasks:timeline', '../x')` → 拒絕（無效的任務 id）；`window.electron` 為 `undefined`
@@ -7948,7 +8336,7 @@ Run: `npm run dev` → 視窗正常開啟；在 DevTools Console 執行 `await w
 **Step 10: Commit**
 
 ```bash
-git add package.json package-lock.json src/main src/preload tests/main docs/plans
+git add package.json package-lock.json src/main src/preload src/shared tests docs/plans
 git commit -m "feat(main): wire IPC, sandboxed custom block protocol and preload bridge
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
