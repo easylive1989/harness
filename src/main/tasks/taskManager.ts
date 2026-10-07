@@ -111,8 +111,11 @@ export class TaskManager {
   private turnLocks = new Map<string, Promise<unknown>>()
   /** 等待使用者核准的請求，依提出順序；UI 一次顯示最早的一個 */
   private permissionWaiters = new Map<string, PermissionWaiter>()
-  /** 使用者拒絕過的 tool_use id：之後的工具結果在時間軸上標成「已拒絕」而不是失敗 */
-  private deniedToolUses = new Set<string>()
+  /**
+   * 使用者拒絕過的 tool_use id → 提出請求的執行：之後的工具結果在時間軸上標成「已拒絕」而不是失敗。
+   * 那段執行結束時清掉（沒等到工具結果的也一併清掉）。
+   */
+  private deniedToolUses = new Map<string, AgentRun | undefined>()
   /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
   /** 報告整理中（邏輯狀態）：進入 reviewing 的同一步就清除 */
@@ -387,6 +390,7 @@ export class TaskManager {
     console.warn(`[TaskManager] 執行 ${key} 在中止後仍未結束，不再等待它`)
     this.runs.delete(key)
     this.denyWaitersOf(run, '執行已結束')
+    this.forgetDenied(run)
     const branchId = branchIdOf(channel)
     if (!branchId) this.pendingCounter.delete(taskId)
     this.persist(taskId, (t) => {
@@ -490,6 +494,8 @@ export class TaskManager {
       // send() 可能已在這段收尾排到之前開了下一段執行：那時不要動執行狀態，只記錄錯誤
       const current = this.runs.get(key) === run
       if (current) this.runs.delete(key)
+      // 這段執行的工具結果都已處理完（排在這之前）：還記著的拒絕不會再用到
+      this.forgetDenied(run)
       const branchId = branchIdOf(channel)
       if (current && !branchId) this.pendingCounter.delete(taskId)
       await this.update(taskId, (t) => {
@@ -873,6 +879,10 @@ export class TaskManager {
     }
   }
 
+  private forgetDenied(run: AgentRun) {
+    for (const [id, r] of this.deniedToolUses) if (r === run) this.deniedToolUses.delete(id)
+  }
+
   private denyWaitersOf(run: AgentRun, message: string) {
     for (const w of [...this.permissionWaiters.values()]) {
       if (w.run === run) w.resolve({ allow: false, message })
@@ -923,7 +933,7 @@ export class TaskManager {
   async resolvePermission(taskId: string, requestId: string, decision: PermissionDecision) {
     const w = this.permissionWaiters.get(requestId)
     if (!w || w.taskId !== taskId) throw new Error('這個核准請求已經失效')
-    if (!decision.allow && w.request.toolUseId) this.deniedToolUses.add(w.request.toolUseId)
+    if (!decision.allow && w.request.toolUseId) this.deniedToolUses.set(w.request.toolUseId, w.run)
     w.resolve(decision)
   }
 
@@ -978,6 +988,8 @@ export class TaskManager {
       )
     )
     await settlesWithin(Promise.all(marks), timeoutMs)
+    // 中止後仍不結束的執行不會走到 onRunDone
+    this.deniedToolUses.clear()
   }
 
   async resume(taskId: string) {

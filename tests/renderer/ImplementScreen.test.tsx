@@ -310,6 +310,21 @@ test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已
   await screen.findByText('src/auth/lockout.ts')
 })
 
+test('等待核准的工具不在最近 8 個裡時仍然列出來（最近 7 個＋它）', async () => {
+  const many = Array.from({ length: 9 }, (_, i) => tool('Read', { file_path: `src/f${i}.ts` }))
+  useStore.setState({
+    timelines: { t1: [start, tool('Bash', { command: 'npm test' }, 'tu-old'), ...many] }
+  })
+  renderImpl(
+    implTask({ runState: 'waiting_permission', pendingPermission: perm({ toolUseId: 'tu-old' }) })
+  )
+  const rows = within(screen.getByRole('region', { name: '進行中的步驟' })).getAllByRole('listitem')
+  expect(rows).toHaveLength(8)
+  expect(rows[0]).toHaveTextContent('src/f2.ts')
+  expect(rows.at(-1)).toHaveTextContent('指令npm test等待核准')
+  await screen.findByText('src/auth/lockout.ts')
+})
+
 test('沒有在這段實作裡出現過的開放問題，顯示在最上方', async () => {
   useStore.setState({ timelines: { t1: [ev({ kind: 'question', ref: 'q7' }), ...events] } })
   renderImpl(implTask({ runState: 'idle', questions: [openQuestion('q7', '通知信寄給誰？')] }))

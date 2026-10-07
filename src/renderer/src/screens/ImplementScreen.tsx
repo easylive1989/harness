@@ -241,7 +241,16 @@ export function ImplementScreen({
   const done = task.plan.filter((s) => s.status === 'done').length
   const runningIdx = task.plan.findIndex((s) => s.status === 'running')
 
-  const tools = events.filter(isToolCall).slice(-RECENT_TOOLS)
+  // 等待核准的請求以 toolUseId 對應時間軸上的工具呼叫；舊資料沒有 id 時找最近一個相同的呼叫
+  const p = task.pendingPermission
+  const allTools = events.filter(isToolCall)
+  const waitingTool = p?.toolUseId ? allTools.findLast((e) => e.tool.id === p.toolUseId) : undefined
+  const recent = allTools.slice(-RECENT_TOOLS)
+  // 等待核准的呼叫比較早、不在最近幾個裡時，仍然列在最後一列（最近 7 個＋它）
+  const tools =
+    waitingTool && !recent.includes(waitingTool)
+      ? [...allTools.slice(-(RECENT_TOOLS - 1)), waitingTool]
+      : recent
   const outcomes = new Map<string, ToolOutcome>(
     events
       .filter((e) => e.kind === 'tool_result' && e.tool?.isError)
@@ -262,12 +271,10 @@ export function ImplementScreen({
   const orphanQuestions = task.questions.filter((q) => q.status === 'open' && !asked.has(q.id))
   const waitingForAnswer =
     orphanQuestions.length > 0 || chat.some((e) => e.kind === 'question' && isOpen(e.ref))
-  // 等待核准的請求以 toolUseId 對應時間軸上的工具呼叫；舊資料沒有 id 時找最近一個相同的呼叫
-  const p = task.pendingPermission
   const waitingId = !p
     ? undefined
     : p.toolUseId
-      ? tools.find((e) => e.tool.id === p.toolUseId)?.id
+      ? waitingTool?.id
       : tools.findLast(
           (e) => toolSummary(e.tool) === toolSummary({ id: '', name: p.toolName, input: p.input })
         )?.id

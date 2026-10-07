@@ -304,6 +304,9 @@ const signalOf = () => ({ signal: new AbortController().signal }) as never
 /** canUseTool 的 options，帶 SDK 給的 toolUseID */
 const toolOpts = (toolUseID: string) =>
   ({ signal: new AbortController().signal, toolUseID }) as never
+/** 測試用：看 TaskManager 還記著幾個被拒絕的 tool_use id（應在執行結束時清掉） */
+const deniedCount = (tm: TaskManager) =>
+  (tm as unknown as { deniedToolUses: { size: number } }).deniedToolUses.size
 const toolResult = (toolUseId: string, text: string) => ({
   type: 'user',
   parent_tool_use_id: null,
@@ -477,6 +480,42 @@ describe('TaskManager：規格與實作', () => {
       ['tu-deny', true],
       ['tu-fail', undefined]
     ])
+  })
+
+  test('執行結束時清掉這段執行拒絕過、但沒等到工具結果的 tool_use id', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    claude.script = async ({ options }) => {
+      await options.canUseTool!('Bash', { command: 'rm -rf dist' }, toolOpts('tu-lost'))
+    }
+    await tm.approveSpec(id)
+    await until(() => !!tm.get(id).pendingPermission)
+    await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: false })
+    await tm.whenIdle(id)
+    expect(deniedCount(tm)).toBe(0)
+  })
+
+  test('shutdown 清掉被拒絕的 tool_use id（執行卡住、不會結束）', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    claude.afterResult = 'hang_ignoring_abort'
+    claude.script = async ({ options }) => {
+      await options.canUseTool!('Bash', { command: 'rm -rf dist' }, toolOpts('tu-stuck'))
+    }
+    await tm.approveSpec(id)
+    await until(() => !!tm.get(id).pendingPermission)
+    await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: false })
+    await until(() => claude.results === 2)
+    expect(deniedCount(tm)).toBe(1)
+    await tm.shutdown(100)
+    expect(deniedCount(tm)).toBe(0)
+    claude.releaseHang()
   })
 
   test('執行中插話會送進同一輪', async () => {

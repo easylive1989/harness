@@ -5543,8 +5543,11 @@ export class TaskManager {
   private turnLocks = new Map<string, Promise<unknown>>()
   /** 等待使用者核准的請求，依提出順序；UI 一次顯示最早的一個 */
   private permissionWaiters = new Map<string, PermissionWaiter>()
-  /** 使用者拒絕過的 tool_use id：之後的工具結果在時間軸上標成「已拒絕」而不是失敗 */
-  private deniedToolUses = new Set<string>()
+  /**
+   * 使用者拒絕過的 tool_use id → 提出請求的執行：之後的工具結果在時間軸上標成「已拒絕」而不是失敗。
+   * 那段執行結束時清掉（沒等到工具結果的也一併清掉）。
+   */
+  private deniedToolUses = new Map<string, AgentRun | undefined>()
   /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
   /** 報告整理中（邏輯狀態）：進入 reviewing 的同一步就清除 */
@@ -5815,6 +5818,7 @@ export class TaskManager {
     console.warn(`[TaskManager] 執行 ${key} 在中止後仍未結束，不再等待它`)
     this.runs.delete(key)
     this.denyWaitersOf(run, '執行已結束')
+    this.forgetDenied(run)
     const branchId = branchIdOf(channel)
     if (!branchId) this.pendingCounter.delete(taskId)
     this.persist(taskId, (t) => {
@@ -5918,6 +5922,8 @@ export class TaskManager {
       // send() 可能已在這段收尾排到之前開了下一段執行：那時不要動執行狀態，只記錄錯誤
       const current = this.runs.get(key) === run
       if (current) this.runs.delete(key)
+      // 這段執行的工具結果都已處理完（排在這之前）：還記著的拒絕不會再用到
+      this.forgetDenied(run)
       const branchId = branchIdOf(channel)
       if (current && !branchId) this.pendingCounter.delete(taskId)
       await this.update(taskId, (t) => {
@@ -6186,6 +6192,9 @@ export class TaskManager {
   }
   private denyWaitersOf(run: AgentRun, message: string) {
     void [run, message]
+  }
+  private forgetDenied(run: AgentRun) {
+    for (const [id, r] of this.deniedToolUses) if (r === run) this.deniedToolUses.delete(id)
   }
   private async finalizeReport(taskId: string, input: ReportInput, run?: AgentRun) {
     void [taskId, input, run]
@@ -6467,6 +6476,9 @@ const signalOf = () => ({ signal: new AbortController().signal }) as never
 /** canUseTool 的 options，帶 SDK 給的 toolUseID */
 const toolOpts = (toolUseID: string) =>
   ({ signal: new AbortController().signal, toolUseID }) as never
+/** 測試用：看 TaskManager 還記著幾個被拒絕的 tool_use id（應在執行結束時清掉） */
+const deniedCount = (tm: TaskManager) =>
+  (tm as unknown as { deniedToolUses: { size: number } }).deniedToolUses.size
 const toolResult = (toolUseId: string, text: string) => ({
   type: 'user',
   parent_tool_use_id: null,
@@ -6643,6 +6655,22 @@ describe('TaskManager：規格與實作', () => {
     ])
   })
 
+  test('執行結束時清掉這段執行拒絕過、但沒等到工具結果的 tool_use id', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    claude.script = async ({ options }) => {
+      await options.canUseTool!('Bash', { command: 'rm -rf dist' }, toolOpts('tu-lost'))
+    }
+    await tm.approveSpec(id)
+    await until(() => !!tm.get(id).pendingPermission)
+    await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: false })
+    await tm.whenIdle(id)
+    expect(deniedCount(tm)).toBe(0)
+  })
+
   test('執行中插話會送進同一輪', async () => {
     const { tm, claude, create } = await setup()
     const id = await create()
@@ -6695,7 +6723,7 @@ describe('TaskManager：規格與實作', () => {
 - `stop(taskId, channel)` 只拒絕該 channel 的等待中請求，再 `interrupt()` 該 channel 的執行。
 - `resume` 在主線還沒有 session 時（第一輪就中斷）重新送出原始需求，而不是送 `[resume]`。
 - `approveSpec`／`requestSpecChanges` 經 `transitionAndSend`：先檢查能不能送，再改狀態，送不出去就還原。核准規格寫入的 user_text 帶 `ref: IMPLEMENT_START_REF`（實作畫面從這裡開始顯示）。
-- 請求記下 `channel` 與 SDK 的 `toolUseId`（UI 用來標出分岔的請求、對應時間軸上的工具呼叫）。使用者拒絕的 `toolUseId` 記在 `deniedToolUses`，之後的工具結果標 `denied: true`（UI 顯示「已拒絕」而不是失敗）。
+- 請求記下 `channel` 與 SDK 的 `toolUseId`（UI 用來標出分岔的請求、對應時間軸上的工具呼叫）。使用者拒絕的 `toolUseId` 連同提出請求的執行記在 `deniedToolUses`，之後的工具結果標 `denied: true`（UI 顯示「已拒絕」而不是失敗）；那段執行結束（`onRunDone`、`dropStuckRun`）或關閉 app（`shutdown`）時清掉。
 
 ```ts
   // ───────── 規格 ─────────
@@ -6780,7 +6808,7 @@ describe('TaskManager：規格與實作', () => {
   async resolvePermission(taskId: string, requestId: string, decision: PermissionDecision) {
     const w = this.permissionWaiters.get(requestId)
     if (!w || w.taskId !== taskId) throw new Error('這個核准請求已經失效')
-    if (!decision.allow && w.request.toolUseId) this.deniedToolUses.add(w.request.toolUseId)
+    if (!decision.allow && w.request.toolUseId) this.deniedToolUses.set(w.request.toolUseId, w.run)
     w.resolve(decision)
   }
 
@@ -8142,6 +8170,26 @@ describe('TaskManager：關閉 app', () => {
     expect((await repo.listTasks()).find((x) => x.id === id)?.runState).toBe('interrupted')
   })
 
+  test('shutdown 清掉被拒絕的 tool_use id（執行卡住、不會結束）', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    claude.afterResult = 'hang_ignoring_abort'
+    claude.script = async ({ options }) => {
+      await options.canUseTool!('Bash', { command: 'rm -rf dist' }, toolOpts('tu-stuck'))
+    }
+    await tm.approveSpec(id)
+    await until(() => !!tm.get(id).pendingPermission)
+    await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: false })
+    await until(() => claude.results === 2)
+    expect(deniedCount(tm)).toBe(1)
+    await tm.shutdown(100)
+    expect(deniedCount(tm)).toBe(0)
+    claude.releaseHang()
+  })
+
   test('shutdown 不會被不理會 abort 的執行卡住', async () => {
     const { tm, claude, create } = await setup()
     const id = await create()
@@ -8303,6 +8351,8 @@ describe('TaskManager：分岔的錯誤', () => {
       )
     )
     await settlesWithin(Promise.all(marks), timeoutMs)
+    // 中止後仍不結束的執行不會走到 onRunDone
+    this.deniedToolUses.clear()
   }
 ```
 
@@ -13526,7 +13576,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - Edit／Write／MultiEdit／NotebookEdit：主程序只對 `.git`、`.claude/`、`.mcp.json` 詢問，所以顯示相對路徑、工具名稱、說明「這個檔案會影響 Claude 的權限或 git 設定」，以及要寫入的內容（Write 全文、Edit 的 `-`／`+` 取代前後）；超過 1500 字先顯示開頭，按「顯示完整內容」展開。
   - WebFetch 顯示網址與用途（`prompt`），WebSearch 顯示搜尋字詞，其他工具顯示 JSON。
   - 釐清中 Claude（主線或分岔）讀網頁、搜尋網路也會要求核准，所以釐清頁與規格頁也掛 `PendingPermission`（規格頁連「還沒有規格」的畫面也有）；回看其他階段時有請求一樣會跳出（請求會卡住 Claude，不能只在實作頁看得到）。
-- **進行中的步驟**：列出最近 8 個工具呼叫，路徑相對於 worktree。等待核准的呼叫以請求的 `toolUseId` 對應（舊資料沒有 id 時找最近一個相同的呼叫）並標「等待核准」；使用者拒絕的標「已拒絕」（`tool.denied`），其他錯誤標「失敗」。還沒列出步驟（剛開始讀程式碼）或步驟之間 Claude 仍在執行時，另顯示「正在規劃步驟／最近的動作」。步驟狀態：等待核准、進行中、等你回答（有畫出來的開放問題）、暫停中。
+- **進行中的步驟**：列出最近 8 個工具呼叫，路徑相對於 worktree；等待核准的呼叫比較早、不在其中時列最近 7 個＋它（放在最後一列）。等待核准的呼叫以請求的 `toolUseId` 對應（舊資料沒有 id 時找最近一個相同的呼叫）並標「等待核准」；使用者拒絕的標「已拒絕」（`tool.denied`），其他錯誤標「失敗」。還沒列出步驟（剛開始讀程式碼）或步驟之間 Claude 仍在執行時，另顯示「正在規劃步驟／最近的動作」。步驟狀態：等待核准、進行中、等你回答（有畫出來的開放問題）、暫停中。
 - **問題卡片**：這段實作裡出現的問題照時間軸位置畫（重新提問過的只畫最後一次）；開放中但這段實作沒出現過的問題（例如核准前提出、還沒回答）放在最上方，不會沒有地方回答。
 - **對話**：插話（標「你插話」）、Claude 的回覆、問題卡片與系統訊息；捲動區用 `useStickToBottom`。
 - **插話與停止**：整理報告中主程序不接受主線訊息，插話框停用；停止只在執行中顯示，用 `usePending`。
@@ -14129,6 +14179,21 @@ test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已
     '指令rm -rf dist已拒絕',
     '指令npm test'
   ])
+  await screen.findByText('src/auth/lockout.ts')
+})
+
+test('等待核准的工具不在最近 8 個裡時仍然列出來（最近 7 個＋它）', async () => {
+  const many = Array.from({ length: 9 }, (_, i) => tool('Read', { file_path: `src/f${i}.ts` }))
+  useStore.setState({
+    timelines: { t1: [start, tool('Bash', { command: 'npm test' }, 'tu-old'), ...many] }
+  })
+  renderImpl(
+    implTask({ runState: 'waiting_permission', pendingPermission: perm({ toolUseId: 'tu-old' }) })
+  )
+  const rows = within(screen.getByRole('region', { name: '進行中的步驟' })).getAllByRole('listitem')
+  expect(rows).toHaveLength(8)
+  expect(rows[0]).toHaveTextContent('src/f2.ts')
+  expect(rows.at(-1)).toHaveTextContent('指令npm test等待核准')
   await screen.findByText('src/auth/lockout.ts')
 })
 
@@ -14871,7 +14936,16 @@ export function ImplementScreen({
   const done = task.plan.filter((s) => s.status === 'done').length
   const runningIdx = task.plan.findIndex((s) => s.status === 'running')
 
-  const tools = events.filter(isToolCall).slice(-RECENT_TOOLS)
+  // 等待核准的請求以 toolUseId 對應時間軸上的工具呼叫；舊資料沒有 id 時找最近一個相同的呼叫
+  const p = task.pendingPermission
+  const allTools = events.filter(isToolCall)
+  const waitingTool = p?.toolUseId ? allTools.findLast((e) => e.tool.id === p.toolUseId) : undefined
+  const recent = allTools.slice(-RECENT_TOOLS)
+  // 等待核准的呼叫比較早、不在最近幾個裡時，仍然列在最後一列（最近 7 個＋它）
+  const tools =
+    waitingTool && !recent.includes(waitingTool)
+      ? [...allTools.slice(-(RECENT_TOOLS - 1)), waitingTool]
+      : recent
   const outcomes = new Map<string, ToolOutcome>(
     events
       .filter((e) => e.kind === 'tool_result' && e.tool?.isError)
@@ -14892,12 +14966,10 @@ export function ImplementScreen({
   const orphanQuestions = task.questions.filter((q) => q.status === 'open' && !asked.has(q.id))
   const waitingForAnswer =
     orphanQuestions.length > 0 || chat.some((e) => e.kind === 'question' && isOpen(e.ref))
-  // 等待核准的請求以 toolUseId 對應時間軸上的工具呼叫；舊資料沒有 id 時找最近一個相同的呼叫
-  const p = task.pendingPermission
   const waitingId = !p
     ? undefined
     : p.toolUseId
-      ? tools.find((e) => e.tool.id === p.toolUseId)?.id
+      ? waitingTool?.id
       : tools.findLast(
           (e) => toolSummary(e.tool) === toolSummary({ id: '', name: p.toolName, input: p.input })
         )?.id
