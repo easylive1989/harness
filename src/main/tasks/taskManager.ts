@@ -146,6 +146,13 @@ export class TaskManager {
 
   // ───────── 內部工具 ─────────
 
+  /** 取得還沒結束（未完成、未丟棄）的任務 */
+  private openTask(taskId: string): Task {
+    const t = this.get(taskId)
+    if (t.status === 'done' || t.status === 'discarded') throw new Error('任務已結束')
+    return t
+  }
+
   private runsOf(taskId: string) {
     return [...this.runs.entries()].filter(([k]) => k.startsWith(`${taskId}|`))
   }
@@ -259,8 +266,7 @@ export class TaskManager {
     text: string,
     opts: { display?: string; silent?: boolean } = {}
   ) {
-    const t = this.get(taskId)
-    if (t.status === 'done' || t.status === 'discarded') throw new Error('任務已結束')
+    this.openTask(taskId)
     if (channel === 'main' && this.finalizing.has(taskId))
       throw new Error('正在整理報告，請稍候再送出')
     if (!opts.silent)
@@ -276,7 +282,9 @@ export class TaskManager {
   }
 
   private async startTurn(taskId: string, channel: Channel, prompt: string) {
-    const t = this.get(taskId)
+    // 等上一段執行結束的期間任務可能已被丟棄或正在收尾：不要再開新的執行
+    const t = this.openTask(taskId)
+    if (this.finishing.has(taskId)) throw new Error('任務正在收尾，請稍候')
     const settings = await this.d.repo.getSettings()
     const branchId = branchIdOf(channel)
     const branch = branchId ? t.branches.find((b) => b.id === branchId) : undefined
@@ -519,7 +527,7 @@ export class TaskManager {
     questionId: string,
     answer: { optionId?: string; text?: string }
   ) {
-    const q = this.get(taskId).questions.find((x) => x.id === questionId)
+    const q = this.openTask(taskId).questions.find((x) => x.id === questionId)
     if (!q) throw new Error(`找不到問題 ${questionId}`)
     const label = answer.optionId
       ? q.options.find((o) => o.id === answer.optionId)?.label
@@ -539,7 +547,7 @@ export class TaskManager {
   async counterQuestion(taskId: string, questionId: string, text: string) {
     const body = text.trim()
     if (!body) throw new Error('請輸入反問內容')
-    if (!this.get(taskId).questions.some((x) => x.id === questionId))
+    if (!this.openTask(taskId).questions.some((x) => x.id === questionId))
       throw new Error(`找不到問題 ${questionId}`)
     await this.update(taskId, (t) => {
       t.questions.find((x) => x.id === questionId)!.followups.push({ role: 'user', text: body })
@@ -554,8 +562,7 @@ export class TaskManager {
     taskId: string,
     input: { title: string; fromQuestionId?: string; seed?: string }
   ): Promise<Branch> {
-    const t = this.get(taskId)
-    if (t.status === 'done' || t.status === 'discarded') throw new Error('任務已結束')
+    const t = this.openTask(taskId)
     if (!t.mainSessionId) throw new Error('請等 Claude 在主線回覆至少一次後再分岔')
     // 主線在執行中時 session 還在變動，fork 出來的內容不確定
     if (this.runs.get(runKey(taskId, 'main'))?.active)
@@ -599,13 +606,12 @@ export class TaskManager {
 
   /** 使用者確認（可編輯過的）結論：記成決策並送回主線 */
   async confirmBranch(taskId: string, branchId: string, edited?: BranchConclusion) {
-    const t = this.get(taskId)
+    const t = this.openTask(taskId)
     const b = t.branches.find((x) => x.id === branchId)
     if (!b) throw new Error(`找不到分岔 ${branchId}`)
     if (b.status === 'concluded') throw new Error('這個分岔已經帶回主線')
     const c = edited ?? b.conclusion
     if (!c) throw new Error('分岔還沒有結論')
-    if (t.status === 'done' || t.status === 'discarded') throw new Error('任務已結束')
     const decisionId = `d${t.decisions.length + 1}`
     await this.update(taskId, (x) => {
       const bb = x.branches.find((y) => y.id === branchId)!
