@@ -30,6 +30,7 @@
   --color-brand-ring: #cfe3e0;
   --color-brand-muted: #3f5f5b;
   --color-brand-halo: #b9dcd7;
+  --color-brand-deep: #134e4a;
 
   --color-decision: #fdf6e7;
   --color-decision-ink: #8a5300;
@@ -46,6 +47,11 @@
   --color-code: #1c2430;
   --color-code-ink: #e7ecef;
   --color-code-muted: #a9b3bf;
+  --color-code-line: #7d8794;
+  --color-diff-add: #22c55e;
+  --color-diff-del: #ef4444;
+  --color-diff-flag: #facc15;
+  --color-connector: #8a93a0;
 
   --shadow-card: 0 1px 3px rgba(16, 24, 40, 0.06);
   --shadow-raised: 0 1px 2px rgba(16, 24, 40, 0.06), 0 2px 8px rgba(16, 24, 40, 0.05);

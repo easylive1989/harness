@@ -1,0 +1,169 @@
+// tests/renderer/DiffView.test.tsx
+import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { beforeEach, expect, test, vi } from 'vitest'
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(),
+  onEvent: vi.fn(() => () => {}),
+  errorText: String
+}))
+import { DiffView } from '@renderer/report/DiffView'
+import { useStore } from '@renderer/store'
+import { makeReport } from '../fixtures/report'
+
+const diff = `diff --git a/src/a.ts b/src/a.ts
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1,2 +1,3 @@
+ const a = 1
++const b = 2
+ export {}
+`
+beforeEach(() => useStore.setState({ feedback: {} }))
+
+test('顯示檔案說明與段落原因，點行號留下回饋', async () => {
+  render(
+    <DiffView
+      taskId="t1"
+      diff={diff}
+      perFile={[{ path: 'src/a.ts', additions: 1, deletions: 0 }]}
+      notes={[
+        { path: 'src/a.ts', why: '加上 b', hunks: [{ line_start: 2, line_end: 2, why: '新常數' }] }
+      ]}
+    />
+  )
+  expect(screen.getByText(/加上 b/)).toBeInTheDocument()
+  expect(screen.getByText(/新常數/)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '對第 2 行留言' }))
+  await userEvent.type(screen.getByRole('textbox', { name: '回饋' }), '改成常數檔{Enter}')
+  expect(useStore.getState().feedback.t1).toEqual([
+    { anchor: 'diff:src/a.ts:2', label: 'src/a.ts:2', text: '改成常數檔' }
+  ])
+  expect(screen.getByText('改成常數檔')).toBeInTheDocument()
+  expect(screen.queryByRole('textbox', { name: '回饋' })).not.toBeInTheDocument()
+})
+
+test('段落說明放在範圍內第一個顯示的行之前；範圍內沒有顯示的行就列在檔案說明下', () => {
+  render(
+    <DiffView
+      taskId="t1"
+      diff={diff}
+      perFile={[]}
+      notes={[
+        {
+          path: 'src/a.ts',
+          why: '加上 b',
+          hunks: [
+            { line_start: 2, line_end: 9, why: '範圍從新增的行開始' },
+            { line_start: 40, line_end: 42, why: '不在 diff 裡的行' }
+          ]
+        }
+      ]}
+    />
+  )
+  expect(screen.getByText(/為什麼（第 2–9 行）/).parentElement).toHaveTextContent(
+    '範圍從新增的行開始'
+  )
+  expect(screen.getByText(/第 40–42 行/).parentElement).toHaveTextContent('不在 diff 裡的行')
+})
+
+test('再點一次已留言的行可以修改，Esc 取消', async () => {
+  useStore.setState({
+    feedback: { t1: [{ anchor: 'diff:src/a.ts:3', label: 'src/a.ts:3', text: '舊的意見' }] }
+  })
+  render(<DiffView taskId="t1" diff={diff} perFile={[]} notes={[]} />)
+  expect(screen.getByText('回饋 · 第 3 行')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '對第 3 行留言' }))
+  const input = screen.getByRole('textbox', { name: '回饋' })
+  expect(input).toHaveValue('舊的意見')
+  await userEvent.keyboard('{Escape}')
+  expect(screen.queryByRole('textbox', { name: '回饋' })).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '對第 3 行留言' }))
+  await userEvent.clear(screen.getByRole('textbox', { name: '回饋' }))
+  await userEvent.type(screen.getByRole('textbox', { name: '回饋' }), '新的意見{Enter}')
+  expect(useStore.getState().feedback.t1).toEqual([
+    { anchor: 'diff:src/a.ts:3', label: 'src/a.ts:3', text: '新的意見' }
+  ])
+})
+
+test('唯讀時沒有留言按鈕、不顯示待送出的回饋，行號顯示新檔行號', () => {
+  useStore.setState({
+    feedback: { t1: [{ anchor: 'diff:src/a.ts:2', label: 'src/a.ts:2', text: '待送出' }] }
+  })
+  const { container } = render(
+    <DiffView taskId="t1" diff={diff} perFile={[]} notes={[]} readOnly />
+  )
+  expect(screen.queryByRole('button', { name: /留言/ })).not.toBeInTheDocument()
+  expect(screen.queryByText('待送出')).not.toBeInTheDocument()
+  const gutters = [...container.querySelectorAll('[data-line]')].map((e) => e.textContent)
+  expect(gutters).toEqual(['1', '2', '3'])
+})
+
+test('切換檔案；檔案標籤附增刪行數；刪除的行顯示舊檔行號', async () => {
+  const report = makeReport()
+  render(
+    <DiffView
+      taskId="t1"
+      diff={report.diff}
+      perFile={report.stats.perFile}
+      notes={report.input.file_notes}
+    />
+  )
+  const files = screen.getByRole('group', { name: '變更的檔案' })
+  expect(
+    within(files)
+      .getAllByRole('button')
+      .map((b) => b.textContent)
+  ).toEqual(['src/auth/lockout.ts +4', 'src/auth/login.ts +2 −1'])
+  expect(screen.getByText(/獨立計數邏輯/)).toBeInTheDocument()
+  await userEvent.click(within(files).getByRole('button', { name: /login\.ts/ }))
+  expect(within(files).getByRole('button', { name: /login\.ts/ })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  expect(screen.getByText(/登入前先檢查鎖定/)).toBeInTheDocument()
+  expect(screen.queryByText(/獨立計數邏輯/)).not.toBeInTheDocument()
+  // 新檔第 11 行可以留言；刪除的那一行沒有新檔行號，顯示舊檔第 11 行、不能留言
+  expect(screen.getAllByRole('button', { name: '對第 11 行留言' })).toHaveLength(1)
+  expect(screen.getByText('- check(user)', { exact: false }).previousSibling).toHaveTextContent(
+    '11'
+  )
+})
+
+test('二進位檔案不顯示內容；沒有變更時顯示說明', () => {
+  const bin = `diff --git a/logo.png b/logo.png
+new file mode 100644
+Binary files /dev/null and b/logo.png differ
+`
+  const { unmount } = render(
+    <DiffView
+      taskId="t1"
+      diff={bin}
+      perFile={[{ path: 'logo.png', additions: 0, deletions: 0 }]}
+      notes={[]}
+    />
+  )
+  expect(screen.getByText('二進位檔案，不顯示內容')).toBeInTheDocument()
+  // 二進位檔的增刪行數都是 0，不顯示
+  expect(screen.getByRole('button', { name: 'logo.png' })).toBeInTheDocument()
+  unmount()
+  render(<DiffView taskId="t1" diff="" perFile={[]} notes={[]} />)
+  expect(screen.getByText('沒有程式碼變更')).toBeInTheDocument()
+})
+
+test('匯出（static）時依序列出每個檔案，沒有任何按鈕', () => {
+  const report = makeReport()
+  render(
+    <DiffView
+      taskId="t1"
+      diff={report.diff}
+      perFile={report.stats.perFile}
+      notes={report.input.file_notes}
+      isStatic
+    />
+  )
+  expect(screen.getByText(/獨立計數邏輯/)).toBeInTheDocument()
+  expect(screen.getByText(/登入前先檢查鎖定/)).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: /src\/auth\/login\.ts/ })).toBeInTheDocument()
+  expect(screen.queryByRole('button')).not.toBeInTheDocument()
+})
