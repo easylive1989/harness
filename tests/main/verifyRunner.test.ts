@@ -57,6 +57,42 @@ describe('verifyRunner', () => {
     expect(r.outputTail).toBe('中')
   })
 
+  test('中止會終止整個 process group，並標示已取消', async () => {
+    const ac = new AbortController()
+    const started = Date.now()
+    setTimeout(() => ac.abort(), 100)
+    const r = await runShell(tmpdir(), 'sleep 5; echo done', 60_000, ac.signal)
+    expect(Date.now() - started).toBeLessThan(1500)
+    expect(r.outputTail.endsWith('[Harness] 已取消')).toBe(true)
+    expect(r.outputTail).not.toContain('done')
+  })
+
+  test('中止時忽略 SIGTERM 的指令很快以 SIGKILL 終止', async () => {
+    const ac = new AbortController()
+    const started = Date.now()
+    setTimeout(() => ac.abort(), 100)
+    const r = await runShell(tmpdir(), "trap '' TERM; sleep 5; echo done", 60_000, ac.signal)
+    expect(Date.now() - started).toBeLessThan(1500)
+    expect(r.outputTail).toContain('[Harness] 已取消')
+  })
+
+  test('已中止的 signal 不會啟動指令', async () => {
+    const ac = new AbortController()
+    ac.abort()
+    const r = await runShell(tmpdir(), 'echo should-not-run', 60_000, ac.signal)
+    expect(r).toMatchObject({ exitCode: null, durationMs: 0 })
+    expect(r.outputTail).toContain('[Harness] 已取消')
+    expect(r.outputTail).not.toContain('should-not-run')
+  })
+
+  test('runVerification 中止後其餘指令不執行', async () => {
+    const ac = new AbortController()
+    setTimeout(() => ac.abort(), 100)
+    const r = await runVerification(tmpdir(), ['sleep 5', 'echo b'], () => true, ac.signal)
+    expect(r[0].outputTail).toContain('[Harness] 已取消')
+    expect(r[1]).toMatchObject({ command: 'echo b', exitCode: null, skipped: '已取消，未執行' })
+  })
+
   test('未核准的指令不執行', async () => {
     const r = await runVerification(tmpdir(), ['echo a', 'echo b'], (c) => c === 'echo a')
     expect(r[0].exitCode).toBe(0)

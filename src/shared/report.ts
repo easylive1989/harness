@@ -1,7 +1,11 @@
 // src/shared/report.ts
 import { z } from 'zod'
 
-const id = z.string().regex(/^[a-z0-9_-]+$/)
+/** custom block id：也用在 harness-block:// 網址裡，主程序以相同規則（最長 64）檢查 */
+const id = z
+  .string()
+  .max(64)
+  .regex(/^[a-z0-9_-]+$/)
 
 const NodeSchema = z.object({
   id: z.string().min(1),

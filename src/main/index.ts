@@ -1,7 +1,7 @@
 // src/main/index.ts
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, protocol, session, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { APP_EVENT_CHANNEL, type AppEvent } from '@shared/ipc'
@@ -22,8 +22,13 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'harness-block', privileges: { standard: true, secure: true } }
 ])
 
-/** 關閉 app 時等執行停下來的上限（TaskManager 內每個階段各自也有上限） */
-const SHUTDOWN_TIMEOUT_MS = 3000
+/**
+ * 關閉 app 的時間預算：TaskManager.shutdown 分兩段（等執行／報告整理／收尾操作結束、寫入狀態），
+ * 每段最多 SHUTDOWN_STEP_MS，合計 2.4 秒，在硬上限 SHUTDOWN_HARD_LIMIT_MS 之內。
+ * 驗證指令被中止後 0.5 秒內會被 SIGKILL，也在預算之內。
+ */
+const SHUTDOWN_STEP_MS = 1200
+const SHUTDOWN_HARD_LIMIT_MS = 3000
 
 let mainWindow: BrowserWindow | null = null
 let tasks: TaskManager | null = null
@@ -66,8 +71,11 @@ function createWindow() {
   return win
 }
 
-app.whenReady().then(async () => {
+async function start() {
   electronApp.setAppUserModelId('com.harness.app')
+  // renderer 與自訂區塊都不需要相機、麥克風、通知等權限，一律拒絕
+  session.defaultSession.setPermissionRequestHandler((_wc, _permission, cb) => cb(false))
+  session.defaultSession.setPermissionCheckHandler(() => false)
   app.on('browser-window-created', (_, w) => optimizer.watchWindowShortcuts(w))
   // 必須在 detectClaude 之前：從 Finder 啟動時 PATH 不含 homebrew / nvm
   await applyLoginShellPath()
@@ -131,7 +139,16 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow()
   })
-})
+}
+
+app
+  .whenReady()
+  .then(start)
+  .catch((err: unknown) => {
+    console.error('[Harness] 啟動失敗', err)
+    dialog.showErrorBox('Harness 無法啟動', err instanceof Error ? err.message : String(err))
+    app.exit(1)
+  })
 
 // 關閉前中止所有執行（有時間上限，不讓關閉卡住）；被中止的任務標為已中斷，下次啟動可「繼續」。
 // 收尾後用 app.exit 而不是再呼叫 app.quit：由 SIGTERM 觸發、又被 preventDefault 擋下的關閉，
@@ -142,10 +159,11 @@ app.on('before-quit', (e) => {
   e.preventDefault()
   if (quitting) return
   quitting = true
-  const hardLimit = new Promise((r) => setTimeout(r, SHUTDOWN_TIMEOUT_MS))
-  void Promise.race([tasks.shutdown().catch((err) => console.error(err)), hardLimit]).finally(() =>
-    app.exit(0)
-  )
+  const hardLimit = new Promise((r) => setTimeout(r, SHUTDOWN_HARD_LIMIT_MS))
+  void Promise.race([
+    tasks.shutdown(SHUTDOWN_STEP_MS).catch((err) => console.error(err)),
+    hardLimit
+  ]).finally(() => app.exit(0))
 })
 
 app.on('window-all-closed', () => {

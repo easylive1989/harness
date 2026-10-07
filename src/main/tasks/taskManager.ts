@@ -46,7 +46,9 @@ export interface TaskManagerDeps {
   verify: (
     cwd: string,
     commands: string[],
-    isAllowed: (c: string) => boolean
+    isAllowed: (c: string) => boolean,
+    /** 關閉 app 時中止進行中的驗證指令 */
+    signal?: AbortSignal
   ) => Promise<VerificationResult[]>
   now?: () => string
   newId?: () => string
@@ -115,8 +117,12 @@ export class TaskManager {
   private finalizing = new Set<string>()
   /** 報告整理的 promise，整個流程（含之後的時間軸寫入）結束才移除；whenIdle 用 */
   private reportJobs = new Map<string, Promise<void>>()
+  /** 每個報告整理流程的 AbortController；關閉 app 時用來中止驗證指令 */
+  private reportAborts = new Map<string, AbortController>()
   /** 正在開 PR／合併／丟棄的任務 */
   private finishing = new Set<string>()
+  /** 收尾操作的 promise；關閉 app 時等它們（有上限） */
+  private finishJobs = new Map<string, Promise<unknown>>()
   /** app 正在關閉：拒絕新任務與新訊息 */
   private shuttingDown = false
   private readonly now: () => string
@@ -901,8 +907,9 @@ export class TaskManager {
   }
 
   /**
-   * 關閉 app 前呼叫：之後拒絕新任務與新訊息，拒絕等待中的核准、中止所有執行。
-   * 等執行結束與狀態寫入各最多 timeoutMs，不讓關閉卡住；被中止的主線標為已中斷，下次啟動可「繼續」。
+   * 關閉 app 前呼叫：之後拒絕新任務與新訊息，拒絕等待中的核准、中止所有執行與報告整理中的驗證指令。
+   * 先等執行、報告整理與進行中的收尾操作（開 PR／合併／丟棄）結束，再寫入狀態；兩段各最多 timeoutMs，
+   * 總共不超過 2 × timeoutMs，不讓關閉卡住。被中止的主線標為已中斷，下次啟動可「繼續」。
    */
   async shutdown(timeoutMs = this.abortGraceMs) {
     this.shuttingDown = true
@@ -910,7 +917,15 @@ export class TaskManager {
       w.resolve({ allow: false, message: 'Harness 正在關閉' })
     const runs = [...this.runs.entries()]
     runs.forEach(([, r]) => r.abort())
-    await settlesWithin(Promise.all(runs.map(([, r]) => r.done.catch(() => undefined))), timeoutMs)
+    this.reportAborts.forEach((a) => a.abort())
+    await settlesWithin(
+      Promise.all([
+        ...runs.map(([, r]) => r.done.catch(() => undefined)),
+        ...this.reportJobs.values(),
+        ...[...this.finishJobs.values()].map((p) => p.catch(() => undefined))
+      ]),
+      timeoutMs
+    )
     const taskIds = new Set(runs.map(([key]) => key.slice(0, key.indexOf('|'))))
     const marks = [...taskIds].map((taskId) =>
       // 排在 onRunDone 的收尾之後，才不會被它改回 idle
@@ -948,8 +963,14 @@ export class TaskManager {
 
   /** 等提交報告的那段執行結束後：commit、算 diff、實跑驗證指令、存報告 */
   private async finalizeReport(taskId: string, input: ReportInput, run?: AgentRun) {
+    const abort = new AbortController()
+    this.reportAborts.set(taskId, abort)
+    const assertNotAborted = () => {
+      if (abort.signal.aborted) throw new Error('Harness 正在關閉')
+    }
     try {
       await run?.done.catch(() => undefined)
+      assertNotAborted()
       const t = this.task(taskId)
       const version = t.reportVersions.length + 1
       const commit =
@@ -972,8 +993,11 @@ export class TaskManager {
       const verification = await this.d.verify(
         t.worktreePath,
         input.verification.map((v) => v.command),
-        isAllowed
+        isAllowed,
+        abort.signal
       )
+      // 驗證被中止的結果不完整：不存報告，下次啟動可「繼續」重新整理
+      assertNotAborted()
       const report: Report = {
         version,
         taskId,
@@ -996,11 +1020,14 @@ export class TaskManager {
       })
       await this.addTimeline(taskId, { channel: 'main', kind: 'report', ref: String(version) })
     } catch (e) {
+      const aborted = abort.signal.aborted
       await this.update(taskId, (x) => {
-        x.runState = 'error'
-        x.error = `整理報告失敗：${errorMessage(e)}`
+        x.runState = aborted ? 'interrupted' : 'error'
+        x.error = aborted ? '關閉 app 時報告尚未整理完成' : `整理報告失敗：${errorMessage(e)}`
         this.finalizing.delete(taskId)
       }).catch(logError('儲存任務失敗'))
+    } finally {
+      if (this.reportAborts.get(taskId) === abort) this.reportAborts.delete(taskId)
     }
   }
 
@@ -1031,10 +1058,13 @@ export class TaskManager {
     this.task(taskId)
     if (this.finishing.has(taskId)) throw new Error('另一個收尾操作正在進行，請稍候')
     this.finishing.add(taskId)
+    const job = fn()
+    this.finishJobs.set(taskId, job)
     try {
-      return await fn()
+      return await job
     } finally {
       this.finishing.delete(taskId)
+      this.finishJobs.delete(taskId)
     }
   }
 

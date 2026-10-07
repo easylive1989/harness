@@ -11,6 +11,16 @@ test('包住區塊 HTML 並回報高度', () => {
   expect(html).toContain(`content="${BLOCK_CSP}"`)
 })
 
+test('標題轉義後放進 <title>', () => {
+  const html = wrapBlockHtml({ id: 'x', title: '狀態機 <script>&"\'', html: '' })
+  expect(html).toContain('<title>狀態機 &lt;script&gt;&amp;&quot;&#39;</title>')
+  expect(html).not.toContain('<title>狀態機 <script>')
+})
+
+test('區塊 id 最長 64 字元', () => {
+  expect(parseBlockUrl(`harness-block://report/ab12/1/${'a'.repeat(64)}`)?.blockId).toHaveLength(64)
+})
+
 test('id 裡的 < 不會結束 script', () => {
   const html = wrapBlockHtml({ id: '</script>', title: 't', html: '' })
   expect(html).not.toContain('"</script>"')
@@ -37,6 +47,7 @@ test.each([
   'harness-block://report/..%2f..%2fetc/1/x',
   'harness-block://report/ab12/1/..',
   'harness-block://report/ab12/1/X%20Y',
+  `harness-block://report/ab12/1/${'a'.repeat(65)}`,
   'harness-block://report/ab12/1',
   'harness-block://report/ab12/1/x/extra',
   'harness-block://other/ab12/1/x',

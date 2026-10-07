@@ -10,9 +10,12 @@ import type { GitService } from './git/gitService'
 import {
   assertChannel,
   assertId,
+  assertModel,
+  assertString,
   assertVersion,
   ensureClaudeReady,
-  pickSettingsPatch
+  isPathInside,
+  validateSettingsPatch
 } from './ipcGuards'
 import type { Repository } from './store/repository'
 import type { TaskManager } from './tasks/taskManager'
@@ -33,13 +36,19 @@ type Handlers = {
 }
 
 const task = (id: unknown) => assertId(id, '任務')
+/** 訊息內容（使用者輸入的文字） */
+const text = (v: unknown, what = '訊息') => assertString(v, what)
+/** Claude 或 app 產生的 id（問題、分岔、核准請求），不會用來組路徑 */
+const ref = (v: unknown, what: string) => assertString(v, what, { max: 200 })
+/** 匯出的 HTML 可能很大（含 diff），只擋非字串與極端大小 */
+const MAX_HTML = 50_000_000
 
 export function registerIpc(d: IpcDeps) {
   const handlers: Handlers = {
     'claude:status': (refresh) => d.claudeStatus(refresh === true),
     'settings:get': () => d.repo.getSettings(),
     'settings:set': async (raw) => {
-      const patch = pickSettingsPatch(raw)
+      const patch = validateSettingsPatch(raw)
       const next = { ...(await d.repo.getSettings()), ...patch }
       await d.repo.saveSettings(next)
       if ('claudePath' in patch) await d.claudeStatus(true)
@@ -76,35 +85,50 @@ export function registerIpc(d: IpcDeps) {
       return { branches: await d.git.branches(r.path), current: await d.git.currentBranch(r.path) }
     },
     'tasks:list': () => d.tasks.list(),
-    'tasks:create': async (input: CreateTaskInput) => {
-      assertId(input?.repoId, 'repo')
+    'tasks:create': async (raw: CreateTaskInput) => {
+      if (!raw || typeof raw !== 'object') throw new Error('無效的任務內容')
+      const input: CreateTaskInput = {
+        repoId: assertId(raw.repoId, 'repo'),
+        request: text(raw.request, '需求'),
+        baseBranch: assertString(raw.baseBranch, 'base branch', { max: 255 }),
+        model: assertModel(raw.model)
+      }
       await ensureClaudeReady(d.claudeStatus)
       return d.tasks.createTask(input)
     },
     'tasks:timeline': (taskId) => d.tasks.timeline(task(taskId)),
-    'tasks:send': (taskId, channel, text) =>
-      d.tasks.send(task(taskId), assertChannel(channel), text),
-    'tasks:answer': (taskId, qid, answer) => d.tasks.answerQuestion(task(taskId), qid, answer),
-    'tasks:counter': (taskId, qid, text) => d.tasks.counterQuestion(task(taskId), qid, text),
+    'tasks:send': (taskId, channel, msg) =>
+      d.tasks.send(task(taskId), assertChannel(channel), text(msg)),
+    'tasks:answer': (taskId, qid, answer) =>
+      d.tasks.answerQuestion(task(taskId), ref(qid, '問題 id'), answer),
+    'tasks:counter': (taskId, qid, msg) =>
+      d.tasks.counterQuestion(task(taskId), ref(qid, '問題 id'), text(msg)),
     'tasks:changedFiles': (taskId) => d.tasks.changedFiles(task(taskId)),
-    'branch:open': (taskId, input) => d.tasks.openBranch(task(taskId), input),
-    'branch:conclude': (taskId, branchId) => d.tasks.concludeBranch(task(taskId), branchId),
+    'branch:open': (taskId, input) => {
+      if (!input || typeof input !== 'object') throw new Error('無效的分岔內容')
+      text(input.title, '分岔標題')
+      return d.tasks.openBranch(task(taskId), input)
+    },
+    'branch:conclude': (taskId, branchId) =>
+      d.tasks.concludeBranch(task(taskId), ref(branchId, '分岔 id')),
     'branch:confirm': (taskId, branchId, edited) =>
-      d.tasks.confirmBranch(task(taskId), branchId, edited),
+      d.tasks.confirmBranch(task(taskId), ref(branchId, '分岔 id'), edited),
     'spec:approve': (taskId) => d.tasks.approveSpec(task(taskId)),
-    'spec:requestChanges': (taskId, text) => d.tasks.requestSpecChanges(task(taskId), text),
+    'spec:requestChanges': (taskId, msg) => d.tasks.requestSpecChanges(task(taskId), text(msg)),
     'run:stop': (taskId, channel) => d.tasks.stop(task(taskId), assertChannel(channel)),
     'run:resume': (taskId) => d.tasks.resume(task(taskId)),
     'permission:resolve': (taskId, requestId, decision) =>
-      d.tasks.resolvePermission(task(taskId), requestId, decision),
+      d.tasks.resolvePermission(task(taskId), ref(requestId, '核准請求 id'), decision),
     'report:get': (taskId, version) => d.tasks.getReport(task(taskId), assertVersion(version)),
     'report:feedback': (taskId, items, overall) =>
       d.tasks.submitReportFeedback(task(taskId), items, overall),
     'report:saveHtml': async (suggestedName, html) => {
+      assertString(html, 'HTML', { max: MAX_HTML })
       const w = d.win()
       if (!w) return null
       const res = await dialog.showSaveDialog(w, {
-        defaultPath: suggestedName,
+        // 只取檔名：建議名稱不能把儲存對話框預設到其他資料夾
+        defaultPath: basename(String(suggestedName)),
         filters: [{ name: 'HTML', extensions: ['html'] }]
       })
       if (res.canceled || !res.filePath) return null
@@ -114,8 +138,14 @@ export function registerIpc(d: IpcDeps) {
     'finish:pr': (taskId) => d.tasks.createPullRequest(task(taskId)),
     'finish:merge': (taskId) => d.tasks.merge(task(taskId)),
     'finish:discard': (taskId) => d.tasks.discard(task(taskId)),
-    'shell:showInFolder': (path) => {
-      if (typeof path === 'string' && path) shell.showItemInFolder(path)
+    'shell:showInFolder': async (path) => {
+      // 只能打開已加入的 repo 或任務 worktree 裡的位置
+      const roots = [
+        ...(await d.repo.listRepos()).map((r) => r.path),
+        ...d.tasks.list().map((t) => t.worktreePath)
+      ]
+      if (!isPathInside(path, roots)) throw new Error('只能顯示 repo 或 worktree 裡的檔案')
+      shell.showItemInFolder(path)
     },
     'shell:openExternal': async (url) => {
       if (typeof url === 'string' && /^https:\/\//.test(url)) await shell.openExternal(url)
@@ -123,8 +153,12 @@ export function registerIpc(d: IpcDeps) {
   }
 
   for (const [channel, fn] of Object.entries(handlers)) {
-    ipcMain.handle(channel, async (_e, ...args: unknown[]) =>
-      (fn as (...a: unknown[]) => unknown)(...args)
-    )
+    ipcMain.handle(channel, async (e, ...args: unknown[]) => {
+      // 只接受主視窗本身（不是 iframe 或其他視窗）送來的請求
+      const main = d.win()?.webContents.mainFrame
+      if (!e.senderFrame || !main || e.senderFrame !== main)
+        throw new Error('拒絕來自未知來源的請求')
+      return (fn as (...a: unknown[]) => unknown)(...args)
+    })
   }
 }

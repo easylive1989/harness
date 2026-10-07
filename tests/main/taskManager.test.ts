@@ -443,8 +443,8 @@ describe('TaskManager：規格與實作', () => {
   })
 })
 
-async function toImplementing() {
-  const ctx = await setup()
+async function toImplementing(over: Partial<TaskManagerDeps> = {}) {
+  const ctx = await setup(over)
   ctx.claude.script = async ({ call, sink }) => {
     if (call === 0) await sink.proposeSpec(spec)
   }
@@ -472,7 +472,12 @@ describe('TaskManager：報告與收尾', () => {
     const r = await repo.getReport(id, 1)
     expect(r).toMatchObject({ version: 1, commit: 'abc123', stats: { files: 1 } })
     expect(await tm.getReport(id, 1)).toEqual(r)
-    expect(verify).toHaveBeenCalledWith(t.worktreePath, ['npm test'], expect.any(Function))
+    expect(verify).toHaveBeenCalledWith(
+      t.worktreePath,
+      ['npm test'],
+      expect.any(Function),
+      expect.any(AbortSignal)
+    )
     const isAllowed = verify.mock.calls[0][2]
     expect(isAllowed('npm test')).toBe(true)
     expect(isAllowed('git status')).toBe(true) // 全域允許清單
@@ -1013,6 +1018,54 @@ describe('TaskManager：關閉 app', () => {
     expect(Date.now() - started).toBeLessThan(1000)
     expect(tm.get(id).runState).toBe('interrupted')
     claude.releaseHang()
+  })
+
+  test('shutdown 中止進行中的驗證指令，報告不存檔，主線標為中斷', async () => {
+    let seen: AbortSignal | undefined
+    const verify = vi.fn<TaskManagerDeps['verify']>(async (_cwd, commands, _ok, signal) => {
+      seen = signal
+      await new Promise((r) => signal!.addEventListener('abort', r, { once: true }))
+      return commands.map((command) => ({
+        command,
+        exitCode: null,
+        durationMs: 1,
+        outputTail: '[Harness] 已取消'
+      }))
+    })
+    const { tm, claude, repo, id } = await toImplementing({ verify })
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await until(() => verify.mock.calls.length === 1)
+    const started = Date.now()
+    await tm.shutdown(500)
+    expect(Date.now() - started).toBeLessThan(1500)
+    expect(seen?.aborted).toBe(true)
+    expect(tm.get(id)).toMatchObject({
+      status: 'implementing',
+      runState: 'interrupted',
+      reportVersions: []
+    })
+    await expect(repo.getReport(id, 1)).rejects.toThrow()
+  })
+
+  test('shutdown 等進行中的合併完成（有上限）', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    const merge = git.merge
+    git.merge = async (...a) => {
+      await new Promise((r) => setTimeout(r, 150))
+      await merge(...a)
+    }
+    const merging = tm.merge(id)
+    await tm.shutdown(1000)
+    expect(tm.get(id).status).toBe('done')
+    await merging
   })
 
   test('沒有執行時 shutdown 立即結束，閒置任務狀態不變', async () => {

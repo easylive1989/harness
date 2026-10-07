@@ -4,10 +4,13 @@ import type { ClaudeStatus } from '@shared/types'
 import {
   assertChannel,
   assertId,
+  assertModel,
+  assertString,
   assertVersion,
   ensureClaudeReady,
+  isPathInside,
   isSafeId,
-  pickSettingsPatch
+  validateSettingsPatch
 } from '../../src/main/ipcGuards'
 
 describe('id 檢查', () => {
@@ -38,12 +41,98 @@ test('channel 只接受 main 或 branch:<id>', () => {
     expect(() => assertChannel(c)).toThrow('無效的對話頻道')
 })
 
-test('設定只保留已知欄位', () => {
-  expect(pickSettingsPatch({ branchPrefix: 'x/', evil: 1, claudePath: '/bin/claude' })).toEqual({
-    branchPrefix: 'x/',
-    claudePath: '/bin/claude'
+describe('validateSettingsPatch', () => {
+  test('只保留已知欄位，並整理值', () => {
+    expect(
+      validateSettingsPatch({
+        branchPrefix: 'x/',
+        evil: 1,
+        claudePath: '/bin/claude',
+        alwaysAllowedCommands: [' npm test ', 'ls'],
+        loadProjectSettings: false,
+        defaultModel: 'claude-sonnet-5-5',
+        worktreeRoot: '/tmp/wt'
+      })
+    ).toEqual({
+      branchPrefix: 'x/',
+      claudePath: '/bin/claude',
+      alwaysAllowedCommands: ['npm test', 'ls'],
+      loadProjectSettings: false,
+      defaultModel: 'claude-sonnet-5-5',
+      worktreeRoot: '/tmp/wt'
+    })
   })
-  expect(() => pickSettingsPatch(null)).toThrow('無效的設定')
+
+  test('claudePath 空字串或 undefined 代表自動偵測', () => {
+    expect(validateSettingsPatch({ claudePath: '  ' })).toEqual({ claudePath: undefined })
+    expect(validateSettingsPatch({ claudePath: undefined })).toEqual({ claudePath: undefined })
+  })
+
+  test.each([
+    [null, '無效的設定'],
+    [{ worktreeRoot: '' }, 'worktree 位置'],
+    [{ worktreeRoot: 'relative/dir' }, 'worktree 位置'],
+    [{ worktreeRoot: 3 }, 'worktree 位置'],
+    [{ branchPrefix: ' ' }, '分支前綴'],
+    [{ claudePath: 1 }, 'claude 路徑'],
+    [{ alwaysAllowedCommands: 'ls' }, '允許清單'],
+    [{ alwaysAllowedCommands: ['ls', ' '] }, '允許清單'],
+    [{ alwaysAllowedCommands: ['ls', 1] }, '允許清單'],
+    [{ loadProjectSettings: 'yes' }, '載入專案設定'],
+    [{ defaultModel: 'gpt-4' }, '模型']
+  ])('拒絕 %j', (patch, msg) => {
+    expect(() => validateSettingsPatch(patch)).toThrow(msg)
+  })
+})
+
+describe('assertString', () => {
+  test('回傳原字串', () => {
+    expect(assertString('hi', '訊息')).toBe('hi')
+    expect(assertString('', '訊息', { allowEmpty: true })).toBe('')
+  })
+
+  test.each([
+    [undefined, {}],
+    [3, {}],
+    ['', {}],
+    ['   ', {}],
+    ['abcd', { max: 3 }]
+  ])('拒絕 %j', (v, opts) => {
+    expect(() => assertString(v, '訊息', opts)).toThrow('無效的訊息')
+  })
+
+  test('預設上限 100000 字元', () => {
+    expect(assertString('a'.repeat(100_000), '訊息')).toHaveLength(100_000)
+    expect(() => assertString('a'.repeat(100_001), '訊息')).toThrow('無效的訊息')
+  })
+})
+
+test('model 必須是支援的模型', () => {
+  expect(assertModel('claude-opus-5-5')).toBe('claude-opus-5-5')
+  for (const m of ['gpt-4', '', 1, undefined]) expect(() => assertModel(m)).toThrow('無效的模型')
+})
+
+describe('isPathInside', () => {
+  const roots = ['/repos/shop-api', '/home/me/.harness/worktrees/shop-api/20261007-ab12']
+
+  test.each([
+    '/repos/shop-api',
+    '/repos/shop-api/src/a.ts',
+    '/home/me/.harness/worktrees/shop-api/20261007-ab12/x'
+  ])('允許 %s', (p) => {
+    expect(isPathInside(p, roots)).toBe(true)
+  })
+
+  test.each([
+    '/repos/shop-api-evil/a.ts',
+    '/repos/shop-api/../other',
+    '/etc/passwd',
+    'relative/path',
+    '',
+    3
+  ])('拒絕 %s', (p) => {
+    expect(isPathInside(p, roots)).toBe(false)
+  })
 })
 
 describe('ensureClaudeReady', () => {

@@ -29,6 +29,15 @@ describe('ReportInputSchema', () => {
     expect(ReportInputSchema.safeParse(bad).success).toBe(false)
   })
 
+  test('custom block id 最長 64 字元（與 harness-block:// 網址的檢查一致）', () => {
+    const ok = structuredClone(sampleReport)
+    ok.custom_blocks[0].id = 'a'.repeat(64)
+    expect(ReportInputSchema.safeParse(ok).success).toBe(true)
+    const bad = structuredClone(sampleReport)
+    bad.custom_blocks[0].id = 'a'.repeat(65)
+    expect(ReportInputSchema.safeParse(bad).success).toBe(false)
+  })
+
   test('同一張圖裡節點 id 重複時失敗', () => {
     const bad = structuredClone(sampleReport)
     bad.architecture.before.nodes.push({
