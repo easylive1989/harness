@@ -2461,7 +2461,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ```ts
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, rename, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, test } from 'vitest'
@@ -2505,6 +2505,18 @@ describe('GitService', () => {
       files: 2, additions: 2, deletions: 0,
       perFile: [{ path: 'a.txt', additions: 1, deletions: 0 }, { path: 'b.txt', additions: 1, deletions: 0 }]
     })
+  })
+
+  test('改名視為刪除加新增，路徑不含 =>', async () => {
+    await git.createWorktree(repo, wt, 'harness/t1', 'main')
+    await rename(join(wt, 'a.txt'), join(wt, 'renamed.txt'))
+    const expected = {
+      files: 2, additions: 1, deletions: 1,
+      perFile: [{ path: 'a.txt', additions: 0, deletions: 1 }, { path: 'renamed.txt', additions: 1, deletions: 0 }]
+    }
+    expect(await git.workingStats(wt, 'main')).toEqual(expected)
+    await git.commitAll(wt, 'rename')
+    expect(await git.diffStats(wt, 'main')).toEqual(expected)
   })
 
   test('merge 前檢查原 repo 狀態', async () => {
@@ -2607,15 +2619,17 @@ export class GitService {
     return (await git(wt, 'rev-parse', 'HEAD')).trim()
   }
 
-  diff(wt: string, base: string) { return git(wt, 'diff', `${base}...HEAD`) }
+  /** --no-renames：改名一律視為刪除＋新增，與 diffStats 的逐檔路徑一致 */
+  diff(wt: string, base: string) { return git(wt, 'diff', '--no-renames', `${base}...HEAD`) }
 
-  async diffStats(wt: string, base: string) { return parseNumstat(await git(wt, 'diff', '--numstat', `${base}...HEAD`)) }
+  /** --no-renames：numstat 遇到改名會輸出 `old => new`，關掉後每列都是單純路徑 */
+  async diffStats(wt: string, base: string) { return parseNumstat(await git(wt, 'diff', '--numstat', '--no-renames', `${base}...HEAD`)) }
 
   /** 含未 commit 與未追蹤檔案，相對於 base 的統計（實作中的「變更檔案」面板用） */
   async workingStats(wt: string, base: string) {
     await git(wt, 'add', '-A', '-N')
     const mergeBase = (await git(wt, 'merge-base', base, 'HEAD')).trim()
-    return parseNumstat(await git(wt, 'diff', '--numstat', mergeBase))
+    return parseNumstat(await git(wt, 'diff', '--numstat', '--no-renames', mergeBase))
   }
 
   async merge(repo: string, branch: string, base: string) {
@@ -2644,7 +2658,7 @@ export type GitLike = Pick<GitService,
   'diff' | 'diffStats' | 'workingStats' | 'merge' | 'removeWorktree' | 'pushAndOpenPr'>
 ```
 
-**Step 4: 確認通過** — `npx vitest run tests/main/gitService.test.ts` → 5 passed
+**Step 4: 確認通過** — `npx vitest run tests/main/gitService.test.ts` → 6 passed
 
 **Step 5: Commit**
 
