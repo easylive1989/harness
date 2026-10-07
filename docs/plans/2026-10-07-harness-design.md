@@ -100,7 +100,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
   - `WebFetch`/`WebSearch`：需核准。
   - 其他：deny。
 - 執行方式：規則集中在純函式 `evaluateTool`。硬性規則（deny／ask）由 **PreToolUse hook** 執行，因為 SDK 會先套用專案 `.claude/settings.json` 的 allow 規則才呼叫 `canUseTool`，只靠 `canUseTool` 會被繞過；`canUseTool` 負責核准流程（等待使用者、核准後再確認任務階段）。harness 工具只信任 `mcpServer.source === 'sdk'` 且名稱為 `harness` 的伺服器。
-- 路徑：以 realpath 解開 symlink 後才比對 worktree；`~` 開頭、非字串路徑、寫入工具缺路徑一律 deny。寫入 `.git`、`.claude/`、`.mcp.json` 即使在實作階段也要核准。
+- 路徑：以 realpath 解開 symlink 後才比對 worktree；`~` 開頭、含 `..` 片段、非字串路徑、寫入工具缺路徑一律 deny；Glob pattern 含 `..`，或在開頭／大括號選項中以 `/`、`~` 起頭也 deny。寫入 `.git`、`.claude/`、`.mcp.json` 即使在實作階段也要核准。
 
 ### 3.5 分岔
 

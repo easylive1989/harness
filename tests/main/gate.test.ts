@@ -113,7 +113,15 @@ describe('PermissionGate', () => {
     expect((await call('Glob', { pattern: '/etc/**' })).behavior).toBe('deny')
     expect((await call('Glob', { pattern: '../**/*.ts' })).behavior).toBe('deny')
     expect((await call('Glob', { pattern: 'src/../../**' })).behavior).toBe('deny')
-    expect((await call('Glob', { pattern: 'src/../lib/*.ts' })).behavior).toBe('allow')
+    expect((await call('Glob', { pattern: 'src/../lib/*.ts' })).behavior).toBe('deny')
+  })
+
+  test('Glob 的大括號展開不能繞過檢查', async () => {
+    const { call } = setup('clarify')
+    expect((await call('Glob', { pattern: '{..,src}/**' })).behavior).toBe('deny')
+    expect((await call('Glob', { pattern: '{/etc,src}/**' })).behavior).toBe('deny')
+    expect((await call('Glob', { pattern: 'src/{a,~/x}/**' })).behavior).toBe('deny')
+    expect((await call('Glob', { pattern: 'src/**/*.{ts,tsx}' })).behavior).toBe('allow')
   })
 
   test('symlink 指到 worktree 外時拒絕', async () => {
@@ -132,6 +140,21 @@ describe('PermissionGate', () => {
     expect((await call('Read', { file_path: join(wt, 'link/secret') })).behavior).toBe('deny')
     expect((await call('Write', { file_path: 'link/new.ts' })).behavior).toBe('deny')
     expect((await call('Write', { file_path: join(wt, 'dangling') })).behavior).toBe('deny')
+  })
+
+  test('路徑含 .. 一律拒絕（避免 link/.. 被字面上消掉而繞過 symlink）', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'harness-gate-'))
+    const wt = join(base, 'wt')
+    const outside = join(base, 'outside', 'deep')
+    await mkdir(wt)
+    await mkdir(outside, { recursive: true })
+    await symlink(outside, join(wt, 'link'))
+    const { call } = setup('implement', { allow: true }, [], wt)
+    expect((await call('Write', { file_path: `${wt}/link/../pwn.sh` })).behavior).toBe('deny')
+    expect((await call('Write', { file_path: 'link/../pwn.sh' })).behavior).toBe('deny')
+    expect((await call('Read', { file_path: 'link/../secret' })).behavior).toBe('deny')
+    expect((await call('Grep', { pattern: 'x', path: 'src/..' })).behavior).toBe('deny')
+    expect((await call('Write', { file_path: join(wt, 'a..b.ts') })).behavior).toBe('allow')
   })
 
   test('釐清與分岔階段不能寫檔或執行指令', async () => {

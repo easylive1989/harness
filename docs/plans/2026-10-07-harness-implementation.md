@@ -1975,7 +1975,15 @@ describe('PermissionGate', () => {
     expect((await call('Glob', { pattern: '/etc/**' })).behavior).toBe('deny')
     expect((await call('Glob', { pattern: '../**/*.ts' })).behavior).toBe('deny')
     expect((await call('Glob', { pattern: 'src/../../**' })).behavior).toBe('deny')
-    expect((await call('Glob', { pattern: 'src/../lib/*.ts' })).behavior).toBe('allow')
+    expect((await call('Glob', { pattern: 'src/../lib/*.ts' })).behavior).toBe('deny')
+  })
+
+  test('Glob 的大括號展開不能繞過檢查', async () => {
+    const { call } = setup('clarify')
+    expect((await call('Glob', { pattern: '{..,src}/**' })).behavior).toBe('deny')
+    expect((await call('Glob', { pattern: '{/etc,src}/**' })).behavior).toBe('deny')
+    expect((await call('Glob', { pattern: 'src/{a,~/x}/**' })).behavior).toBe('deny')
+    expect((await call('Glob', { pattern: 'src/**/*.{ts,tsx}' })).behavior).toBe('allow')
   })
 
   test('symlink 指到 worktree 外時拒絕', async () => {
@@ -1994,6 +2002,21 @@ describe('PermissionGate', () => {
     expect((await call('Read', { file_path: join(wt, 'link/secret') })).behavior).toBe('deny')
     expect((await call('Write', { file_path: 'link/new.ts' })).behavior).toBe('deny')
     expect((await call('Write', { file_path: join(wt, 'dangling') })).behavior).toBe('deny')
+  })
+
+  test('路徑含 .. 一律拒絕（避免 link/.. 被字面上消掉而繞過 symlink）', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'harness-gate-'))
+    const wt = join(base, 'wt')
+    const outside = join(base, 'outside', 'deep')
+    await mkdir(wt)
+    await mkdir(outside, { recursive: true })
+    await symlink(outside, join(wt, 'link'))
+    const { call } = setup('implement', { allow: true }, [], wt)
+    expect((await call('Write', { file_path: `${wt}/link/../pwn.sh` })).behavior).toBe('deny')
+    expect((await call('Write', { file_path: 'link/../pwn.sh' })).behavior).toBe('deny')
+    expect((await call('Read', { file_path: 'link/../secret' })).behavior).toBe('deny')
+    expect((await call('Grep', { pattern: 'x', path: 'src/..' })).behavior).toBe('deny')
+    expect((await call('Write', { file_path: join(wt, 'a..b.ts') })).behavior).toBe('allow')
   })
 
   test('釐清與分岔階段不能寫檔或執行指令', async () => {
@@ -2251,7 +2274,8 @@ function realpathNearest(abs: string): string | undefined {
 
 /** 路徑在 root 內時回傳相對於 root 的真實路徑（root 本身為 ''），否則 undefined */
 function relativeInside(root: string, p: string): string | undefined {
-  if (p.startsWith('~')) return undefined
+  // resolve() 會在 realpath 之前字面上消掉 ..，使 link/../x 繞過 symlink 檢查，所以直接拒絕
+  if (p.startsWith('~') || p.split('/').includes('..')) return undefined
   const r = realpathNearest(resolve(root))
   const abs = realpathNearest(resolve(root, p))
   if (!r || !abs) return undefined
@@ -2275,14 +2299,18 @@ function targetPaths(input: Record<string, unknown>): string[] | undefined {
   return out
 }
 
-/** Glob 的 pattern 是絕對路徑、~ 開頭或含 .. 時，必須解析後仍在 worktree 內 */
+/**
+ * Glob 的 pattern 不可含 ..，也不可在開頭或大括號選項（`{` `,` 之後）放 / 或 ~，
+ * 否則 `{..,src}/**`、`{/etc,src}/**` 會繞過檢查。純絕對路徑（無大括號）須落在 worktree 內。
+ */
 function globEscapes(root: string, input: Record<string, unknown>): boolean {
   const pattern = input.pattern
   if (pattern === undefined) return false
-  if (typeof pattern !== 'string' || pattern.startsWith('~')) return true
-  if (!isAbsolute(pattern) && !pattern.split(/[\\/]/).includes('..')) return false
-  const base = typeof input.path === 'string' ? resolve(root, input.path) : root
-  return !isInside(root, resolve(base, pattern))
+  if (typeof pattern !== 'string') return true
+  if (pattern.includes('..') || pattern.startsWith('~') || /[{,]\s*[/~]/.test(pattern)) return true
+  if (!isAbsolute(pattern)) return false
+  if (pattern.includes('{')) return true
+  return !isInside(root, pattern)
 }
 
 /** .git、.claude/ 與 .mcp.json 會改變 git 或 Claude 的行為，修改前要人工核准 */

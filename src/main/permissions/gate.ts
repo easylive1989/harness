@@ -82,7 +82,8 @@ function realpathNearest(abs: string): string | undefined {
 
 /** 路徑在 root 內時回傳相對於 root 的真實路徑（root 本身為 ''），否則 undefined */
 function relativeInside(root: string, p: string): string | undefined {
-  if (p.startsWith('~')) return undefined
+  // resolve() 會在 realpath 之前字面上消掉 ..，使 link/../x 繞過 symlink 檢查，所以直接拒絕
+  if (p.startsWith('~') || p.split('/').includes('..')) return undefined
   const r = realpathNearest(resolve(root))
   const abs = realpathNearest(resolve(root, p))
   if (!r || !abs) return undefined
@@ -106,14 +107,18 @@ function targetPaths(input: Record<string, unknown>): string[] | undefined {
   return out
 }
 
-/** Glob 的 pattern 是絕對路徑、~ 開頭或含 .. 時，必須解析後仍在 worktree 內 */
+/**
+ * Glob 的 pattern 不可含 ..，也不可在開頭或大括號選項（`{` `,` 之後）放 / 或 ~，
+ * 否則 `{..,src}/**`、`{/etc,src}/**` 會繞過檢查。純絕對路徑（無大括號）須落在 worktree 內。
+ */
 function globEscapes(root: string, input: Record<string, unknown>): boolean {
   const pattern = input.pattern
   if (pattern === undefined) return false
-  if (typeof pattern !== 'string' || pattern.startsWith('~')) return true
-  if (!isAbsolute(pattern) && !pattern.split(/[\\/]/).includes('..')) return false
-  const base = typeof input.path === 'string' ? resolve(root, input.path) : root
-  return !isInside(root, resolve(base, pattern))
+  if (typeof pattern !== 'string') return true
+  if (pattern.includes('..') || pattern.startsWith('~') || /[{,]\s*[/~]/.test(pattern)) return true
+  if (!isAbsolute(pattern)) return false
+  if (pattern.includes('{')) return true
+  return !isInside(root, pattern)
 }
 
 /** .git、.claude/ 與 .mcp.json 會改變 git 或 Claude 的行為，修改前要人工核准 */
