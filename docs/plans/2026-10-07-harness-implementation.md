@@ -3148,7 +3148,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ```ts
 import { afterEach, describe, expect, test } from 'vitest'
-import { applyLoginShellPath, detectClaude, type Exec } from '../../src/main/claude/detect'
+import {
+  applyLoginShellPath,
+  detectClaude,
+  execCapture,
+  type Exec
+} from '../../src/main/claude/detect'
 
 function fakeExec(map: Record<string, string | Error>): Exec {
   return async (cmd, args) => {
@@ -3162,18 +3167,36 @@ function fakeExec(map: Record<string, string | Error>): Exec {
 
 describe('detectClaude', () => {
   test('找到且已登入', async () => {
-    const s = await detectClaude(fakeExec({
-      'command -v claude': '/u/.local/bin/claude\n',
-      'claude --version': '2.1.292 (Claude Code)\n',
-      'claude auth status': JSON.stringify({ loggedIn: true, subscriptionType: 'max', email: 'a@b' })
-    }))
-    expect(s).toEqual({ found: true, path: '/u/.local/bin/claude', version: '2.1.292 (Claude Code)', loggedIn: true, subscriptionType: 'max', email: 'a@b', error: undefined })
+    const s = await detectClaude(
+      fakeExec({
+        'command -v claude': '/u/.local/bin/claude\n',
+        'claude --version': '2.1.292 (Claude Code)\n',
+        'claude auth status': JSON.stringify({
+          loggedIn: true,
+          subscriptionType: 'max',
+          email: 'a@b'
+        })
+      })
+    )
+    expect(s).toEqual({
+      found: true,
+      path: '/u/.local/bin/claude',
+      version: '2.1.292 (Claude Code)',
+      loggedIn: true,
+      subscriptionType: 'max',
+      email: 'a@b',
+      error: undefined
+    })
   })
 
   test('使用設定指定的路徑', async () => {
-    const s = await detectClaude(fakeExec({
-      '/opt/claude --version': '1', '/opt/claude auth status': '{"loggedIn":true}'
-    }), '/opt/claude')
+    const s = await detectClaude(
+      fakeExec({
+        '/opt/claude --version': '1',
+        '/opt/claude auth status': '{"loggedIn":true}'
+      }),
+      '/opt/claude'
+    )
     expect(s.path).toBe('/opt/claude')
   })
 
@@ -3184,21 +3207,93 @@ describe('detectClaude', () => {
   })
 
   test('未登入', async () => {
-    const s = await detectClaude(fakeExec({
-      'command -v claude': '/c', '/c --version': '1', '/c auth status': '{"loggedIn":false}'
-    }))
+    const s = await detectClaude(
+      fakeExec({
+        'command -v claude': '/c',
+        '/c --version': '1',
+        '/c auth status': '{"loggedIn":false}'
+      })
+    )
     expect(s.loggedIn).toBe(false)
     expect(s.error).toContain('登入')
   })
 })
 
+describe('detectClaude 容錯', () => {
+  test('command -v 的輸出取最後一個非空行', async () => {
+    const s = await detectClaude(
+      fakeExec({
+        'command -v claude': 'Welcome!\n/u/bin/claude\n\n',
+        '/u/bin/claude --version': '1',
+        '/u/bin/claude auth status': '{"loggedIn":true}'
+      })
+    )
+    expect(s.path).toBe('/u/bin/claude')
+    expect(s.loggedIn).toBe(true)
+  })
+
+  test('auth status 不是 JSON 時給出友善訊息', async () => {
+    const s = await detectClaude(
+      fakeExec({
+        'command -v claude': '/c',
+        '/c --version': '0.9 (Claude Code)',
+        '/c auth status': 'error: unknown command auth'
+      })
+    )
+    expect(s).toMatchObject({
+      found: true,
+      path: '/c',
+      version: '0.9 (Claude Code)',
+      loggedIn: false
+    })
+    expect(s.error).toContain('無法讀取登入狀態，請更新 Claude Code')
+  })
+})
+
+describe('execCapture', () => {
+  test('回傳 stdout；非 0 結束但有 stdout 時仍回傳', async () => {
+    expect(await execCapture('sh', ['-c', 'echo hi'])).toBe('hi\n')
+    expect(await execCapture('sh', ['-c', 'echo partial; exit 1'])).toBe('partial\n')
+  })
+
+  test('非 0 結束且沒有 stdout 時以 stderr 拒絕', async () => {
+    await expect(execCapture('sh', ['-c', 'echo bad >&2; exit 1'])).rejects.toThrow('bad')
+  })
+
+  test('stdin 是空的，不會卡住', async () => {
+    expect(await execCapture('cat', [], { timeoutMs: 3000 })).toBe('')
+  })
+
+  test('逾時會終止並拒絕，不等佔住輸出的孫程序', async () => {
+    const started = Date.now()
+    await expect(
+      execCapture('sh', ['-c', 'sleep 5 & sleep 5'], { timeoutMs: 200 })
+    ).rejects.toThrow('逾時')
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
+})
+
 describe('applyLoginShellPath', () => {
   const original = process.env.PATH
-  afterEach(() => { process.env.PATH = original })
+  afterEach(() => {
+    process.env.PATH = original
+  })
 
   test('只取標記之間的 PATH，忽略 shell 啟動訊息', async () => {
-    await applyLoginShellPath(async () => 'Welcome to zsh!\nnvm: using v24\n__HARNESS_PATH__/a/bin:/b/bin__HARNESS_PATH__\nbye\n')
+    await applyLoginShellPath(
+      async () =>
+        'Welcome to zsh!\nnvm: using v24\n__HARNESS_PATH__/a/bin:/b/bin__HARNESS_PATH__\nbye\n'
+    )
     expect(process.env.PATH).toBe('/a/bin:/b/bin')
+  })
+
+  test('以 10 秒逾時執行 login shell', async () => {
+    let seen: number | undefined
+    await applyLoginShellPath(async (_cmd, _args, opts) => {
+      seen = opts?.timeoutMs
+      return '__HARNESS_PATH__/x__HARNESS_PATH__'
+    })
+    expect(seen).toBe(10_000)
   })
 
   test('沒有標記時保留原本的 PATH', async () => {
@@ -3209,7 +3304,9 @@ describe('applyLoginShellPath', () => {
 
   test('執行失敗時保留原本的 PATH', async () => {
     process.env.PATH = '/keep'
-    await applyLoginShellPath(async () => { throw new Error('boom') })
+    await applyLoginShellPath(async () => {
+      throw new Error('boom')
+    })
     expect(process.env.PATH).toBe('/keep')
   })
 })
@@ -3221,39 +3318,114 @@ describe('applyLoginShellPath', () => {
 
 ```ts
 // src/main/claude/detect.ts
-import { execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import type { ClaudeStatus } from '@shared/types'
 
-export type Exec = (cmd: string, args: string[]) => Promise<string>
+export interface ExecOptions {
+  /** 逾時毫秒數，逾時會終止整個 process group 並拒絕 */
+  timeoutMs?: number
+}
 
-/** 執行指令並回傳 stdout；非 0 結束時若有 stdout 也回傳（`claude auth status` 未登入時會這樣） */
-export const execCapture: Exec = (cmd, args) =>
+export type Exec = (cmd: string, args: string[], opts?: ExecOptions) => Promise<string>
+
+/**
+ * 執行指令並回傳 stdout；非 0 結束時若有 stdout 也回傳（`claude auth status` 未登入時會這樣）。
+ * stdin 為空，避免互動式 shell 或指令等待輸入而卡住啟動流程。
+ */
+export const execCapture: Exec = (cmd, args, { timeoutMs = 15_000 } = {}) =>
   new Promise((resolve, reject) => {
-    execFile(cmd, args, { maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err && !stdout) reject(new Error(stderr || err.message))
-      else resolve(stdout)
-    })
+    // detached：自成 process group，逾時可連同孫程序一起終止
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const settle = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fn()
+    }
+    child.stdout.setEncoding('utf8').on('data', (s: string) => (stdout += s))
+    child.stderr.setEncoding('utf8').on('data', (s: string) => (stderr += s))
+    const timer = setTimeout(() => {
+      try {
+        if (child.pid) process.kill(-child.pid, 'SIGKILL')
+        else child.kill('SIGKILL')
+      } catch {
+        child.kill('SIGKILL')
+      }
+      // 不等 close：孫程序可能還佔著輸出管線
+      settle(() => reject(new Error(`${cmd} 執行逾時（${timeoutMs}ms）`)))
+    }, timeoutMs)
+    child.on('error', (err) => settle(() => reject(err)))
+    child.on('close', (code, signal) =>
+      settle(() => {
+        if (code !== 0 && !stdout)
+          reject(new Error(stderr.trim() || `${cmd} 結束代碼 ${code ?? signal}`))
+        else resolve(stdout)
+      })
+    )
   })
 
 const shell = () => process.env.SHELL || '/bin/zsh'
 
+/**
+ * 偵測 claude 的路徑、版本與登入狀態。
+ * 啟動時必須先執行 applyLoginShellPath 再呼叫這裡：`-lc` 不讀 .zshrc，要靠繼承來的 PATH 才找得到 claude。
+ */
 export async function detectClaude(exec: Exec, explicitPath?: string): Promise<ClaudeStatus> {
   let path = explicitPath
   if (!path) {
-    try { path = (await exec(shell(), ['-lc', 'command -v claude'])).trim() || undefined } catch { path = undefined }
-  }
-  if (!path) return { found: false, loggedIn: false, error: '找不到 claude 指令，請先安裝 Claude Code。' }
-  try {
-    const version = (await exec(path, ['--version'])).trim()
-    const auth = JSON.parse(await exec(path, ['auth', 'status'])) as { loggedIn?: boolean; subscriptionType?: string; email?: string }
-    const loggedIn = !!auth.loggedIn
-    return {
-      found: true, path, version, loggedIn,
-      subscriptionType: auth.subscriptionType, email: auth.email,
-      error: loggedIn ? undefined : '尚未登入，請在終端機執行 claude 並完成登入。'
+    try {
+      // 取最後一個非空行，忽略 shell 啟動時可能印出的訊息
+      const out = await exec(shell(), ['-lc', 'command -v claude'])
+      path =
+        out
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .pop() || undefined
+    } catch {
+      path = undefined
     }
+  }
+  if (!path)
+    return { found: false, loggedIn: false, error: '找不到 claude 指令，請先安裝 Claude Code。' }
+  let version: string
+  let authOut: string
+  try {
+    version = (await exec(path, ['--version'])).trim()
+    authOut = await exec(path, ['auth', 'status'])
   } catch (e) {
-    return { found: true, path, loggedIn: false, error: `無法讀取 Claude Code 狀態：${(e as Error).message}` }
+    return {
+      found: true,
+      path,
+      loggedIn: false,
+      error: `無法讀取 Claude Code 狀態：${(e as Error).message}`
+    }
+  }
+  let auth: { loggedIn?: boolean; subscriptionType?: string; email?: string }
+  try {
+    auth = JSON.parse(authOut)
+  } catch {
+    // 舊版 claude 沒有 JSON 格式的 auth status
+    return {
+      found: true,
+      path,
+      version,
+      loggedIn: false,
+      error: '無法讀取登入狀態，請更新 Claude Code。'
+    }
+  }
+  const loggedIn = !!auth.loggedIn
+  return {
+    found: true,
+    path,
+    version,
+    loggedIn,
+    subscriptionType: auth.subscriptionType,
+    email: auth.email,
+    error: loggedIn ? undefined : '尚未登入，請在終端機執行 claude 並完成登入。'
   }
 }
 
@@ -3262,13 +3434,18 @@ const PATH_MARKER = '__HARNESS_PATH__'
 /**
  * 從 Finder 啟動時 PATH 不含 homebrew / nvm，改用 login shell 的 PATH。
  * 互動式 shell 可能印出歡迎訊息等雜訊，所以 PATH 夾在標記之間輸出，沒有標記就不採用。
+ * 必須在 detectClaude 之前執行。
  */
 export async function applyLoginShellPath(exec: Exec = execCapture) {
   try {
-    const out = await exec(shell(), ['-ilc', `printf "${PATH_MARKER}%s${PATH_MARKER}" "$PATH"`])
+    const out = await exec(shell(), ['-ilc', `printf "${PATH_MARKER}%s${PATH_MARKER}" "$PATH"`], {
+      timeoutMs: 10_000
+    })
     const p = new RegExp(`${PATH_MARKER}(.*?)${PATH_MARKER}`, 's').exec(out)?.[1].trim()
     if (p) process.env.PATH = p
-  } catch { /* 保留原本的 PATH */ }
+  } catch {
+    /* 保留原本的 PATH */
+  }
 }
 ```
 

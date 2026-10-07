@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, test } from 'vitest'
-import { applyLoginShellPath, detectClaude, type Exec } from '../../src/main/claude/detect'
+import {
+  applyLoginShellPath,
+  detectClaude,
+  execCapture,
+  type Exec
+} from '../../src/main/claude/detect'
 
 function fakeExec(map: Record<string, string | Error>): Exec {
   return async (cmd, args) => {
@@ -65,6 +70,60 @@ describe('detectClaude', () => {
   })
 })
 
+describe('detectClaude 容錯', () => {
+  test('command -v 的輸出取最後一個非空行', async () => {
+    const s = await detectClaude(
+      fakeExec({
+        'command -v claude': 'Welcome!\n/u/bin/claude\n\n',
+        '/u/bin/claude --version': '1',
+        '/u/bin/claude auth status': '{"loggedIn":true}'
+      })
+    )
+    expect(s.path).toBe('/u/bin/claude')
+    expect(s.loggedIn).toBe(true)
+  })
+
+  test('auth status 不是 JSON 時給出友善訊息', async () => {
+    const s = await detectClaude(
+      fakeExec({
+        'command -v claude': '/c',
+        '/c --version': '0.9 (Claude Code)',
+        '/c auth status': 'error: unknown command auth'
+      })
+    )
+    expect(s).toMatchObject({
+      found: true,
+      path: '/c',
+      version: '0.9 (Claude Code)',
+      loggedIn: false
+    })
+    expect(s.error).toContain('無法讀取登入狀態，請更新 Claude Code')
+  })
+})
+
+describe('execCapture', () => {
+  test('回傳 stdout；非 0 結束但有 stdout 時仍回傳', async () => {
+    expect(await execCapture('sh', ['-c', 'echo hi'])).toBe('hi\n')
+    expect(await execCapture('sh', ['-c', 'echo partial; exit 1'])).toBe('partial\n')
+  })
+
+  test('非 0 結束且沒有 stdout 時以 stderr 拒絕', async () => {
+    await expect(execCapture('sh', ['-c', 'echo bad >&2; exit 1'])).rejects.toThrow('bad')
+  })
+
+  test('stdin 是空的，不會卡住', async () => {
+    expect(await execCapture('cat', [], { timeoutMs: 3000 })).toBe('')
+  })
+
+  test('逾時會終止並拒絕，不等佔住輸出的孫程序', async () => {
+    const started = Date.now()
+    await expect(
+      execCapture('sh', ['-c', 'sleep 5 & sleep 5'], { timeoutMs: 200 })
+    ).rejects.toThrow('逾時')
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
+})
+
 describe('applyLoginShellPath', () => {
   const original = process.env.PATH
   afterEach(() => {
@@ -77,6 +136,15 @@ describe('applyLoginShellPath', () => {
         'Welcome to zsh!\nnvm: using v24\n__HARNESS_PATH__/a/bin:/b/bin__HARNESS_PATH__\nbye\n'
     )
     expect(process.env.PATH).toBe('/a/bin:/b/bin')
+  })
+
+  test('以 10 秒逾時執行 login shell', async () => {
+    let seen: number | undefined
+    await applyLoginShellPath(async (_cmd, _args, opts) => {
+      seen = opts?.timeoutMs
+      return '__HARNESS_PATH__/x__HARNESS_PATH__'
+    })
+    expect(seen).toBe(10_000)
   })
 
   test('沒有標記時保留原本的 PATH', async () => {
