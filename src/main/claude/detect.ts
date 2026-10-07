@@ -53,10 +53,16 @@ export async function detectClaude(exec: Exec, explicitPath?: string): Promise<C
   }
 }
 
-/** 從 Finder 啟動時 PATH 不含 homebrew / nvm，改用 login shell 的 PATH */
+const PATH_MARKER = '__HARNESS_PATH__'
+
+/**
+ * 從 Finder 啟動時 PATH 不含 homebrew / nvm，改用 login shell 的 PATH。
+ * 互動式 shell 可能印出歡迎訊息等雜訊，所以 PATH 夾在標記之間輸出，沒有標記就不採用。
+ */
 export async function applyLoginShellPath(exec: Exec = execCapture) {
   try {
-    const p = (await exec(shell(), ['-ilc', 'printf "%s" "$PATH"'])).trim()
+    const out = await exec(shell(), ['-ilc', `printf "${PATH_MARKER}%s${PATH_MARKER}" "$PATH"`])
+    const p = new RegExp(`${PATH_MARKER}(.*?)${PATH_MARKER}`, 's').exec(out)?.[1].trim()
     if (p) process.env.PATH = p
   } catch {
     /* 保留原本的 PATH */

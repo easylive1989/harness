@@ -2,6 +2,9 @@
 import { spawn } from 'node:child_process'
 import type { VerificationResult } from '@shared/types'
 
+/** 逾時送出 SIGTERM 後，等這麼久還沒結束就送 SIGKILL */
+const KILL_GRACE_MS = 2000
+
 export function runShell(
   cwd: string,
   command: string,
@@ -21,18 +24,25 @@ export function runShell(
     }
     child.stdout.on('data', onData)
     child.stderr.on('data', onData)
+    // 只殺 shell 的話，孫程序會繼續佔住 stdout，close 要等它自己結束才會觸發
+    const killGroup = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal)
+        else child.kill(signal)
+      } catch {
+        child.kill(signal)
+      }
+    }
+    let killTimer: NodeJS.Timeout | undefined
     const timer = setTimeout(() => {
       out += '\n[Harness] 執行逾時，已終止'
-      // 只殺 shell 的話，孫程序會繼續佔住 stdout，close 要等它自己結束才會觸發
-      try {
-        if (child.pid) process.kill(-child.pid, 'SIGTERM')
-        else child.kill('SIGTERM')
-      } catch {
-        child.kill('SIGTERM')
-      }
+      killGroup('SIGTERM')
+      // 忽略 SIGTERM 的程序在寬限期後強制終止
+      killTimer = setTimeout(() => killGroup('SIGKILL'), KILL_GRACE_MS)
     }, timeoutMs)
     child.on('close', (code) => {
       clearTimeout(timer)
+      clearTimeout(killTimer)
       resolve({
         command,
         exitCode: code,
@@ -42,6 +52,7 @@ export function runShell(
     })
     child.on('error', (err) => {
       clearTimeout(timer)
+      clearTimeout(killTimer)
       resolve({
         command,
         exitCode: null,

@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'vitest'
-import { detectClaude, type Exec } from '../../src/main/claude/detect'
+import { afterEach, describe, expect, test } from 'vitest'
+import { applyLoginShellPath, detectClaude, type Exec } from '../../src/main/claude/detect'
 
 function fakeExec(map: Record<string, string | Error>): Exec {
   return async (cmd, args) => {
@@ -62,5 +62,34 @@ describe('detectClaude', () => {
     )
     expect(s.loggedIn).toBe(false)
     expect(s.error).toContain('登入')
+  })
+})
+
+describe('applyLoginShellPath', () => {
+  const original = process.env.PATH
+  afterEach(() => {
+    process.env.PATH = original
+  })
+
+  test('只取標記之間的 PATH，忽略 shell 啟動訊息', async () => {
+    await applyLoginShellPath(
+      async () =>
+        'Welcome to zsh!\nnvm: using v24\n__HARNESS_PATH__/a/bin:/b/bin__HARNESS_PATH__\nbye\n'
+    )
+    expect(process.env.PATH).toBe('/a/bin:/b/bin')
+  })
+
+  test('沒有標記時保留原本的 PATH', async () => {
+    process.env.PATH = '/keep'
+    await applyLoginShellPath(async () => '/a/bin:/b/bin')
+    expect(process.env.PATH).toBe('/keep')
+  })
+
+  test('執行失敗時保留原本的 PATH', async () => {
+    process.env.PATH = '/keep'
+    await applyLoginShellPath(async () => {
+      throw new Error('boom')
+    })
+    expect(process.env.PATH).toBe('/keep')
   })
 })

@@ -2707,6 +2707,14 @@ describe('verifyRunner', () => {
     expect(r.outputTail).not.toContain('done')
   })
 
+  test('忽略 SIGTERM 的指令在寬限期後以 SIGKILL 終止', async () => {
+    const started = Date.now()
+    const r = await runShell(tmpdir(), "trap '' TERM; sleep 5; echo done", 200)
+    expect(Date.now() - started).toBeLessThan(4000)
+    expect(r.outputTail).toContain('逾時')
+    expect(r.outputTail).not.toContain('done')
+  })
+
   test('未核准的指令不執行', async () => {
     const r = await runVerification(tmpdir(), ['echo a', 'echo b'], (c) => c === 'echo a')
     expect(r[0].exitCode).toBe(0)
@@ -2725,6 +2733,9 @@ describe('verifyRunner', () => {
 import { spawn } from 'node:child_process'
 import type { VerificationResult } from '@shared/types'
 
+/** 逾時送出 SIGTERM 後，等這麼久還沒結束就送 SIGKILL */
+const KILL_GRACE_MS = 2000
+
 export function runShell(cwd: string, command: string, timeoutMs = 10 * 60_000): Promise<VerificationResult> {
   const started = Date.now()
   return new Promise((resolve) => {
@@ -2734,22 +2745,30 @@ export function runShell(cwd: string, command: string, timeoutMs = 10 * 60_000):
     const onData = (b: Buffer) => { out = (out + b.toString()).slice(-8000) }
     child.stdout.on('data', onData)
     child.stderr.on('data', onData)
+    // 只殺 shell 的話，孫程序會繼續佔住 stdout，close 要等它自己結束才會觸發
+    const killGroup = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal)
+        else child.kill(signal)
+      } catch {
+        child.kill(signal)
+      }
+    }
+    let killTimer: NodeJS.Timeout | undefined
     const timer = setTimeout(() => {
       out += '\n[Harness] 執行逾時，已終止'
-      // 只殺 shell 的話，孫程序會繼續佔住 stdout，close 要等它自己結束才會觸發
-      try {
-        if (child.pid) process.kill(-child.pid, 'SIGTERM')
-        else child.kill('SIGTERM')
-      } catch {
-        child.kill('SIGTERM')
-      }
+      killGroup('SIGTERM')
+      // 忽略 SIGTERM 的程序在寬限期後強制終止
+      killTimer = setTimeout(() => killGroup('SIGKILL'), KILL_GRACE_MS)
     }, timeoutMs)
     child.on('close', (code) => {
       clearTimeout(timer)
+      clearTimeout(killTimer)
       resolve({ command, exitCode: code, durationMs: Date.now() - started, outputTail: out.slice(-4000) })
     })
     child.on('error', (err) => {
       clearTimeout(timer)
+      clearTimeout(killTimer)
       resolve({ command, exitCode: null, durationMs: Date.now() - started, outputTail: String(err) })
     })
   })
@@ -2792,8 +2811,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Step 1: 寫失敗測試**
 
 ```ts
-import { describe, expect, test } from 'vitest'
-import { detectClaude, type Exec } from '../../src/main/claude/detect'
+import { afterEach, describe, expect, test } from 'vitest'
+import { applyLoginShellPath, detectClaude, type Exec } from '../../src/main/claude/detect'
 
 function fakeExec(map: Record<string, string | Error>): Exec {
   return async (cmd, args) => {
@@ -2834,6 +2853,28 @@ describe('detectClaude', () => {
     }))
     expect(s.loggedIn).toBe(false)
     expect(s.error).toContain('登入')
+  })
+})
+
+describe('applyLoginShellPath', () => {
+  const original = process.env.PATH
+  afterEach(() => { process.env.PATH = original })
+
+  test('只取標記之間的 PATH，忽略 shell 啟動訊息', async () => {
+    await applyLoginShellPath(async () => 'Welcome to zsh!\nnvm: using v24\n__HARNESS_PATH__/a/bin:/b/bin__HARNESS_PATH__\nbye\n')
+    expect(process.env.PATH).toBe('/a/bin:/b/bin')
+  })
+
+  test('沒有標記時保留原本的 PATH', async () => {
+    process.env.PATH = '/keep'
+    await applyLoginShellPath(async () => '/a/bin:/b/bin')
+    expect(process.env.PATH).toBe('/keep')
+  })
+
+  test('執行失敗時保留原本的 PATH', async () => {
+    process.env.PATH = '/keep'
+    await applyLoginShellPath(async () => { throw new Error('boom') })
+    expect(process.env.PATH).toBe('/keep')
   })
 })
 ```
@@ -2880,10 +2921,16 @@ export async function detectClaude(exec: Exec, explicitPath?: string): Promise<C
   }
 }
 
-/** 從 Finder 啟動時 PATH 不含 homebrew / nvm，改用 login shell 的 PATH */
+const PATH_MARKER = '__HARNESS_PATH__'
+
+/**
+ * 從 Finder 啟動時 PATH 不含 homebrew / nvm，改用 login shell 的 PATH。
+ * 互動式 shell 可能印出歡迎訊息等雜訊，所以 PATH 夾在標記之間輸出，沒有標記就不採用。
+ */
 export async function applyLoginShellPath(exec: Exec = execCapture) {
   try {
-    const p = (await exec(shell(), ['-ilc', 'printf "%s" "$PATH"'])).trim()
+    const out = await exec(shell(), ['-ilc', `printf "${PATH_MARKER}%s${PATH_MARKER}" "$PATH"`])
+    const p = new RegExp(`${PATH_MARKER}(.*?)${PATH_MARKER}`, 's').exec(out)?.[1].trim()
     if (p) process.env.PATH = p
   } catch { /* 保留原本的 PATH */ }
 }

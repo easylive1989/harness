@@ -25,6 +25,14 @@ describe('verifyRunner', () => {
     expect(r.outputTail).not.toContain('done')
   })
 
+  test('忽略 SIGTERM 的指令在寬限期後以 SIGKILL 終止', async () => {
+    const started = Date.now()
+    const r = await runShell(tmpdir(), "trap '' TERM; sleep 5; echo done", 200)
+    expect(Date.now() - started).toBeLessThan(4000)
+    expect(r.outputTail).toContain('逾時')
+    expect(r.outputTail).not.toContain('done')
+  })
+
   test('未核准的指令不執行', async () => {
     const r = await runVerification(tmpdir(), ['echo a', 'echo b'], (c) => c === 'echo a')
     expect(r[0].exitCode).toBe(0)
