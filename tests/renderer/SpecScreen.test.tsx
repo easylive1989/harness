@@ -240,3 +240,55 @@ test('回看規格時有等待中的核准請求也會顯示', () => {
   )
   expect(screen.getByRole('dialog', { name: 'Claude 想執行這個指令' })).toBeInTheDocument()
 })
+
+test('還沒有規格時也顯示核准對話框', () => {
+  renderSpec(
+    specTask({
+      specs: [],
+      runState: 'waiting_permission',
+      pendingPermission: {
+        id: 'p1',
+        taskId: 't1',
+        channel: 'main',
+        toolName: 'WebSearch',
+        input: { query: 'redis ttl' },
+        createdAt: ''
+      }
+    })
+  )
+  expect(screen.getByText('還沒有規格。')).toBeInTheDocument()
+  expect(screen.getByRole('dialog', { name: 'Claude 想搜尋網路' })).toBeInTheDocument()
+})
+
+test('看舊版本時不顯示根據幾個問題整理（那是目前的釐清紀錄）', async () => {
+  renderSpec(specTask({ specs: [spec(1, { title: '第一版' }), spec(2, { title: '第二版' })] }))
+  expect(screen.getByText(/規格草稿/)).toHaveTextContent('根據 1 個問題、1 個分岔整理')
+  await userEvent.selectOptions(screen.getByRole('combobox', { name: '規格版本' }), 'v1')
+  expect(screen.getByText(/規格草稿/)).not.toHaveTextContent('根據')
+})
+
+test('修改意見還沒送出就按核准：先提醒，確認放棄才核准', async () => {
+  renderSpec(specTask())
+  const input = screen.getByRole('textbox', { name: '修改意見' })
+  await userEvent.type(input, '上限改 10 次')
+  await userEvent.click(screen.getByRole('button', { name: '核准並開始實作' }))
+  expect(call).not.toHaveBeenCalled()
+  expect(screen.getByText(/修改意見還沒送出/)).toBeInTheDocument()
+  // 改了內容就重新確認
+  await userEvent.type(input, '，鎖 30 分鐘')
+  expect(screen.queryByText(/修改意見還沒送出/)).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '核准並開始實作' }))
+  await userEvent.click(screen.getByRole('button', { name: '放棄意見並核准' }))
+  expect(call).toHaveBeenCalledWith('spec:approve', 't1')
+})
+
+test('送出修改意見期間又改了內容就保留', async () => {
+  const release = holdNextCall(vi.mocked(call))
+  renderSpec(specTask())
+  const input = screen.getByRole('textbox', { name: '修改意見' })
+  await userEvent.type(input, '上限改 10 次{Enter}')
+  expect(call).toHaveBeenCalledWith('spec:requestChanges', 't1', '上限改 10 次')
+  await userEvent.type(input, '，還有鎖 30 分鐘')
+  await release()
+  expect(input).toHaveValue('上限改 10 次，還有鎖 30 分鐘')
+})

@@ -1,7 +1,7 @@
 // tests/renderer/ImplementScreen.test.tsx
-import { render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
   call: vi.fn(async () => undefined),
   onEvent: vi.fn(() => () => {}),
@@ -12,8 +12,8 @@ import { implementEvents } from '@renderer/lib/timeline'
 import { ImplementScreen } from '@renderer/screens/ImplementScreen'
 import { TaskScreen } from '@renderer/screens/TaskScreen'
 import { resetStoreInternals, useStore } from '@renderer/store'
-import { msgDisplay } from '@shared/protocol'
-import type { DiffStats, Task, TimelineEvent } from '@shared/types'
+import { IMPLEMENT_START_REF, msgDisplay } from '@shared/protocol'
+import type { DiffStats, PermissionRequest, Question, Task, TimelineEvent } from '@shared/types'
 import { holdNextCall } from '../fixtures/hold'
 import { makeTask } from '../fixtures/task'
 
@@ -41,7 +41,7 @@ const stats: DiffStats = {
 const events: TimelineEvent[] = [
   ev({ kind: 'user_text', text: '加上登入失敗鎖定' }),
   ev({ kind: 'assistant_text', text: '釐清階段的回覆' }),
-  ev({ kind: 'user_text', text: msgDisplay.specApproved }),
+  ev({ kind: 'user_text', text: msgDisplay.specApproved, ref: IMPLEMENT_START_REF }),
   tool('Read', { file_path: 'src/http/errors.ts' }),
   ev({ kind: 'assistant_text', text: '開始實作' }),
   ev({ kind: 'user_text', text: '錯誤訊息放進 i18n' }),
@@ -76,17 +76,33 @@ beforeEach(() => {
 })
 
 describe('implementEvents', () => {
-  test('取最後一次核准規格或送出報告回饋之後的主線事件', () => {
+  test('取最後一個實作起點（核准規格或送出報告回饋）之後的主線事件', () => {
     const list = implementEvents(events)
     expect(list[0].kind).toBe('tool_call')
     expect(list.some((e) => e.text === '釐清階段的回覆')).toBe(false)
     expect(list.some((e) => e.channel !== 'main')).toBe(false)
     const again = [
       ...events,
-      ev({ kind: 'user_text', text: msgDisplay.reportFeedback(2, true) }),
+      ev({ kind: 'user_text', text: '送出整體意見', ref: IMPLEMENT_START_REF }),
+      // 使用者打出一樣的字（有 ref 的新時間軸不看文字）
+      ev({ kind: 'assistant_text', text: '第二輪' }),
+      ev({ kind: 'user_text', text: msgDisplay.specApproved }),
       ev({ kind: 'assistant_text', text: '第二輪' })
     ]
-    expect(implementEvents(again).map((e) => e.text)).toEqual(['第二輪'])
+    expect(implementEvents(again).map((e) => e.text)).toEqual([
+      '第二輪',
+      msgDisplay.specApproved,
+      '第二輪'
+    ])
+  })
+
+  test('舊時間軸（整份都沒有標記）用顯示文字找起點', () => {
+    const legacy = [
+      ev({ kind: 'user_text', text: '加上登入失敗鎖定' }),
+      ev({ kind: 'user_text', text: msgDisplay.specApproved }),
+      ev({ kind: 'assistant_text', text: '開始實作' })
+    ]
+    expect(implementEvents(legacy).map((e) => e.text)).toEqual(['開始實作'])
   })
 
   test('還沒有開始實作的訊息時是空的', () => {
@@ -243,4 +259,129 @@ test('TaskScreen：實作中顯示實作畫面', async () => {
   expect(screen.getByRole('region', { name: '進行中的步驟' })).toBeInTheDocument()
   expect(screen.getByRole('textbox', { name: '插話' })).toBeInTheDocument()
   await screen.findByText('src/auth/lockout.ts')
+})
+
+const perm = (over: Partial<PermissionRequest> = {}): PermissionRequest => ({
+  id: 'p1',
+  taskId: 't1',
+  channel: 'main',
+  toolName: 'Bash',
+  input: { command: 'npm test' },
+  suggestedPattern: 'npm test *',
+  createdAt: '',
+  ...over
+})
+const openQuestion = (id: string, text: string): Question => ({
+  id,
+  text,
+  options: [{ id: 'a', label: '帳號的 email' }],
+  allowFreeText: true,
+  status: 'open',
+  followups: [],
+  askedAt: ''
+})
+const start = ev({ kind: 'user_text', text: msgDisplay.specApproved, ref: IMPLEMENT_START_REF })
+
+test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已拒絕」', async () => {
+  useStore.setState({
+    timelines: {
+      t1: [
+        start,
+        tool('Bash', { command: 'npm test' }, 'tu-a'),
+        tool('Bash', { command: 'rm -rf dist' }, 'tu-d'),
+        ev({
+          kind: 'tool_result',
+          text: '先不要刪',
+          tool: { id: 'tu-d', name: '', isError: true, denied: true }
+        }),
+        tool('Bash', { command: 'npm test' }, 'tu-b')
+      ]
+    }
+  })
+  renderImpl(
+    implTask({ runState: 'waiting_permission', pendingPermission: perm({ toolUseId: 'tu-a' }) })
+  )
+  const rows = within(screen.getByRole('region', { name: '進行中的步驟' })).getAllByRole('listitem')
+  expect(rows.map((r) => r.textContent)).toEqual([
+    '指令npm test等待核准',
+    '指令rm -rf dist已拒絕',
+    '指令npm test'
+  ])
+  await screen.findByText('src/auth/lockout.ts')
+})
+
+test('沒有在這段實作裡出現過的開放問題，顯示在最上方', async () => {
+  useStore.setState({ timelines: { t1: [ev({ kind: 'question', ref: 'q7' }), ...events] } })
+  renderImpl(implTask({ runState: 'idle', questions: [openQuestion('q7', '通知信寄給誰？')] }))
+  const card = screen.getByRole('radiogroup', { name: '通知信寄給誰？' })
+  expect(
+    card.compareDocumentPosition(screen.getByText('新增 lockout 模組')) &
+      Node.DOCUMENT_POSITION_FOLLOWING
+  ).toBeTruthy()
+  const step = screen.getByRole('region', { name: '進行中的步驟' })
+  expect(within(step).getByText('等你回答')).toBeInTheDocument()
+  await screen.findByText('src/auth/lockout.ts')
+})
+
+test('沒有開放中的問題時步驟顯示暫停中', async () => {
+  renderImpl(implTask({ runState: 'idle' }))
+  const step = screen.getByRole('region', { name: '進行中的步驟' })
+  expect(within(step).getByText('暫停中')).toBeInTheDocument()
+  await screen.findByText('src/auth/lockout.ts')
+})
+
+test('重新提問的問題只顯示一張卡片', async () => {
+  useStore.setState({
+    timelines: {
+      t1: [
+        ...events,
+        ev({ kind: 'question', ref: 'q9' }),
+        ev({ kind: 'assistant_text', text: '再確認一次' }),
+        ev({ kind: 'question', ref: 'q9' })
+      ]
+    }
+  })
+  renderImpl(implTask({ runState: 'idle', questions: [openQuestion('q9', '模板用哪個？')] }))
+  expect(screen.getAllByRole('radiogroup', { name: '模板用哪個？' })).toHaveLength(1)
+  await screen.findByText('src/auth/lockout.ts')
+})
+
+test('有等待中的核准請求時遮罩後面不能操作；處理完焦點回到插話框', async () => {
+  const { rerender } = renderImpl(
+    implTask({ runState: 'waiting_permission', pendingPermission: perm() })
+  )
+  const input = screen.getByRole('textbox', { name: '插話' })
+  expect(input.closest('[inert]')).not.toBeNull()
+  expect(screen.getByRole('region', { name: '進行中的步驟' }).closest('[inert]')).not.toBeNull()
+  expect(screen.getByRole('dialog').closest('[inert]')).toBeNull()
+  expect(screen.getByRole('dialog')).toHaveFocus()
+  rerender(<ImplementScreen task={implTask()} nav={null} readOnly={false} />)
+  expect(input.closest('[inert]')).toBeNull()
+  expect(input).toHaveFocus()
+  await screen.findByText('src/auth/lockout.ts')
+})
+
+describe('變更檔案的輪詢', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+  const tick = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms))
+
+  test('執行中每 5 秒重新讀取；停下來時讀最後一次，之後不再輪詢', async () => {
+    const { rerender } = renderImpl(implTask())
+    await tick(0)
+    expect(callsOf('tasks:changedFiles')).toHaveLength(1)
+    await tick(5000)
+    expect(callsOf('tasks:changedFiles')).toHaveLength(2)
+    await tick(5000)
+    expect(callsOf('tasks:changedFiles')).toHaveLength(3)
+    rerender(<ImplementScreen task={implTask({ runState: 'idle' })} nav={null} readOnly={false} />)
+    await tick(0)
+    expect(callsOf('tasks:changedFiles')).toHaveLength(4)
+    await tick(20000)
+    expect(callsOf('tasks:changedFiles')).toHaveLength(4)
+  })
 })

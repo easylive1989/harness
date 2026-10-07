@@ -1,10 +1,16 @@
 // src/renderer/src/components/Timeline.tsx
 import { useMemo, useState } from 'react'
 import type { Channel, Task, TimelineEvent } from '@shared/types'
-import { type ToolCall, toolLabel, toolSummary, userTextDisplay } from '../lib/timeline'
+import {
+  latestQuestionEvents,
+  type ToolCall,
+  toolLabel,
+  toolSummary,
+  userTextDisplay
+} from '../lib/timeline'
 import { Markdown } from './Markdown'
 import { AnsweredQuestionRow, QuestionCard } from './QuestionCard'
-import { Avatar, Icons, LiveStatus } from './ui'
+import { Avatar, cx, Icons, LiveStatus } from './ui'
 
 type ToolEvent = TimelineEvent & { tool: ToolCall }
 type Item = { kind: 'event'; e: TimelineEvent } | { kind: 'tools'; events: ToolEvent[] }
@@ -23,7 +29,7 @@ function group(events: TimelineEvent[]): Item[] {
   return out
 }
 
-function ToolGroup({ events }: { events: ToolEvent[] }) {
+function ToolGroup({ events, root }: { events: ToolEvent[]; root: string }) {
   const [open, setOpen] = useState(false)
   const counts = new Map<string, number>()
   for (const e of events) {
@@ -44,7 +50,7 @@ function ToolGroup({ events }: { events: ToolEvent[] }) {
       {open &&
         events.map((e) => (
           <code key={e.id} className="self-start break-all">
-            {toolSummary(e.tool)}
+            {toolSummary(e.tool, root)}
           </code>
         ))}
     </div>
@@ -77,11 +83,15 @@ export function Timeline({
   branchPending?: boolean
   onOpenStage?: (stage: 'spec' | 'report') => void
 }) {
-  const items = useMemo(() => group(events.filter((e) => e.channel === channel)), [events, channel])
+  const { items, latest } = useMemo(() => {
+    const list = events.filter((e) => e.channel === channel)
+    return { items: group(list), latest: latestQuestionEvents(list) }
+  }, [events, channel])
   return (
     <div className="flex flex-col gap-5">
       {items.map((it) => {
-        if (it.kind === 'tools') return <ToolGroup key={it.events[0].id} events={it.events} />
+        if (it.kind === 'tools')
+          return <ToolGroup key={it.events[0].id} events={it.events} root={task.worktreePath} />
         const e = it.e
         switch (e.kind) {
           case 'user_text':
@@ -109,7 +119,8 @@ export function Timeline({
             )
           case 'question': {
             const q = task.questions.find((x) => x.id === e.ref)
-            if (!q) return null
+            // 重新提問過的問題只在最後一次出現的位置畫卡片
+            if (!q || !latest.has(e.id)) return null
             return q.status === 'open' ? (
               <QuestionCard key={e.id} task={task} question={q} readOnly={readOnly} />
             ) : (
@@ -172,9 +183,12 @@ export function Timeline({
             return (
               <div
                 key={e.id}
-                className="ml-10 line-clamp-4 text-xs break-all whitespace-pre-wrap text-danger"
+                className={cx(
+                  'ml-10 line-clamp-4 text-xs break-all whitespace-pre-wrap',
+                  e.tool?.denied ? 'text-muted' : 'text-danger'
+                )}
               >
-                工具錯誤：{e.text}
+                {e.tool?.denied ? '已拒絕' : '工具錯誤'}：{e.text}
               </div>
             )
           case 'system':

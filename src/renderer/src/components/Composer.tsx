@@ -1,5 +1,5 @@
 // src/renderer/src/components/Composer.tsx
-import { type FormEvent, type ReactNode, useState } from 'react'
+import { type FormEvent, type ReactNode, type Ref, useState } from 'react'
 import { Icons } from './ui'
 
 /** 畫面底部的圓角輸入列（對照 `StyleB.dc.html` 底部的訊息框） */
@@ -8,13 +8,16 @@ export function Composer({
   disabled,
   onSend,
   extra,
-  label = '訊息'
+  label = '訊息',
+  inputRef
 }: {
   placeholder: string
   disabled?: boolean
   onSend: (text: string) => void
   extra?: ReactNode
   label?: string
+  /** 畫面需要把焦點放回輸入框時用（例如核准對話框關掉後） */
+  inputRef?: Ref<HTMLInputElement>
 }) {
   const [text, setText] = useState('')
   const submit = (e: FormEvent) => {
@@ -31,6 +34,7 @@ export function Composer({
       <label className="flex flex-1">
         <span className="sr-only">{label}</span>
         <input
+          ref={inputRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder={placeholder}

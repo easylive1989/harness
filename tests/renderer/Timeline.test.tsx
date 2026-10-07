@@ -74,6 +74,12 @@ describe('toolSummary', () => {
     )
     expect(toolSummary({ id: 'x', name: 'mcp__foo' })).toBe('mcp__foo')
   })
+
+  test('worktree 內的絕對路徑顯示成相對路徑', () => {
+    const read = { id: 'x', name: 'Read', input: { file_path: '/wt/t1/src/a.ts' } }
+    expect(toolSummary(read, '/wt/t1')).toBe('讀取 src/a.ts')
+    expect(toolSummary(read, '/other')).toBe('讀取 /wt/t1/src/a.ts')
+  })
 })
 
 describe('Timeline', () => {
@@ -159,6 +165,51 @@ describe('Timeline', () => {
     expect(screen.getByText('沿用既有錯誤碼')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /變更報告 v2/ }))
     expect(onOpenStage).toHaveBeenCalledWith('report')
+  })
+
+  test('工具列表的路徑相對於 worktree；使用者拒絕的工具顯示已拒絕', async () => {
+    render(
+      <Timeline
+        task={makeTask()}
+        channel="main"
+        events={[
+          ev({
+            kind: 'tool_call',
+            tool: { id: 'r1', name: 'Read', input: { file_path: '/tmp/wt/t1/src/a.ts' } }
+          }),
+          ev({
+            kind: 'tool_result',
+            text: '先不要讀網頁',
+            tool: { id: 'w1', name: '', isError: true, denied: true }
+          })
+        ]}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: '讀取 1 次' }))
+    expect(screen.getByText('讀取 src/a.ts')).toBeInTheDocument()
+    expect(screen.getByText('已拒絕：先不要讀網頁')).toBeInTheDocument()
+    expect(screen.queryByText(/工具錯誤/)).not.toBeInTheDocument()
+  })
+
+  test('重新提問的問題只在最後一次出現的位置顯示卡片', () => {
+    const open = { ...q, status: 'open' as const, answer: undefined }
+    render(
+      <Timeline
+        task={{ ...task, questions: [open] }}
+        channel="main"
+        events={[
+          ev({ kind: 'question', ref: 'q1' }),
+          ev({ kind: 'assistant_text', text: '我想再確認一次' }),
+          ev({ kind: 'question', ref: 'q1' })
+        ]}
+      />
+    )
+    expect(screen.getAllByRole('button', { name: '確認答案' })).toHaveLength(1)
+    const card = screen.getByRole('radiogroup').closest('section')!
+    expect(
+      screen.getByText('我想再確認一次').compareDocumentPosition(card) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
   })
 
   test('開放中的問題顯示成卡片', () => {

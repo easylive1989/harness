@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import {
   IMPLEMENT_START_REF,
+  legacyImplementStart,
   msg,
   msgDisplay,
   parseTagged,
@@ -57,20 +58,22 @@ describe('msgDisplay / startsImplementation', () => {
   test('核准規格與送出報告回饋的訊息帶著實作起點標記', () => {
     expect(startsImplementation(userText(msgDisplay.specApproved, IMPLEMENT_START_REF))).toBe(true)
     expect(startsImplementation(userText('任何文字', IMPLEMENT_START_REF))).toBe(true)
-    expect(startsImplementation({ kind: 'system', text: '', ref: IMPLEMENT_START_REF })).toBe(false)
+    expect(startsImplementation({ kind: 'system', ref: IMPLEMENT_START_REF })).toBe(false)
   })
 
-  test('只看文字不算：使用者打出一樣的字不會被當成起點', () => {
+  test('只看標記：使用者打出一樣的字不會被當成起點', () => {
+    expect(startsImplementation(userText(msgDisplay.specApproved))).toBe(false)
     expect(startsImplementation(userText(msgDisplay.specApproved, 'other'))).toBe(false)
-    expect(startsImplementation(userText('核准規格之前想再問一下'))).toBe(false)
-    expect(startsImplementation(userText('送出 3 則報告回饋，然後呢？'))).toBe(false)
-    expect(startsImplementation(userText(msgDisplay.resume))).toBe(false)
+    expect(startsImplementation(userText('送出 3 則報告回饋'))).toBe(false)
   })
 
-  test('沒有標記的舊時間軸才用文字判斷', () => {
-    expect(startsImplementation(userText(msgDisplay.specApproved))).toBe(true)
-    expect(startsImplementation(userText('送出 3 則報告回饋'))).toBe(true)
-    expect(startsImplementation(userText('送出 0 則報告回饋與整體意見'))).toBe(true)
+  test('舊時間軸（整份都沒有標記）才用顯示文字判斷', () => {
+    expect(legacyImplementStart(userText(msgDisplay.specApproved))).toBe(true)
+    expect(legacyImplementStart(userText('送出 3 則報告回饋'))).toBe(true)
+    expect(legacyImplementStart(userText('送出 0 則報告回饋與整體意見'))).toBe(true)
+    expect(legacyImplementStart(userText('核准規格之前想再問一下'))).toBe(false)
+    expect(legacyImplementStart(userText('送出 3 則報告回饋，然後呢？'))).toBe(false)
+    expect(legacyImplementStart(userText(msgDisplay.resume))).toBe(false)
   })
 
   test('報告回饋的顯示文字；只有整體意見時不說 0 則', () => {

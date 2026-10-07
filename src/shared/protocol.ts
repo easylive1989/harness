@@ -62,13 +62,17 @@ export const msgDisplay = {
 /** 核准規格、送出報告回饋寫入的 user_text 帶這個 ref：實作畫面從最後一個標記開始顯示 */
 export const IMPLEMENT_START_REF = 'implement_start'
 
+/** 時間軸事件是否標記一段實作的開始（看 ref：使用者打出一樣的字不會被誤認） */
+export function startsImplementation(e: Pick<TimelineEvent, 'kind' | 'ref'>): boolean {
+  return e.kind === 'user_text' && e.ref === IMPLEMENT_START_REF
+}
+
 /**
- * 時間軸事件是否標記一段實作的開始。看 ref，使用者打出一樣的字也不會被誤認；
- * 沒有 ref 的舊時間軸（加上標記之前寫入的）才用顯示文字判斷。
+ * 加上 ref 標記之前寫入的實作起點，只能比對顯示文字。
+ * 只在整份時間軸都沒有標記時使用（新時間軸裡沒有 ref 的 user_text 是使用者自己打的字）。
  */
-export function startsImplementation(e: Pick<TimelineEvent, 'kind' | 'text' | 'ref'>): boolean {
-  if (e.kind !== 'user_text') return false
-  if (e.ref !== undefined) return e.ref === IMPLEMENT_START_REF
+export function legacyImplementStart(e: Pick<TimelineEvent, 'kind' | 'text' | 'ref'>): boolean {
+  if (e.kind !== 'user_text' || e.ref !== undefined) return false
   const text = e.text ?? ''
   return text === msgDisplay.specApproved || /^送出 \d+ 則報告回饋(與整體意見)?$/.test(text)
 }

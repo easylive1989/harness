@@ -1,106 +1,72 @@
 // src/renderer/src/components/PermissionDialog.tsx
-import { useEffect, useId, useRef, useState } from 'react'
+import { type KeyboardEvent, useEffect, useEffectEvent, useId, useRef, useState } from 'react'
 import type { PermissionRequest, Task } from '@shared/types'
 import { call } from '../api'
-import { relativeTo } from '../lib/timeline'
+import { APPROVAL_ARM_MS, describeRequest, PREVIEW_COLLAPSED, requesterOf } from '../lib/permission'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
-import { Button, Icons, textareaClass } from './ui'
+import { Button, cx, Icons, textareaClass } from './ui'
 
-/** 修改這些工具的請求只會出現在 .git／.claude／.mcp.json（主程序只對這些路徑詢問） */
-const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
-const PREVIEW_MAX = 4000
-
-const str = (v: unknown) => (typeof v === 'string' ? v : undefined)
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v)
-
-/** 要寫入的內容：Write 的全文、Edit 的取代前後（- / + 開頭），太長就截斷 */
-function writePreview(input: Record<string, unknown>): string | undefined {
-  const lines = (prefix: string, s?: string) =>
-    s === undefined ? [] : s.split('\n').map((l) => `${prefix} ${l}`)
-  const edit = (e: Record<string, unknown>) =>
-    [...lines('-', str(e.old_string)), ...lines('+', str(e.new_string))].join('\n')
-  const text =
-    str(input.content) ??
-    str(input.new_source) ??
-    (Array.isArray(input.edits)
-      ? input.edits.filter(isRecord).map(edit).join('\n…\n')
-      : str(input.new_string) !== undefined
-        ? edit(input)
-        : undefined)
-  if (!text) return undefined
-  return text.length > PREVIEW_MAX
-    ? `${text.slice(0, PREVIEW_MAX)}\n…（內容過長，只顯示前 ${PREVIEW_MAX} 字）`
-    : text
-}
-
-interface View {
-  title: string
-  /** 深色區塊的主要內容：指令、檔案路徑、網址… */
-  code: string
-  /** 深色區塊的第二行（工具名稱、cwd） */
-  sub?: string
-  /** Claude 給的原因或用途 */
-  reason?: string
-  warning?: string
-  preview?: string
-}
-
-function describe(r: PermissionRequest, cwd: string): View {
-  const i = r.input
-  if (r.toolName === 'Bash') {
-    const description = str(i.description)
-    return {
-      title: 'Claude 想執行這個指令',
-      code: `$ ${str(i.command) ?? ''}`,
-      sub: `cwd: ${cwd}`,
-      reason: description && `原因：${description}`
-    }
-  }
-  if (WRITE_TOOLS.has(r.toolName)) {
-    const path = str(i.file_path) ?? str(i.notebook_path) ?? str(i.path) ?? ''
-    return {
-      title: 'Claude 想修改這個檔案',
-      code: relativeTo(cwd, path),
-      sub: `${r.toolName} · cwd: ${cwd}`,
-      warning: '這個檔案會影響 Claude 的權限或 git 設定',
-      preview: writePreview(i)
-    }
-  }
-  if (r.toolName === 'WebFetch') {
-    const prompt = str(i.prompt)
-    return {
-      title: 'Claude 想讀取這個網頁',
-      code: str(i.url) ?? '',
-      sub: 'WebFetch',
-      reason: prompt && `用途：${prompt}`
-    }
-  }
-  if (r.toolName === 'WebSearch')
-    return { title: 'Claude 想搜尋網路', code: str(i.query) ?? '', sub: 'WebSearch' }
-  return {
-    title: `Claude 想使用 ${r.toolName}`,
-    code: JSON.stringify(i, null, 2),
-    sub: `cwd: ${cwd}`
-  }
-}
+/** 對話框關掉後焦點要去的地方（原本的位置拿不到焦點時），例如畫面的插話框 */
+type FocusTarget = () => HTMLElement | null | undefined
 
 /** 對照 `B4-Implement.dc.html` 的 dialog；蓋在所在的 `<main>`（需要 relative）上 */
-export function PermissionDialog({ request: r, cwd }: { request: PermissionRequest; cwd: string }) {
+export function PermissionDialog({
+  request: r,
+  cwd,
+  branch,
+  fallbackFocus
+}: {
+  request: PermissionRequest
+  cwd: string
+  /** 提出請求的分岔名稱；主線的請求不給 */
+  branch?: string
+  fallbackFocus?: FocusTarget
+}) {
   const act = useStore((s) => s.act)
   const titleId = useId()
+  const codeId = useId()
   const dialogRef = useRef<HTMLDivElement>(null)
+  // 剛出現時先停用核准與拒絕：連點「允許」時第二下不會落在下一個請求上
+  const [armed, setArmed] = useState(false)
   const [remember, setRemember] = useState(false)
   const [denying, setDenying] = useState(false)
   const [reason, setReason] = useState('')
+  const [expanded, setExpanded] = useState(false)
   const [pending, run] = usePending()
-  const v = describe(r, cwd)
+  const v = describeRequest(r, cwd, branch)
+  const locked = pending || !armed
 
-  // 出現時把焦點移進對話框（使用者可能正在輸入框打字）；刻意不放在「允許」上，免得按 Enter 就核准
   useEffect(() => {
-    dialogRef.current?.focus()
+    const t = setTimeout(() => setArmed(true), APPROVAL_ARM_MS)
+    return () => clearTimeout(t)
   }, [])
+
+  const restoreFocus = useEffectEvent((prev: Element | null) => {
+    if (prev instanceof HTMLElement && prev !== document.body && prev.isConnected) prev.focus()
+    // 原本的位置不在了或拿不到焦點（例如還被遮罩擋住）時交給畫面決定
+    if (!document.activeElement || document.activeElement === document.body)
+      fallbackFocus?.()?.focus()
+  })
+  // 出現時把焦點移進對話框（使用者可能正在輸入框打字）；刻意不放在「允許」上，免得按 Enter 就核准。
+  // 關掉時把焦點還給原本的位置；下一個排隊的請求出現時會再把焦點移到新的對話框。
+  useEffect(() => {
+    const prev = document.activeElement
+    dialogRef.current?.focus()
+    return () => restoreFocus(prev)
+  }, [])
+
+  const leaveDeny = () => {
+    // 先把焦點放回對話框，拒絕原因的輸入框消失後焦點才不會掉到 body
+    dialogRef.current?.focus()
+    setDenying(false)
+  }
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && denying) {
+      e.stopPropagation()
+      leaveDeny()
+    }
+  }
 
   const resolve = (allow: boolean) =>
     run(() =>
@@ -119,13 +85,16 @@ export function PermissionDialog({ request: r, cwd }: { request: PermissionReque
       )
     )
 
+  const longPreview = !!v.preview && v.preview.length > PREVIEW_COLLAPSED
   return (
     <div className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-ink/28 p-6">
       <div
         ref={dialogRef}
         role="dialog"
         aria-labelledby={titleId}
+        aria-describedby={codeId}
         tabIndex={-1}
+        onKeyDown={onKeyDown}
         className="flex max-h-full w-full max-w-[480px] flex-col gap-4 overflow-y-auto rounded-[20px] bg-surface p-6 shadow-dialog outline-none"
       >
         <div className="flex flex-col gap-1">
@@ -134,7 +103,10 @@ export function PermissionDialog({ request: r, cwd }: { request: PermissionReque
             {v.title}
           </span>
         </div>
-        <div className="flex flex-col gap-1.5 rounded-xl bg-code px-4 py-3.5 font-mono text-[13px] text-code-ink">
+        <div
+          id={codeId}
+          className="flex flex-col gap-1.5 rounded-xl bg-code px-4 py-3.5 font-mono text-[13px] text-code-ink"
+        >
           <span className="break-all whitespace-pre-wrap">{v.code}</span>
           {v.sub && <span className="text-[11px] break-all text-code-muted">{v.sub}</span>}
         </div>
@@ -145,12 +117,26 @@ export function PermissionDialog({ request: r, cwd }: { request: PermissionReque
           </span>
         )}
         {v.preview && (
-          <pre
-            aria-label="要寫入的內容"
-            className="m-0 max-h-40 overflow-auto rounded-xl bg-fill-2 px-3.5 py-2.5 font-mono text-xs break-all whitespace-pre-wrap text-ink-2"
-          >
-            {v.preview}
-          </pre>
+          <div className="flex flex-col gap-1.5">
+            <pre
+              aria-label="要寫入的內容"
+              className={cx(
+                'm-0 overflow-auto rounded-xl bg-fill-2 px-3.5 py-2.5 font-mono text-xs break-all whitespace-pre-wrap text-ink-2',
+                expanded ? 'max-h-80' : 'max-h-40'
+              )}
+            >
+              {longPreview && !expanded ? `${v.preview.slice(0, PREVIEW_COLLAPSED)}…` : v.preview}
+            </pre>
+            {longPreview && !expanded && (
+              <button
+                type="button"
+                onClick={() => setExpanded(true)}
+                className="cursor-pointer self-start text-xs text-brand hover:text-brand-hover"
+              >
+                顯示完整內容（共 {v.preview.length} 字）
+              </button>
+            )}
+          </div>
         )}
         {v.reason && <span className="text-[13px] text-ink-2">{v.reason}</span>}
         {r.suggestedPattern ? (
@@ -180,27 +166,27 @@ export function PermissionDialog({ request: r, cwd }: { request: PermissionReque
               autoFocus
               value={reason}
               onChange={(e) => setReason(e.target.value)}
-              placeholder="告訴 Claude 為什麼不行、該怎麼做（選填）"
+              placeholder="告訴 Claude 為什麼不行、該怎麼做（選填，Esc 返回）"
               className={textareaClass}
             />
             <div className="flex justify-end gap-2.5">
-              <Button disabled={pending} onClick={() => setDenying(false)}>
+              <Button disabled={pending} onClick={leaveDeny}>
                 返回
               </Button>
-              <Button variant="dark" disabled={pending} onClick={() => void resolve(false)}>
+              <Button variant="dark" disabled={locked} onClick={() => void resolve(false)}>
                 送出拒絕
               </Button>
             </div>
           </div>
         ) : (
           <div className="flex justify-end gap-2.5">
-            <Button className="px-[18px]" disabled={pending} onClick={() => setDenying(true)}>
+            <Button className="px-[18px]" disabled={locked} onClick={() => setDenying(true)}>
               拒絕並說明
             </Button>
             <Button
               variant="primary"
               className="px-[22px]"
-              disabled={pending}
+              disabled={locked}
               onClick={() => void resolve(true)}
             >
               允許
@@ -214,10 +200,25 @@ export function PermissionDialog({ request: r, cwd }: { request: PermissionReque
 
 /**
  * 任務有等待中的核准請求時蓋在畫面上。請求依序排隊（task.pendingPermission 是最早的一個），
- * 以 id 為 key：換下一個請求時勾選、拒絕原因等狀態重新開始。
+ * 以 id 為 key：換下一個請求時勾選、拒絕原因、停用時間都重新開始，焦點也移到新的對話框。
+ * fallbackFocus：請求都處理完、原本的位置拿不到焦點時，焦點要去的地方（例如插話框）。
  */
-export function PendingPermission({ task }: { task: Task }) {
+export function PendingPermission({
+  task,
+  fallbackFocus
+}: {
+  task: Task
+  fallbackFocus?: FocusTarget
+}) {
   const r = task.pendingPermission
   if (!r) return null
-  return <PermissionDialog key={r.id} request={r} cwd={task.worktreePath} />
+  return (
+    <PermissionDialog
+      key={r.id}
+      request={r}
+      cwd={task.worktreePath}
+      branch={requesterOf(task, r)}
+      fallbackFocus={fallbackFocus}
+    />
+  )
 }

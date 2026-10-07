@@ -1,6 +1,7 @@
 // src/renderer/src/lib/timeline.ts
 import {
   BRANCH_RULES,
+  legacyImplementStart,
   msgDisplay,
   parseTagged,
   startsImplementation,
@@ -29,21 +30,22 @@ export type ToolCall = NonNullable<TimelineEvent['tool']>
 
 export const toolLabel = (name: string) => TOOL_LABEL[name] ?? name
 
-/** 工具呼叫的對象（檔案、指令、網址…），沒有就是空字串 */
-export function toolTarget(tool: Pick<ToolCall, 'input'>): string {
-  const i = tool.input ?? {}
-  return String(i.file_path ?? i.path ?? i.pattern ?? i.command ?? i.url ?? i.query ?? '')
-}
-
 /** worktree 內的絕對路徑顯示成相對路徑（Claude Code 的檔案工具都用絕對路徑）；其他原樣回傳 */
 export function relativeTo(root: string, p: string): string {
   const base = root.endsWith('/') ? root : `${root}/`
   return p.startsWith(base) ? p.slice(base.length) : p
 }
 
+/** 工具呼叫的對象（檔案、指令、網址…），沒有就是空字串；給了 root 就把其中的路徑顯示成相對路徑 */
+export function toolTarget(tool: Pick<ToolCall, 'input'>, root?: string): string {
+  const i = tool.input ?? {}
+  const target = String(i.file_path ?? i.path ?? i.pattern ?? i.command ?? i.url ?? i.query ?? '')
+  return root ? relativeTo(root, target) : target
+}
+
 /** 工具呼叫的一行摘要，例如「讀取 src/auth/login.ts」 */
-export function toolSummary(tool: ToolCall): string {
-  const target = toolTarget(tool)
+export function toolSummary(tool: ToolCall, root?: string): string {
+  const target = toolTarget(tool, root)
   return `${toolLabel(tool.name)}${target ? ` ${target}` : ''}`
 }
 
@@ -95,13 +97,25 @@ export function userTextDisplay(text: string): string {
 }
 
 /**
- * 這一段實作的主線事件：最後一次「核准規格」或「送出報告回饋」之後（不含那則訊息）。
- * 還沒有這樣的訊息（例如剛核准、訊息還沒寫進時間軸）時是空的，不會顯示釐清階段的對話。
+ * 這一段實作的主線事件：最後一個實作起點（核准規格或送出報告回饋）之後（不含那則訊息）。
+ * 還沒有起點（例如剛核准、訊息還沒寫進時間軸）時是空的，不會顯示釐清階段的對話。
+ * 起點看 user_text 的 ref；整份時間軸都沒有標記（加上標記之前的任務）才比對顯示文字。
  */
 export function implementEvents(events: TimelineEvent[]): TimelineEvent[] {
   const main = events.filter((e) => e.channel === 'main')
-  const start = main.findLastIndex((e) => startsImplementation(e))
+  const isStart = main.some(startsImplementation) ? startsImplementation : legacyImplementStart
+  const start = main.findLastIndex((e) => isStart(e))
   return start < 0 ? [] : main.slice(start + 1)
+}
+
+/**
+ * 每個問題最後一次出現在時間軸上的事件 id。Claude 重新提問已回答的問題時時間軸會再出現一次，
+ * 卡片只畫在最後一次的位置。
+ */
+export function latestQuestionEvents(events: TimelineEvent[]): Set<string> {
+  const last = new Map<string, string>()
+  for (const e of events) if (e.kind === 'question' && e.ref) last.set(e.ref, e.id)
+  return new Set(last.values())
 }
 
 const EMPTY: TimelineEvent[] = []

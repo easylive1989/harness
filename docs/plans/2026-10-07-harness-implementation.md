@@ -702,7 +702,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 5：結構化訊息協定
 
-使用者對 Claude 的回應以 `[tag key=value] 內容` 格式送出（見設計文件 3.3）。這些訊息在時間軸上給人看的文字（`msgDisplay`）與「實作從這裡開始」的標記（`IMPLEMENT_START_REF`、`startsImplementation`）也定義在這裡，主程序寫入時間軸、renderer 讀時間軸共用同一份定義。標記放在 user_text 的 `ref`，使用者打出一樣的字不會被誤認；沒有 `ref` 的舊時間軸才退回比對文字。
+使用者對 Claude 的回應以 `[tag key=value] 內容` 格式送出（見設計文件 3.3）。這些訊息在時間軸上給人看的文字（`msgDisplay`）與「實作從這裡開始」的標記（`IMPLEMENT_START_REF`、`startsImplementation`）也定義在這裡，主程序寫入時間軸、renderer 讀時間軸共用同一份定義。標記放在 user_text 的 `ref`，使用者打出一樣的字不會被誤認；整份時間軸都沒有標記（加上標記之前的任務）時才用 `legacyImplementStart` 比對文字。
 
 **Files:**
 - Create: `src/shared/protocol.ts`
@@ -714,6 +714,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 import { describe, expect, test } from 'vitest'
 import {
   IMPLEMENT_START_REF,
+  legacyImplementStart,
   msg,
   msgDisplay,
   parseTagged,
@@ -759,20 +760,22 @@ describe('msgDisplay / startsImplementation', () => {
   test('核准規格與送出報告回饋的訊息帶著實作起點標記', () => {
     expect(startsImplementation(userText(msgDisplay.specApproved, IMPLEMENT_START_REF))).toBe(true)
     expect(startsImplementation(userText('任何文字', IMPLEMENT_START_REF))).toBe(true)
-    expect(startsImplementation({ kind: 'system', text: '', ref: IMPLEMENT_START_REF })).toBe(false)
+    expect(startsImplementation({ kind: 'system', ref: IMPLEMENT_START_REF })).toBe(false)
   })
 
-  test('只看文字不算：使用者打出一樣的字不會被當成起點', () => {
+  test('只看標記：使用者打出一樣的字不會被當成起點', () => {
+    expect(startsImplementation(userText(msgDisplay.specApproved))).toBe(false)
     expect(startsImplementation(userText(msgDisplay.specApproved, 'other'))).toBe(false)
-    expect(startsImplementation(userText('核准規格之前想再問一下'))).toBe(false)
-    expect(startsImplementation(userText('送出 3 則報告回饋，然後呢？'))).toBe(false)
-    expect(startsImplementation(userText(msgDisplay.resume))).toBe(false)
+    expect(startsImplementation(userText('送出 3 則報告回饋'))).toBe(false)
   })
 
-  test('沒有標記的舊時間軸才用文字判斷', () => {
-    expect(startsImplementation(userText(msgDisplay.specApproved))).toBe(true)
-    expect(startsImplementation(userText('送出 3 則報告回饋'))).toBe(true)
-    expect(startsImplementation(userText('送出 0 則報告回饋與整體意見'))).toBe(true)
+  test('舊時間軸（整份都沒有標記）才用顯示文字判斷', () => {
+    expect(legacyImplementStart(userText(msgDisplay.specApproved))).toBe(true)
+    expect(legacyImplementStart(userText('送出 3 則報告回饋'))).toBe(true)
+    expect(legacyImplementStart(userText('送出 0 則報告回饋與整體意見'))).toBe(true)
+    expect(legacyImplementStart(userText('核准規格之前想再問一下'))).toBe(false)
+    expect(legacyImplementStart(userText('送出 3 則報告回饋，然後呢？'))).toBe(false)
+    expect(legacyImplementStart(userText(msgDisplay.resume))).toBe(false)
   })
 
   test('報告回饋的顯示文字；只有整體意見時不說 0 則', () => {
@@ -838,13 +841,17 @@ export const msgDisplay = {
 /** 核准規格、送出報告回饋寫入的 user_text 帶這個 ref：實作畫面從最後一個標記開始顯示 */
 export const IMPLEMENT_START_REF = 'implement_start'
 
+/** 時間軸事件是否標記一段實作的開始（看 ref：使用者打出一樣的字不會被誤認） */
+export function startsImplementation(e: Pick<TimelineEvent, 'kind' | 'ref'>): boolean {
+  return e.kind === 'user_text' && e.ref === IMPLEMENT_START_REF
+}
+
 /**
- * 時間軸事件是否標記一段實作的開始。看 ref，使用者打出一樣的字也不會被誤認；
- * 沒有 ref 的舊時間軸（加上標記之前寫入的）才用顯示文字判斷。
+ * 加上 ref 標記之前寫入的實作起點，只能比對顯示文字。
+ * 只在整份時間軸都沒有標記時使用（新時間軸裡沒有 ref 的 user_text 是使用者自己打的字）。
  */
-export function startsImplementation(e: Pick<TimelineEvent, 'kind' | 'text' | 'ref'>): boolean {
-  if (e.kind !== 'user_text') return false
-  if (e.ref !== undefined) return e.ref === IMPLEMENT_START_REF
+export function legacyImplementStart(e: Pick<TimelineEvent, 'kind' | 'text' | 'ref'>): boolean {
+  if (e.kind !== 'user_text' || e.ref !== undefined) return false
   const text = e.text ?? ''
   return text === msgDisplay.specApproved || /^送出 \d+ 則報告回饋(與整體意見)?$/.test(text)
 }
@@ -10963,6 +10970,12 @@ describe('toolSummary', () => {
     )
     expect(toolSummary({ id: 'x', name: 'mcp__foo' })).toBe('mcp__foo')
   })
+
+  test('worktree 內的絕對路徑顯示成相對路徑', () => {
+    const read = { id: 'x', name: 'Read', input: { file_path: '/wt/t1/src/a.ts' } }
+    expect(toolSummary(read, '/wt/t1')).toBe('讀取 src/a.ts')
+    expect(toolSummary(read, '/other')).toBe('讀取 /wt/t1/src/a.ts')
+  })
 })
 
 describe('Timeline', () => {
@@ -11048,6 +11061,51 @@ describe('Timeline', () => {
     expect(screen.getByText('沿用既有錯誤碼')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /變更報告 v2/ }))
     expect(onOpenStage).toHaveBeenCalledWith('report')
+  })
+
+  test('工具列表的路徑相對於 worktree；使用者拒絕的工具顯示已拒絕', async () => {
+    render(
+      <Timeline
+        task={makeTask()}
+        channel="main"
+        events={[
+          ev({
+            kind: 'tool_call',
+            tool: { id: 'r1', name: 'Read', input: { file_path: '/tmp/wt/t1/src/a.ts' } }
+          }),
+          ev({
+            kind: 'tool_result',
+            text: '先不要讀網頁',
+            tool: { id: 'w1', name: '', isError: true, denied: true }
+          })
+        ]}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: '讀取 1 次' }))
+    expect(screen.getByText('讀取 src/a.ts')).toBeInTheDocument()
+    expect(screen.getByText('已拒絕：先不要讀網頁')).toBeInTheDocument()
+    expect(screen.queryByText(/工具錯誤/)).not.toBeInTheDocument()
+  })
+
+  test('重新提問的問題只在最後一次出現的位置顯示卡片', () => {
+    const open = { ...q, status: 'open' as const, answer: undefined }
+    render(
+      <Timeline
+        task={{ ...task, questions: [open] }}
+        channel="main"
+        events={[
+          ev({ kind: 'question', ref: 'q1' }),
+          ev({ kind: 'assistant_text', text: '我想再確認一次' }),
+          ev({ kind: 'question', ref: 'q1' })
+        ]}
+      />
+    )
+    expect(screen.getAllByRole('button', { name: '確認答案' })).toHaveLength(1)
+    const card = screen.getByRole('radiogroup').closest('section')!
+    expect(
+      screen.getByText('我想再確認一次').compareDocumentPosition(card) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
   })
 
   test('開放中的問題顯示成卡片', () => {
@@ -11146,7 +11204,12 @@ describe('RunStatus', () => {
 
 ```ts
 // src/renderer/src/lib/timeline.ts
-import { BRANCH_RULES, msgDisplay, parseTagged, type Tagged } from '@shared/protocol'
+import {
+  BRANCH_RULES,
+  msgDisplay,
+  parseTagged,
+  type Tagged
+} from '@shared/protocol'
 import type { TimelineEvent } from '@shared/types'
 import { useStore } from '../store'
 
@@ -11170,11 +11233,23 @@ export type ToolCall = NonNullable<TimelineEvent['tool']>
 
 export const toolLabel = (name: string) => TOOL_LABEL[name] ?? name
 
-/** 工具呼叫的一行摘要，例如「讀取 src/auth/login.ts」 */
-export function toolSummary(tool: ToolCall): string {
+/** worktree 內的絕對路徑顯示成相對路徑（Claude Code 的檔案工具都用絕對路徑）；其他原樣回傳 */
+export function relativeTo(root: string, p: string): string {
+  const base = root.endsWith('/') ? root : `${root}/`
+  return p.startsWith(base) ? p.slice(base.length) : p
+}
+
+/** 工具呼叫的對象（檔案、指令、網址…），沒有就是空字串；給了 root 就把其中的路徑顯示成相對路徑 */
+export function toolTarget(tool: Pick<ToolCall, 'input'>, root?: string): string {
   const i = tool.input ?? {}
-  const target = i.file_path ?? i.path ?? i.pattern ?? i.command ?? i.url ?? i.query ?? ''
-  return `${toolLabel(tool.name)}${target ? ` ${String(target)}` : ''}`
+  const target = String(i.file_path ?? i.path ?? i.pattern ?? i.command ?? i.url ?? i.query ?? '')
+  return root ? relativeTo(root, target) : target
+}
+
+/** 工具呼叫的一行摘要，例如「讀取 src/auth/login.ts」 */
+export function toolSummary(tool: ToolCall, root?: string): string {
+  const target = toolTarget(tool, root)
+  return `${toolLabel(tool.name)}${target ? ` ${target}` : ''}`
 }
 
 const RULE_LINES = BRANCH_RULES.split('\n')
@@ -11222,6 +11297,16 @@ function describeTagged(t: Tagged): string | undefined {
 export function userTextDisplay(text: string): string {
   const t = parseTagged(text)
   return stripRules((t && describeTagged(t)) ?? text)
+}
+
+/**
+ * 每個問題最後一次出現在時間軸上的事件 id。Claude 重新提問已回答的問題時時間軸會再出現一次，
+ * 卡片只畫在最後一次的位置。
+ */
+export function latestQuestionEvents(events: TimelineEvent[]): Set<string> {
+  const last = new Map<string, string>()
+  for (const e of events) if (e.kind === 'question' && e.ref) last.set(e.ref, e.id)
+  return new Set(last.values())
 }
 
 const EMPTY: TimelineEvent[] = []
@@ -11646,10 +11731,16 @@ export function AnsweredQuestionRow({ question: q }: { question: Question }) {
 // src/renderer/src/components/Timeline.tsx
 import { useMemo, useState } from 'react'
 import type { Channel, Task, TimelineEvent } from '@shared/types'
-import { type ToolCall, toolLabel, toolSummary, userTextDisplay } from '../lib/timeline'
+import {
+  latestQuestionEvents,
+  type ToolCall,
+  toolLabel,
+  toolSummary,
+  userTextDisplay
+} from '../lib/timeline'
 import { Markdown } from './Markdown'
 import { AnsweredQuestionRow, QuestionCard } from './QuestionCard'
-import { Avatar, Icons, LiveStatus } from './ui'
+import { Avatar, cx, Icons, LiveStatus } from './ui'
 
 type ToolEvent = TimelineEvent & { tool: ToolCall }
 type Item = { kind: 'event'; e: TimelineEvent } | { kind: 'tools'; events: ToolEvent[] }
@@ -11668,7 +11759,7 @@ function group(events: TimelineEvent[]): Item[] {
   return out
 }
 
-function ToolGroup({ events }: { events: ToolEvent[] }) {
+function ToolGroup({ events, root }: { events: ToolEvent[]; root: string }) {
   const [open, setOpen] = useState(false)
   const counts = new Map<string, number>()
   for (const e of events) {
@@ -11689,7 +11780,7 @@ function ToolGroup({ events }: { events: ToolEvent[] }) {
       {open &&
         events.map((e) => (
           <code key={e.id} className="self-start break-all">
-            {toolSummary(e.tool)}
+            {toolSummary(e.tool, root)}
           </code>
         ))}
     </div>
@@ -11722,11 +11813,15 @@ export function Timeline({
   branchPending?: boolean
   onOpenStage?: (stage: 'spec' | 'report') => void
 }) {
-  const items = useMemo(() => group(events.filter((e) => e.channel === channel)), [events, channel])
+  const { items, latest } = useMemo(() => {
+    const list = events.filter((e) => e.channel === channel)
+    return { items: group(list), latest: latestQuestionEvents(list) }
+  }, [events, channel])
   return (
     <div className="flex flex-col gap-5">
       {items.map((it) => {
-        if (it.kind === 'tools') return <ToolGroup key={it.events[0].id} events={it.events} />
+        if (it.kind === 'tools')
+          return <ToolGroup key={it.events[0].id} events={it.events} root={task.worktreePath} />
         const e = it.e
         switch (e.kind) {
           case 'user_text':
@@ -11754,7 +11849,8 @@ export function Timeline({
             )
           case 'question': {
             const q = task.questions.find((x) => x.id === e.ref)
-            if (!q) return null
+            // 重新提問過的問題只在最後一次出現的位置畫卡片
+            if (!q || !latest.has(e.id)) return null
             return q.status === 'open' ? (
               <QuestionCard key={e.id} task={task} question={q} readOnly={readOnly} />
             ) : (
@@ -11817,9 +11913,12 @@ export function Timeline({
             return (
               <div
                 key={e.id}
-                className="ml-10 line-clamp-4 text-xs break-all whitespace-pre-wrap text-danger"
+                className={cx(
+                  'ml-10 line-clamp-4 text-xs break-all whitespace-pre-wrap',
+                  e.tool?.denied ? 'text-muted' : 'text-danger'
+                )}
               >
-                工具錯誤：{e.text}
+                {e.tool?.denied ? '已拒絕' : '工具錯誤'}：{e.text}
               </div>
             )
           case 'system':
@@ -12757,8 +12856,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 規格頁依 `docs/design/B3-Spec.dc.html`：左邊是規格（摘要、包含／不包含、決策與來源、實作步驟、驗收條件），底部固定核准列，右邊是釐清紀錄。
 
 - 核准與要求修改共用一個 `usePending`：其中一個送出中兩個都停用，連點只送一次。修改意見用 `<form>`，Enter 也能送出；送出成功才清空（送出期間又改了內容就保留），失敗時保留內容並由 `act` 顯示 toast。
+- 修改意見還沒送出就按核准：先提醒，按「放棄意見並核准」才核准（連點核准鈕也不會直接核准）；提醒記下當時的文字，文字改了就要重新確認（render 時推導）。
 - Claude 還在這一輪（`isBusy`）時停用兩個按鈕，並在核准列用 `LiveStatus` 說明原因。
-- 多個版本時「v2」換成版本下拉選單；選擇存成「選擇 + 當時的最新版本」，Claude 提出新版時自動回到最新版（render 時推導，不在 effect 裡 setState）。看舊版本時停用核准與要求修改（兩者都是針對最新版），並提供「回到 vN」。
+- 多個版本時「v2」換成版本下拉選單；選擇存成「選擇 + 當時的最新版本」，Claude 提出新版時自動回到最新版（render 時推導，不在 effect 裡 setState）。看舊版本時停用核准與要求修改（兩者都是針對最新版），並提供「回到 vN」；「根據 N 個問題、M 個分岔整理」是目前的釐清紀錄，看舊版本時不顯示。
 - 已核准後回看（目前階段是實作或報告）時標示「已核准的規格」，沒有核准列。
 - 規格條目裡的反引號用 `InlineCode` 顯示成 `<code>`（設計稿的決策與步驟都有程式碼片段）。決策列表是 `<ul aria-labelledby>`，邊框用 `chip` token。
 - 釐清紀錄：已回答的問題（含反問次數）與分岔；帶回的分岔指向規格中引用它的決策（「→ D2」）。設計稿的「回到對話繼續補充」改成「查看釐清對話」：規格待核准時釐清畫面只能回看，要補充需求請用「要求修改」。
@@ -12988,6 +13088,39 @@ test('TaskScreen：已丟棄的任務停在規格時唯讀', () => {
   expect(screen.queryByRole('button', { name: '核准並開始實作' })).not.toBeInTheDocument()
   expect(screen.getByText(/規格草稿/)).toBeInTheDocument()
 })
+
+test('看舊版本時不顯示根據幾個問題整理（那是目前的釐清紀錄）', async () => {
+  renderSpec(specTask({ specs: [spec(1, { title: '第一版' }), spec(2, { title: '第二版' })] }))
+  expect(screen.getByText(/規格草稿/)).toHaveTextContent('根據 1 個問題、1 個分岔整理')
+  await userEvent.selectOptions(screen.getByRole('combobox', { name: '規格版本' }), 'v1')
+  expect(screen.getByText(/規格草稿/)).not.toHaveTextContent('根據')
+})
+
+test('修改意見還沒送出就按核准：先提醒，確認放棄才核准', async () => {
+  renderSpec(specTask())
+  const input = screen.getByRole('textbox', { name: '修改意見' })
+  await userEvent.type(input, '上限改 10 次')
+  await userEvent.click(screen.getByRole('button', { name: '核准並開始實作' }))
+  expect(call).not.toHaveBeenCalled()
+  expect(screen.getByText(/修改意見還沒送出/)).toBeInTheDocument()
+  // 改了內容就重新確認
+  await userEvent.type(input, '，鎖 30 分鐘')
+  expect(screen.queryByText(/修改意見還沒送出/)).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '核准並開始實作' }))
+  await userEvent.click(screen.getByRole('button', { name: '放棄意見並核准' }))
+  expect(call).toHaveBeenCalledWith('spec:approve', 't1')
+})
+
+test('送出修改意見期間又改了內容就保留', async () => {
+  const release = holdNextCall(vi.mocked(call))
+  renderSpec(specTask())
+  const input = screen.getByRole('textbox', { name: '修改意見' })
+  await userEvent.type(input, '上限改 10 次{Enter}')
+  expect(call).toHaveBeenCalledWith('spec:requestChanges', 't1', '上限改 10 次')
+  await userEvent.type(input, '，還有鎖 30 分鐘')
+  await release()
+  expect(input).toHaveValue('上限改 10 次，還有鎖 30 分鐘')
+})
 ```
 
 **Step 2: 確認失敗** — `npx vitest run tests/renderer/SpecScreen.test.tsx` → FAIL（模組不存在）
@@ -13113,6 +13246,8 @@ export function SpecScreen({
   const [picked, setPicked] = useState<{ latest: number; version: number }>()
   const version = picked?.latest === latest ? picked.version : latest
   const [feedback, setFeedback] = useState('')
+  // 修改意見還沒送出就按核准時記下那段文字；文字改了就要重新確認（render 時推導）
+  const [confirmFor, setConfirmFor] = useState<string>()
   // 核准與要求修改共用：其中一個送出中時兩個都停用
   const [pending, run] = usePending()
   const spec = task.specs[version - 1] ?? task.specs.at(-1)
@@ -13140,7 +13275,16 @@ export function SpecScreen({
   const busy = isBusy(task)
   const blocked = pending || busy || viewingOld
 
-  const approve = () => run(() => act(() => call('spec:approve', task.id)))
+  const unsent = feedback.trim()
+  const confirming = !!unsent && confirmFor === unsent
+  // 修改意見還沒送出就按核准：先提醒，按「放棄意見並核准」才真的核准（連點核准鈕也不會）
+  const approve = (discardFeedback = false) => {
+    if (unsent && !discardFeedback) {
+      setConfirmFor(unsent)
+      return
+    }
+    void run(() => act(() => call('spec:approve', task.id)))
+  }
   const requestChanges = (e: FormEvent) => {
     e.preventDefault()
     const text = feedback.trim()
@@ -13179,8 +13323,9 @@ export function SpecScreen({
                   </select>
                 ) : (
                   `v${spec.version}`
-                )}{' '}
-                · 根據 {answered} 個問題、{concluded} 個分岔整理
+                )}
+                {/* 釐清紀錄是目前的狀態，不一定是舊版本當時的依據 */}
+                {!viewingOld && ` · 根據 ${answered} 個問題、${concluded} 個分岔整理`}
               </span>
               <h1 className="m-0 text-2xl font-bold">{spec.title}</h1>
               <span className="text-ink-2">
@@ -13288,7 +13433,7 @@ export function SpecScreen({
                 variant="primary"
                 className="px-5"
                 disabled={blocked}
-                onClick={() => void approve()}
+                onClick={() => approve()}
               >
                 核准並開始實作
               </Button>
@@ -13305,6 +13450,18 @@ export function SpecScreen({
                     回到 v{latest}
                   </button>
                 </>
+              ) : confirming ? (
+                <span className="text-decision-ink">
+                  修改意見還沒送出。要放棄這段意見直接核准，或先按「要求修改」送出。{' '}
+                  <button
+                    type="button"
+                    disabled={blocked}
+                    onClick={() => approve(true)}
+                    className="cursor-pointer font-medium text-brand hover:text-brand-hover disabled:cursor-default disabled:opacity-50"
+                  >
+                    放棄意見並核准
+                  </button>
+                </span>
               ) : (
                 <>
                   核准後 Claude 會在 worktree <code className="break-all">{task.worktreePath}</code>
@@ -13326,41 +13483,7 @@ export function SpecScreen({
 }
 ```
 
-**Step 5: TaskScreen 加入規格頁**
-
-```tsx
-// src/renderer/src/screens/TaskScreen.tsx
-import { useState } from 'react'
-import { StageNav } from '../components/StageNav'
-import { currentStage, type Stage } from '../lib/stage'
-import { useStore } from '../store'
-import { ClarifyScreen } from './ClarifyScreen'
-import { SpecScreen } from './SpecScreen'
-
-export function TaskScreen({ taskId }: { taskId: string }) {
-  const task = useStore((s) => s.tasks[taskId])
-  // 使用者回看的階段，只對選它時的任務與狀態有效；換任務或狀態前進就回到目前階段
-  const [picked, setPicked] = useState<{ key: string; stage: Stage } | null>(null)
-  if (!task) return null
-  const key = `${taskId}:${task.status}`
-  const current = currentStage(task)
-  const shown = picked?.key === key ? picked.stage : current
-  const openStage = (s: Stage) => setPicked(s === current ? null : { key, stage: s })
-  const nav = <StageNav task={task} shown={shown} onSelect={openStage} />
-  // 已丟棄的任務停在哪個階段都只能看
-  const ended = task.status === 'discarded' || task.status === 'done'
-  const readOnly = ended || shown !== current
-  switch (shown) {
-    case 'clarify':
-      return <ClarifyScreen task={task} nav={nav} readOnly={readOnly} onOpenStage={openStage} />
-    case 'spec':
-      return <SpecScreen task={task} nav={nav} readOnly={readOnly} onOpenStage={openStage} />
-    default:
-      // Task 32–33 補上實作與報告
-      return <ClarifyScreen task={task} nav={nav} readOnly onOpenStage={openStage} />
-  }
-}
-```
+**Step 5: TaskScreen 加入規格頁** — 在 `switch (shown)` 加上 `case 'spec': return <SpecScreen task={task} nav={nav} readOnly={readOnly} onOpenStage={openStage} />`（`readOnly = ended || shown !== current`，完整檔案見 Task 32 Step 8）。
 
 **Step 6: 確認通過** — `npx vitest run tests/renderer` 全部通過；`npm run typecheck`、`npm run lint` PASS
 
@@ -13380,10 +13503,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 32：實作進度畫面與指令核准對話框
 
 **Files:**
+- Create: `src/renderer/src/lib/permission.ts`（對話框的內容、停用時間）
 - Create: `src/renderer/src/components/PermissionDialog.tsx`
 - Create: `src/renderer/src/screens/ImplementScreen.tsx`
-- Modify: `src/renderer/src/lib/timeline.ts`（`toolTarget`、`relativeTo`、`implementEvents`）
+- Modify: `src/renderer/src/lib/timeline.ts`（`implementEvents`）
 - Modify: `src/renderer/src/components/ui.tsx`（`Avatar` 可傳 `className`）
+- Modify: `src/renderer/src/components/Composer.tsx`（`inputRef`：對話框關掉後焦點回到輸入框）
 - Modify: `src/renderer/src/styles/app.css`（補 `code-muted` token：深色區塊裡的次要文字）
 - Modify: `src/renderer/src/screens/ClarifyScreen.tsx`、`src/renderer/src/screens/SpecScreen.tsx`（顯示核准對話框）
 - Modify: `src/renderer/src/screens/TaskScreen.tsx`
@@ -13391,14 +13516,19 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 實作頁依 `docs/design/B4-Implement.dc.html`：進度條、步驟（完成／進行中／待做），進行中的步驟裡列出最近的工具呼叫，下面是這一段實作的對話，底部插話框與停止；右邊是變更檔案、本任務已允許的指令與 worktree。
 
-- **實作從哪裡開始**：實作頁只顯示最後一個實作起點（核准規格或送出報告回饋，`startsImplementation`，見 Task 5）之後的主線事件。找不到起點（剛核准、訊息還沒寫入）時是空的，不會閃出釐清階段的對話。
-- **核准對話框**：`PendingPermission` 以請求 id 為 key 掛 `PermissionDialog`，請求排隊時換下一個會重設勾選與拒絕原因。對話框出現時焦點移到對話框本身（使用者可能正在輸入框打字；刻意不放在「允許」上，免得按 Enter 就核准）。允許／拒絕用 `usePending`，連點只送一次。
+- **實作從哪裡開始**：實作頁只顯示最後一個實作起點（核准規格或送出報告回饋寫入的 user_text 帶 `ref: IMPLEMENT_START_REF`，見 Task 5）之後的主線事件；整份時間軸都沒有標記的舊任務才用 `legacyImplementStart` 比對文字。找不到起點（剛核准、訊息還沒寫入）時是空的，不會閃出釐清階段的對話。
+- **核准對話框**（`PendingPermission` → `PermissionDialog`，以請求 id 為 key：請求排隊時換下一個會重設勾選、拒絕原因與停用時間）
+  - 出現後 500ms 內（`APPROVAL_ARM_MS`）停用「允許」「拒絕並說明」「送出拒絕」：連點「允許」時第二下不會核准到下一個排隊的請求，對話框突然出現在游標下也不會被誤按。允許／拒絕用 `usePending`。
+  - 焦點：出現時移到對話框本身（使用者可能正在輸入框打字；刻意不放在「允許」上，免得按 Enter 就核准），下一個請求出現時移到新的對話框；請求都處理完後還給原本的位置，原本沒有焦點或拿不到（還被遮罩擋住）時交給畫面的 `fallbackFocus`（插話框）。`aria-describedby` 指向指令／目標區塊；拒絕模式按 Esc 回到按鈕。
+  - 有等待中的請求時，遮罩後面的內容（標題、捲動區、插話框）包在 `display: contents` 的 `inert` 容器裡，鍵盤與滑鼠都碰不到。
+  - 分岔提出的請求（`request.channel`）標題寫成「分岔「名稱」想…」。
   - Bash：顯示 `$ 指令`、cwd、原因（`description`）；有 `suggestedPattern` 才有「本任務內都允許」勾選框；串接的指令沒有樣式，改說明只能逐次核准。
-  - Edit／Write／MultiEdit／NotebookEdit：主程序只對 `.git`、`.claude/`、`.mcp.json` 詢問，所以顯示相對路徑、工具名稱、說明「這個檔案會影響 Claude 的權限或 git 設定」，以及要寫入的內容（Write 全文、Edit 的 `-`／`+` 取代前後，最多 4000 字）。
+  - Edit／Write／MultiEdit／NotebookEdit：主程序只對 `.git`、`.claude/`、`.mcp.json` 詢問，所以顯示相對路徑、工具名稱、說明「這個檔案會影響 Claude 的權限或 git 設定」，以及要寫入的內容（Write 全文、Edit 的 `-`／`+` 取代前後）；超過 1500 字先顯示開頭，按「顯示完整內容」展開。
   - WebFetch 顯示網址與用途（`prompt`），WebSearch 顯示搜尋字詞，其他工具顯示 JSON。
-  - 釐清中 Claude（主線或分岔）讀網頁、搜尋網路也會要求核准，所以釐清頁與規格頁也掛 `PendingPermission`；回看其他階段時有請求一樣會跳出（請求會卡住 Claude，不能只在實作頁看得到）。
-- **進行中的步驟**：列出最近 8 個工具呼叫，worktree 內的絕對路徑顯示成相對路徑；等待核准的請求對應到最近一個相同的工具呼叫並標成「等待核准」，執行失敗（`tool_result` 錯誤）的標「失敗」。還沒列出步驟（剛開始讀程式碼）或步驟之間 Claude 仍在執行時，另顯示「正在規劃步驟／最近的動作」，不會只看到轉圈。步驟狀態：等待核准、進行中、等你回答（實作中用 ask_user 提問）、暫停中。
-- **對話**：插話（標「你插話」）、Claude 的回覆、實作中的提問（問題卡片）與系統訊息；捲動區用 `useStickToBottom`。
+  - 釐清中 Claude（主線或分岔）讀網頁、搜尋網路也會要求核准，所以釐清頁與規格頁也掛 `PendingPermission`（規格頁連「還沒有規格」的畫面也有）；回看其他階段時有請求一樣會跳出（請求會卡住 Claude，不能只在實作頁看得到）。
+- **進行中的步驟**：列出最近 8 個工具呼叫，路徑相對於 worktree。等待核准的呼叫以請求的 `toolUseId` 對應（舊資料沒有 id 時找最近一個相同的呼叫）並標「等待核准」；使用者拒絕的標「已拒絕」（`tool.denied`），其他錯誤標「失敗」。還沒列出步驟（剛開始讀程式碼）或步驟之間 Claude 仍在執行時，另顯示「正在規劃步驟／最近的動作」。步驟狀態：等待核准、進行中、等你回答（有畫出來的開放問題）、暫停中。
+- **問題卡片**：這段實作裡出現的問題照時間軸位置畫（重新提問過的只畫最後一次）；開放中但這段實作沒出現過的問題（例如核准前提出、還沒回答）放在最上方，不會沒有地方回答。
+- **對話**：插話（標「你插話」）、Claude 的回覆、問題卡片與系統訊息；捲動區用 `useStickToBottom`。
 - **插話與停止**：整理報告中主程序不接受主線訊息，插話框停用；停止只在執行中顯示，用 `usePending`。
 - **變更檔案**：執行中每 5 秒重新讀取 `tasks:changedFiles`（上一次讀完才排下一次），停下來時再讀一次就不再輪詢；從來沒讀到時顯示「無法讀取變更」。設計稿的「新增／修改」標籤需要檔案狀態，`DiffStats` 只有增刪行數，改顯示每個檔案的 +／−。
 - 標題下的分支名稱旁設計稿有經過時間，沒有可靠的開始時間來源，先不顯示。
@@ -13408,9 +13538,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ```tsx
 // tests/renderer/PermissionDialog.test.tsx
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, expect, test, vi } from 'vitest'
+import { useRef } from 'react'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
   call: vi.fn(async () => undefined),
   onEvent: vi.fn(() => () => {}),
@@ -13418,8 +13549,9 @@ vi.mock('@renderer/api', () => ({
 }))
 import { call } from '@renderer/api'
 import { PendingPermission, PermissionDialog } from '@renderer/components/PermissionDialog'
+import { APPROVAL_ARM_MS, PREVIEW_COLLAPSED } from '@renderer/lib/permission'
 import { resetStoreInternals, useStore } from '@renderer/store'
-import type { PermissionRequest } from '@shared/types'
+import type { PermissionRequest, Task } from '@shared/types'
 import { holdNextCall } from '../fixtures/hold'
 import { makeTask } from '../fixtures/task'
 
@@ -13432,22 +13564,54 @@ const req: PermissionRequest = {
   suggestedPattern: 'npm test *',
   createdAt: ''
 }
+const next: PermissionRequest = {
+  ...req,
+  id: 'p2',
+  input: { command: 'npm run lint' },
+  suggestedPattern: 'npm run *'
+}
+
+// 對話框剛出現時按鈕先停用一小段時間，測試用假時鐘跳過
+const user = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+const armed = () => act(() => vi.advanceTimersByTimeAsync(APPROVAL_ARM_MS))
+const renderDialog = async (r: PermissionRequest = req) => {
+  const view = render(<PermissionDialog request={r} cwd="/wt" />)
+  await armed()
+  return view
+}
+
+/** 畫面上的輸入框＋核准對話框（模擬實作頁：對話框關掉後焦點回到插話框） */
+function Screen({ task }: { task: Task }) {
+  const composer = useRef<HTMLInputElement>(null)
+  return (
+    <>
+      <input aria-label="插話" ref={composer} />
+      <input aria-label="分岔訊息" />
+      <PendingPermission task={task} fallbackFocus={() => composer.current} />
+    </>
+  )
+}
 
 beforeEach(() => {
+  // shouldAdvanceTime：Testing Library 內部的 setTimeout(0) 照常推進（它只會推 Jest 的假時鐘）
+  vi.useFakeTimers({ shouldAdvanceTime: true })
   vi.mocked(call).mockReset()
   vi.mocked(call).mockResolvedValue(undefined)
   resetStoreInternals()
   useStore.setState({ toast: undefined })
 })
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 test('顯示指令與原因，勾選後允許並記住樣式', async () => {
-  render(<PermissionDialog request={req} cwd="/wt" />)
-  expect(screen.getByRole('dialog', { name: 'Claude 想執行這個指令' })).toBeInTheDocument()
-  expect(screen.getByText('$ npm test -- auth')).toBeInTheDocument()
-  expect(screen.getByText('cwd: /wt')).toBeInTheDocument()
+  await renderDialog()
+  const u = user()
+  const dialog = screen.getByRole('dialog', { name: 'Claude 想執行這個指令' })
+  expect(dialog).toHaveAccessibleDescription(/\$ npm test -- auth.*cwd: \/wt/)
   expect(screen.getByText(/跑 auth 測試/)).toBeInTheDocument()
-  await userEvent.click(screen.getByRole('checkbox', { name: /本任務內都允許/ }))
-  await userEvent.click(screen.getByRole('button', { name: '允許' }))
+  await u.click(screen.getByRole('checkbox', { name: /本任務內都允許/ }))
+  await u.click(screen.getByRole('button', { name: '允許' }))
   expect(call).toHaveBeenCalledWith('permission:resolve', 't1', 'p1', {
     allow: true,
     rememberPattern: 'npm test *'
@@ -13455,38 +13619,44 @@ test('顯示指令與原因，勾選後允許並記住樣式', async () => {
 })
 
 test('沒有勾選時只允許這一次', async () => {
-  render(<PermissionDialog request={req} cwd="/wt" />)
-  await userEvent.click(screen.getByRole('button', { name: '允許' }))
+  await renderDialog()
+  await user().click(screen.getByRole('button', { name: '允許' }))
   expect(call).toHaveBeenCalledWith('permission:resolve', 't1', 'p1', { allow: true })
 })
 
 test('拒絕並說明', async () => {
-  render(<PermissionDialog request={req} cwd="/wt" />)
-  await userEvent.click(screen.getByRole('button', { name: '拒絕並說明' }))
-  await userEvent.type(screen.getByRole('textbox', { name: '拒絕原因' }), '先不要跑')
-  await userEvent.click(screen.getByRole('button', { name: '送出拒絕' }))
+  await renderDialog()
+  const u = user()
+  await u.click(screen.getByRole('button', { name: '拒絕並說明' }))
+  await u.type(screen.getByRole('textbox', { name: '拒絕原因' }), '先不要跑')
+  await u.click(screen.getByRole('button', { name: '送出拒絕' }))
   expect(call).toHaveBeenCalledWith('permission:resolve', 't1', 'p1', {
     allow: false,
     message: '先不要跑'
   })
 })
 
-test('不寫原因也能拒絕；可以返回', async () => {
-  render(<PermissionDialog request={req} cwd="/wt" />)
-  await userEvent.click(screen.getByRole('button', { name: '拒絕並說明' }))
+test('不寫原因也能拒絕；返回或按 Esc 離開拒絕模式', async () => {
+  await renderDialog()
+  const u = user()
+  await u.click(screen.getByRole('button', { name: '拒絕並說明' }))
   expect(screen.getByRole('textbox', { name: '拒絕原因' })).toHaveFocus()
-  await userEvent.click(screen.getByRole('button', { name: '返回' }))
+  await u.click(screen.getByRole('button', { name: '返回' }))
   expect(screen.queryByRole('textbox', { name: '拒絕原因' })).not.toBeInTheDocument()
-  await userEvent.click(screen.getByRole('button', { name: '拒絕並說明' }))
-  await userEvent.click(screen.getByRole('button', { name: '送出拒絕' }))
+  await u.click(screen.getByRole('button', { name: '拒絕並說明' }))
+  await u.keyboard('{Escape}')
+  expect(screen.queryByRole('textbox', { name: '拒絕原因' })).not.toBeInTheDocument()
+  expect(screen.getByRole('dialog')).toHaveFocus()
+  await u.click(screen.getByRole('button', { name: '拒絕並說明' }))
+  await u.click(screen.getByRole('button', { name: '送出拒絕' }))
   expect(call).toHaveBeenCalledWith('permission:resolve', 't1', 'p1', { allow: false })
 })
 
 test('送出中停用按鈕，連點只送一次', async () => {
+  await renderDialog()
   const release = holdNextCall(vi.mocked(call))
-  render(<PermissionDialog request={req} cwd="/wt" />)
   const allow = screen.getByRole('button', { name: '允許' })
-  await userEvent.dblClick(allow)
+  await user().dblClick(allow)
   expect(call).toHaveBeenCalledTimes(1)
   expect(allow).toBeDisabled()
   expect(screen.getByRole('button', { name: '拒絕並說明' })).toBeDisabled()
@@ -13494,45 +13664,54 @@ test('送出中停用按鈕，連點只送一次', async () => {
   expect(allow).toBeEnabled()
 })
 
+test('新的請求出現後先停用一下：連點不會核准到下一個請求', async () => {
+  const u = user()
+  const { rerender } = render(<PendingPermission task={makeTask({ pendingPermission: req })} />)
+  // 剛出現時也停用
+  expect(screen.getByRole('button', { name: '允許' })).toBeDisabled()
+  await armed()
+  await u.click(screen.getByRole('button', { name: '允許' }))
+  expect(call).toHaveBeenCalledTimes(1)
+  // 主程序顯示下一個請求；使用者的第二下點擊落在新的對話框上
+  rerender(<PendingPermission task={makeTask({ pendingPermission: next })} />)
+  const allow = screen.getByRole('button', { name: '允許' })
+  expect(allow).toBeDisabled()
+  expect(screen.getByRole('button', { name: '拒絕並說明' })).toBeDisabled()
+  await u.click(allow)
+  expect(call).toHaveBeenCalledTimes(1)
+  await armed()
+  expect(allow).toBeEnabled()
+})
+
 test('核准失敗（請求已失效）時顯示錯誤', async () => {
   vi.mocked(call).mockRejectedValueOnce(new Error('這個核准請求已經失效'))
-  render(<PermissionDialog request={req} cwd="/wt" />)
-  await userEvent.click(screen.getByRole('button', { name: '允許' }))
+  await renderDialog()
+  await user().click(screen.getByRole('button', { name: '允許' }))
   expect(useStore.getState().toast?.text).toContain('已經失效')
 })
 
-test('串接的指令不能記住樣式', () => {
-  render(
-    <PermissionDialog
-      request={{
-        ...req,
-        input: { command: 'npm test && rm -rf dist' },
-        suggestedPattern: undefined
-      }}
-      cwd="/wt"
-    />
-  )
+test('串接的指令不能記住樣式', async () => {
+  await renderDialog({
+    ...req,
+    input: { command: 'npm test && rm -rf dist' },
+    suggestedPattern: undefined
+  })
   expect(screen.getByText('$ npm test && rm -rf dist')).toBeInTheDocument()
   expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
   expect(screen.getByText(/只能逐次核准/)).toBeInTheDocument()
 })
 
-test('修改受保護的檔案：顯示工具、相對路徑、說明與要寫入的內容', () => {
-  render(
-    <PermissionDialog
-      request={{
-        ...req,
-        toolName: 'Edit',
-        input: {
-          file_path: '/wt/.claude/settings.json',
-          old_string: '"allow": []',
-          new_string: '"allow": ["Bash(*)"]'
-        },
-        suggestedPattern: undefined
-      }}
-      cwd="/wt"
-    />
-  )
+test('修改受保護的檔案：顯示工具、相對路徑、說明與要寫入的內容', async () => {
+  await renderDialog({
+    ...req,
+    toolName: 'Edit',
+    input: {
+      file_path: '/wt/.claude/settings.json',
+      old_string: '"allow": []',
+      new_string: '"allow": ["Bash(*)"]'
+    },
+    suggestedPattern: undefined
+  })
   expect(screen.getByRole('dialog', { name: 'Claude 想修改這個檔案' })).toBeInTheDocument()
   expect(screen.getByText('.claude/settings.json')).toBeInTheDocument()
   expect(screen.getByText('Edit · cwd: /wt')).toBeInTheDocument()
@@ -13540,34 +13719,58 @@ test('修改受保護的檔案：顯示工具、相對路徑、說明與要寫�
   expect(screen.getByLabelText('要寫入的內容')).toHaveTextContent(
     '- "allow": [] + "allow": ["Bash(*)"]'
   )
+  expect(screen.queryByRole('button', { name: /顯示完整內容/ })).not.toBeInTheDocument()
   expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
 })
 
-test('WebFetch 顯示網址與用途；WebSearch 顯示搜尋字詞', () => {
-  const { unmount } = render(
-    <PermissionDialog
-      request={{
-        ...req,
-        toolName: 'WebFetch',
-        input: { url: 'https://example.com/docs', prompt: '找出 API 的速率限制' },
-        suggestedPattern: undefined
-      }}
-      cwd="/wt"
-    />
-  )
+test('內容很長時先顯示開頭，可以展開完整內容', async () => {
+  const content = `${'a'.repeat(PREVIEW_COLLAPSED)}TAIL`
+  await renderDialog({
+    ...req,
+    toolName: 'Write',
+    input: { file_path: '/wt/.git/hooks/pre-commit', content },
+    suggestedPattern: undefined
+  })
+  const preview = screen.getByLabelText('要寫入的內容')
+  expect(preview).not.toHaveTextContent('TAIL')
+  await user().click(screen.getByRole('button', { name: /顯示完整內容/ }))
+  expect(preview).toHaveTextContent('TAIL')
+  expect(screen.queryByRole('button', { name: /顯示完整內容/ })).not.toBeInTheDocument()
+})
+
+test('WebFetch 顯示網址與用途；WebSearch 顯示搜尋字詞', async () => {
+  const { unmount } = await renderDialog({
+    ...req,
+    toolName: 'WebFetch',
+    input: { url: 'https://example.com/docs', prompt: '找出 API 的速率限制' },
+    suggestedPattern: undefined
+  })
   expect(screen.getByRole('dialog', { name: 'Claude 想讀取這個網頁' })).toBeInTheDocument()
   expect(screen.getByText('https://example.com/docs')).toBeInTheDocument()
   expect(screen.getByText('WebFetch')).toBeInTheDocument()
   expect(screen.getByText('用途：找出 API 的速率限制')).toBeInTheDocument()
   unmount()
-  render(
-    <PermissionDialog
-      request={{ ...req, toolName: 'WebSearch', input: { query: 'redis ttl' } }}
-      cwd="/wt"
-    />
-  )
+  await renderDialog({ ...req, toolName: 'WebSearch', input: { query: 'redis ttl' } })
   expect(screen.getByRole('dialog', { name: 'Claude 想搜尋網路' })).toBeInTheDocument()
   expect(screen.getByText('redis ttl')).toBeInTheDocument()
+})
+
+test('分岔提出的請求標出是哪個分岔', () => {
+  render(
+    <PendingPermission
+      task={makeTask({
+        branches: [{ id: 'b1', title: '查資料', status: 'open', running: true, createdAt: '' }],
+        pendingPermission: {
+          ...req,
+          channel: 'branch:b1',
+          toolName: 'WebFetch',
+          input: { url: 'https://example.com' },
+          suggestedPattern: undefined
+        }
+      })}
+    />
+  )
+  expect(screen.getByRole('dialog', { name: '分岔「查資料」想讀取這個網頁' })).toBeInTheDocument()
 })
 
 test('出現時把焦點移到對話框（不直接停在「允許」上）', () => {
@@ -13575,33 +13778,52 @@ test('出現時把焦點移到對話框（不直接停在「允許」上）', ()
   expect(screen.getByRole('dialog')).toHaveFocus()
 })
 
-test('PendingPermission：沒有請求時不顯示；換下一個請求時重設勾選與拒絕狀態', async () => {
+test('PendingPermission：換下一個請求時重設狀態，焦點移到新的對話框', async () => {
+  const u = user()
   const { rerender } = render(<PendingPermission task={makeTask()} />)
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   rerender(<PendingPermission task={makeTask({ pendingPermission: req })} />)
-  await userEvent.click(screen.getByRole('checkbox'))
+  await armed()
+  await u.click(screen.getByRole('checkbox'))
   expect(screen.getByRole('checkbox')).toBeChecked()
-  const next: PermissionRequest = {
-    ...req,
-    id: 'p2',
-    input: { command: 'npm run lint' },
-    suggestedPattern: 'npm run *'
-  }
+  const first = screen.getByRole('dialog')
   rerender(<PendingPermission task={makeTask({ pendingPermission: next })} />)
   expect(screen.getByText('$ npm run lint')).toBeInTheDocument()
   expect(screen.getByRole('checkbox')).not.toBeChecked()
-  await userEvent.click(screen.getByRole('button', { name: '拒絕並說明' }))
+  expect(screen.getByRole('dialog')).not.toBe(first)
+  expect(screen.getByRole('dialog')).toHaveFocus()
+  await armed()
+  await u.click(screen.getByRole('button', { name: '拒絕並說明' }))
   rerender(<PendingPermission task={makeTask({ pendingPermission: { ...next, id: 'p3' } })} />)
   expect(screen.getByRole('button', { name: '允許' })).toBeInTheDocument()
   expect(screen.getByText('cwd: /tmp/wt/t1')).toBeInTheDocument()
+  expect(screen.getByRole('dialog')).toHaveFocus()
+})
+
+test('請求都處理完後，焦點回到使用者原本所在的地方', () => {
+  const { rerender } = render(<Screen task={makeTask()} />)
+  screen.getByRole('textbox', { name: '分岔訊息' }).focus()
+  rerender(<Screen task={makeTask({ pendingPermission: req })} />)
+  expect(screen.getByRole('dialog')).toHaveFocus()
+  rerender(<Screen task={makeTask()} />)
+  expect(screen.getByRole('textbox', { name: '分岔訊息' })).toHaveFocus()
+})
+
+test('原本沒有焦點時，請求處理完後焦點移到插話框', () => {
+  const { rerender } = render(<Screen task={makeTask({ pendingPermission: req })} />)
+  expect(screen.getByRole('dialog')).toHaveFocus()
+  rerender(<Screen task={makeTask({ pendingPermission: next })} />)
+  expect(screen.getByRole('dialog')).toHaveFocus()
+  rerender(<Screen task={makeTask()} />)
+  expect(screen.getByRole('textbox', { name: '插話' })).toHaveFocus()
 })
 ```
 
 ```tsx
 // tests/renderer/ImplementScreen.test.tsx
-import { render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
   call: vi.fn(async () => undefined),
   onEvent: vi.fn(() => () => {}),
@@ -13612,8 +13834,8 @@ import { implementEvents } from '@renderer/lib/timeline'
 import { ImplementScreen } from '@renderer/screens/ImplementScreen'
 import { TaskScreen } from '@renderer/screens/TaskScreen'
 import { resetStoreInternals, useStore } from '@renderer/store'
-import { msgDisplay } from '@shared/protocol'
-import type { DiffStats, Task, TimelineEvent } from '@shared/types'
+import { IMPLEMENT_START_REF, msgDisplay } from '@shared/protocol'
+import type { DiffStats, PermissionRequest, Question, Task, TimelineEvent } from '@shared/types'
 import { holdNextCall } from '../fixtures/hold'
 import { makeTask } from '../fixtures/task'
 
@@ -13641,7 +13863,7 @@ const stats: DiffStats = {
 const events: TimelineEvent[] = [
   ev({ kind: 'user_text', text: '加上登入失敗鎖定' }),
   ev({ kind: 'assistant_text', text: '釐清階段的回覆' }),
-  ev({ kind: 'user_text', text: msgDisplay.specApproved }),
+  ev({ kind: 'user_text', text: msgDisplay.specApproved, ref: IMPLEMENT_START_REF }),
   tool('Read', { file_path: 'src/http/errors.ts' }),
   ev({ kind: 'assistant_text', text: '開始實作' }),
   ev({ kind: 'user_text', text: '錯誤訊息放進 i18n' }),
@@ -13676,17 +13898,33 @@ beforeEach(() => {
 })
 
 describe('implementEvents', () => {
-  test('取最後一次核准規格或送出報告回饋之後的主線事件', () => {
+  test('取最後一個實作起點（核准規格或送出報告回饋）之後的主線事件', () => {
     const list = implementEvents(events)
     expect(list[0].kind).toBe('tool_call')
     expect(list.some((e) => e.text === '釐清階段的回覆')).toBe(false)
     expect(list.some((e) => e.channel !== 'main')).toBe(false)
     const again = [
       ...events,
-      ev({ kind: 'user_text', text: msgDisplay.reportFeedback(2, true) }),
+      ev({ kind: 'user_text', text: '送出整體意見', ref: IMPLEMENT_START_REF }),
+      // 使用者打出一樣的字（有 ref 的新時間軸不看文字）
+      ev({ kind: 'assistant_text', text: '第二輪' }),
+      ev({ kind: 'user_text', text: msgDisplay.specApproved }),
       ev({ kind: 'assistant_text', text: '第二輪' })
     ]
-    expect(implementEvents(again).map((e) => e.text)).toEqual(['第二輪'])
+    expect(implementEvents(again).map((e) => e.text)).toEqual([
+      '第二輪',
+      msgDisplay.specApproved,
+      '第二輪'
+    ])
+  })
+
+  test('舊時間軸（整份都沒有標記）用顯示文字找起點', () => {
+    const legacy = [
+      ev({ kind: 'user_text', text: '加上登入失敗鎖定' }),
+      ev({ kind: 'user_text', text: msgDisplay.specApproved }),
+      ev({ kind: 'assistant_text', text: '開始實作' })
+    ]
+    expect(implementEvents(legacy).map((e) => e.text)).toEqual(['開始實作'])
   })
 
   test('還沒有開始實作的訊息時是空的', () => {
@@ -13844,6 +14082,131 @@ test('TaskScreen：實作中顯示實作畫面', async () => {
   expect(screen.getByRole('textbox', { name: '插話' })).toBeInTheDocument()
   await screen.findByText('src/auth/lockout.ts')
 })
+
+const perm = (over: Partial<PermissionRequest> = {}): PermissionRequest => ({
+  id: 'p1',
+  taskId: 't1',
+  channel: 'main',
+  toolName: 'Bash',
+  input: { command: 'npm test' },
+  suggestedPattern: 'npm test *',
+  createdAt: '',
+  ...over
+})
+const openQuestion = (id: string, text: string): Question => ({
+  id,
+  text,
+  options: [{ id: 'a', label: '帳號的 email' }],
+  allowFreeText: true,
+  status: 'open',
+  followups: [],
+  askedAt: ''
+})
+const start = ev({ kind: 'user_text', text: msgDisplay.specApproved, ref: IMPLEMENT_START_REF })
+
+test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已拒絕」', async () => {
+  useStore.setState({
+    timelines: {
+      t1: [
+        start,
+        tool('Bash', { command: 'npm test' }, 'tu-a'),
+        tool('Bash', { command: 'rm -rf dist' }, 'tu-d'),
+        ev({
+          kind: 'tool_result',
+          text: '先不要刪',
+          tool: { id: 'tu-d', name: '', isError: true, denied: true }
+        }),
+        tool('Bash', { command: 'npm test' }, 'tu-b')
+      ]
+    }
+  })
+  renderImpl(
+    implTask({ runState: 'waiting_permission', pendingPermission: perm({ toolUseId: 'tu-a' }) })
+  )
+  const rows = within(screen.getByRole('region', { name: '進行中的步驟' })).getAllByRole('listitem')
+  expect(rows.map((r) => r.textContent)).toEqual([
+    '指令npm test等待核准',
+    '指令rm -rf dist已拒絕',
+    '指令npm test'
+  ])
+  await screen.findByText('src/auth/lockout.ts')
+})
+
+test('沒有在這段實作裡出現過的開放問題，顯示在最上方', async () => {
+  useStore.setState({ timelines: { t1: [ev({ kind: 'question', ref: 'q7' }), ...events] } })
+  renderImpl(implTask({ runState: 'idle', questions: [openQuestion('q7', '通知信寄給誰？')] }))
+  const card = screen.getByRole('radiogroup', { name: '通知信寄給誰？' })
+  expect(
+    card.compareDocumentPosition(screen.getByText('新增 lockout 模組')) &
+      Node.DOCUMENT_POSITION_FOLLOWING
+  ).toBeTruthy()
+  const step = screen.getByRole('region', { name: '進行中的步驟' })
+  expect(within(step).getByText('等你回答')).toBeInTheDocument()
+  await screen.findByText('src/auth/lockout.ts')
+})
+
+test('沒有開放中的問題時步驟顯示暫停中', async () => {
+  renderImpl(implTask({ runState: 'idle' }))
+  const step = screen.getByRole('region', { name: '進行中的步驟' })
+  expect(within(step).getByText('暫停中')).toBeInTheDocument()
+  await screen.findByText('src/auth/lockout.ts')
+})
+
+test('重新提問的問題只顯示一張卡片', async () => {
+  useStore.setState({
+    timelines: {
+      t1: [
+        ...events,
+        ev({ kind: 'question', ref: 'q9' }),
+        ev({ kind: 'assistant_text', text: '再確認一次' }),
+        ev({ kind: 'question', ref: 'q9' })
+      ]
+    }
+  })
+  renderImpl(implTask({ runState: 'idle', questions: [openQuestion('q9', '模板用哪個？')] }))
+  expect(screen.getAllByRole('radiogroup', { name: '模板用哪個？' })).toHaveLength(1)
+  await screen.findByText('src/auth/lockout.ts')
+})
+
+test('有等待中的核准請求時遮罩後面不能操作；處理完焦點回到插話框', async () => {
+  const { rerender } = renderImpl(
+    implTask({ runState: 'waiting_permission', pendingPermission: perm() })
+  )
+  const input = screen.getByRole('textbox', { name: '插話' })
+  expect(input.closest('[inert]')).not.toBeNull()
+  expect(screen.getByRole('region', { name: '進行中的步驟' }).closest('[inert]')).not.toBeNull()
+  expect(screen.getByRole('dialog').closest('[inert]')).toBeNull()
+  expect(screen.getByRole('dialog')).toHaveFocus()
+  rerender(<ImplementScreen task={implTask()} nav={null} readOnly={false} />)
+  expect(input.closest('[inert]')).toBeNull()
+  expect(input).toHaveFocus()
+  await screen.findByText('src/auth/lockout.ts')
+})
+
+describe('變更檔案的輪詢', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+  const tick = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms))
+
+  test('執行中每 5 秒重新讀取；停下來時讀最後一次，之後不再輪詢', async () => {
+    const { rerender } = renderImpl(implTask())
+    await tick(0)
+    expect(callsOf('tasks:changedFiles')).toHaveLength(1)
+    await tick(5000)
+    expect(callsOf('tasks:changedFiles')).toHaveLength(2)
+    await tick(5000)
+    expect(callsOf('tasks:changedFiles')).toHaveLength(3)
+    rerender(<ImplementScreen task={implTask({ runState: 'idle' })} nav={null} readOnly={false} />)
+    await tick(0)
+    expect(callsOf('tasks:changedFiles')).toHaveLength(4)
+    await tick(20000)
+    expect(callsOf('tasks:changedFiles')).toHaveLength(4)
+  })
+})
 ```
 
 `tests/renderer/ClarifyScreen.test.tsx` 加上：
@@ -13890,74 +14253,69 @@ test('回看規格時有等待中的核准請求也會顯示', () => {
   )
   expect(screen.getByRole('dialog', { name: 'Claude 想執行這個指令' })).toBeInTheDocument()
 })
+
+test('還沒有規格時也顯示核准對話框', () => {
+  renderSpec(
+    specTask({
+      specs: [],
+      runState: 'waiting_permission',
+      pendingPermission: {
+        id: 'p1',
+        taskId: 't1',
+        channel: 'main',
+        toolName: 'WebSearch',
+        input: { query: 'redis ttl' },
+        createdAt: ''
+      }
+    })
+  )
+  expect(screen.getByText('還沒有規格。')).toBeInTheDocument()
+  expect(screen.getByRole('dialog', { name: 'Claude 想搜尋網路' })).toBeInTheDocument()
+})
 ```
 
 **Step 2: 確認失敗** — `npx vitest run tests/renderer/PermissionDialog.test.tsx tests/renderer/ImplementScreen.test.tsx` → FAIL
 
-**Step 3: lib/timeline.ts**
+**Step 3: lib/timeline.ts 與 lib/permission.ts**
 
-`toolSummary` 改用 `toolTarget`：
-
-```ts
-/** 工具呼叫的對象（檔案、指令、網址…），沒有就是空字串 */
-export function toolTarget(tool: Pick<ToolCall, 'input'>): string {
-  const i = tool.input ?? {}
-  return String(i.file_path ?? i.path ?? i.pattern ?? i.command ?? i.url ?? i.query ?? '')
-}
-
-/** worktree 內的絕對路徑顯示成相對路徑（Claude Code 的檔案工具都用絕對路徑）；其他原樣回傳 */
-export function relativeTo(root: string, p: string): string {
-  const base = root.endsWith('/') ? root : `${root}/`
-  return p.startsWith(base) ? p.slice(base.length) : p
-}
-
-/** 工具呼叫的一行摘要，例如「讀取 src/auth/login.ts」 */
-export function toolSummary(tool: ToolCall): string {
-  const target = toolTarget(tool)
-  return `${toolLabel(tool.name)}${target ? ` ${target}` : ''}`
-}
-```
-
-`useTimeline` 之前加上：
+`lib/timeline.ts` 的 `@shared/protocol` import 加上 `legacyImplementStart`、`startsImplementation`，並在 `latestQuestionEvents` 之前加上：
 
 ```ts
 /**
- * 這一段實作的主線事件：最後一次「核准規格」或「送出報告回饋」之後（不含那則訊息）。
- * 還沒有這樣的訊息（例如剛核准、訊息還沒寫進時間軸）時是空的，不會顯示釐清階段的對話。
+ * 這一段實作的主線事件：最後一個實作起點（核准規格或送出報告回饋）之後（不含那則訊息）。
+ * 還沒有起點（例如剛核准、訊息還沒寫進時間軸）時是空的，不會顯示釐清階段的對話。
+ * 起點看 user_text 的 ref；整份時間軸都沒有標記（加上標記之前的任務）才比對顯示文字。
  */
 export function implementEvents(events: TimelineEvent[]): TimelineEvent[] {
   const main = events.filter((e) => e.channel === 'main')
-  const start = main.findLastIndex((e) => startsImplementation(e))
+  const isStart = main.some(startsImplementation) ? startsImplementation : legacyImplementStart
+  const start = main.findLastIndex((e) => isStart(e))
   return start < 0 ? [] : main.slice(start + 1)
 }
 ```
 
-**Step 4: ui.tsx 與 app.css**
-
-`Avatar` 接受 `className`（以 `cx` 合併，實作頁用 `size-6 text-[11px]`）；`app.css` 的 `@theme` 在 `--color-code-ink` 後加上 `--color-code-muted: #a9b3bf;`。
-
-**Step 5: PermissionDialog.tsx（對照 `B4-Implement.dc.html` 的 dialog）**
-
-```tsx
-// src/renderer/src/components/PermissionDialog.tsx
-import { useEffect, useId, useRef, useState } from 'react'
+```ts
+// src/renderer/src/lib/permission.ts
 import type { PermissionRequest, Task } from '@shared/types'
-import { call } from '../api'
-import { relativeTo } from '../lib/timeline'
-import { usePending } from '../lib/usePending'
-import { useStore } from '../store'
-import { Button, Icons, textareaClass } from './ui'
+import { relativeTo } from './timeline'
+
+/**
+ * 核准對話框出現後按鈕先停用的時間：連點「允許」時第二下不會落在下一個排隊的請求上，
+ * 對話框突然出現在游標下時也不會被誤按。
+ */
+export const APPROVAL_ARM_MS = 500
+/** 要寫入的內容先顯示前幾個字，其餘按「顯示完整內容」展開 */
+export const PREVIEW_COLLAPSED = 1500
 
 /** 修改這些工具的請求只會出現在 .git／.claude／.mcp.json（主程序只對這些路徑詢問） */
 const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
-const PREVIEW_MAX = 4000
 
 const str = (v: unknown) => (typeof v === 'string' ? v : undefined)
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
 
-/** 要寫入的內容：Write 的全文、Edit 的取代前後（- / + 開頭），太長就截斷 */
-function writePreview(input: Record<string, unknown>): string | undefined {
+/** 要寫入的內容：Write 的全文、Edit 的取代前後（- / + 開頭） */
+export function writePreview(input: Record<string, unknown>): string | undefined {
   const lines = (prefix: string, s?: string) =>
     s === undefined ? [] : s.split('\n').map((l) => `${prefix} ${l}`)
   const edit = (e: Record<string, unknown>) =>
@@ -13970,13 +14328,17 @@ function writePreview(input: Record<string, unknown>): string | undefined {
       : str(input.new_string) !== undefined
         ? edit(input)
         : undefined)
-  if (!text) return undefined
-  return text.length > PREVIEW_MAX
-    ? `${text.slice(0, PREVIEW_MAX)}\n…（內容過長，只顯示前 ${PREVIEW_MAX} 字）`
-    : text
+  return text || undefined
 }
 
-interface View {
+/** 提出請求的是誰：主線是 Claude，分岔標出分岔名稱 */
+export function requesterOf(task: Task, r: PermissionRequest): string | undefined {
+  if (!r.channel.startsWith('branch:')) return undefined
+  const id = r.channel.slice('branch:'.length)
+  return task.branches.find((b) => b.id === id)?.title ?? id
+}
+
+export interface RequestView {
   title: string
   /** 深色區塊的主要內容：指令、檔案路徑、網址… */
   code: string
@@ -13988,12 +14350,14 @@ interface View {
   preview?: string
 }
 
-function describe(r: PermissionRequest, cwd: string): View {
+/** 核准對話框的內容；branch 是提出請求的分岔名稱（主線不給） */
+export function describeRequest(r: PermissionRequest, cwd: string, branch?: string): RequestView {
+  const who = branch === undefined ? 'Claude ' : `分岔「${branch}」`
   const i = r.input
   if (r.toolName === 'Bash') {
     const description = str(i.description)
     return {
-      title: 'Claude 想執行這個指令',
+      title: `${who}想執行這個指令`,
       code: `$ ${str(i.command) ?? ''}`,
       sub: `cwd: ${cwd}`,
       reason: description && `原因：${description}`
@@ -14002,7 +14366,7 @@ function describe(r: PermissionRequest, cwd: string): View {
   if (WRITE_TOOLS.has(r.toolName)) {
     const path = str(i.file_path) ?? str(i.notebook_path) ?? str(i.path) ?? ''
     return {
-      title: 'Claude 想修改這個檔案',
+      title: `${who}想修改這個檔案`,
       code: relativeTo(cwd, path),
       sub: `${r.toolName} · cwd: ${cwd}`,
       warning: '這個檔案會影響 Claude 的權限或 git 設定',
@@ -14012,36 +14376,98 @@ function describe(r: PermissionRequest, cwd: string): View {
   if (r.toolName === 'WebFetch') {
     const prompt = str(i.prompt)
     return {
-      title: 'Claude 想讀取這個網頁',
+      title: `${who}想讀取這個網頁`,
       code: str(i.url) ?? '',
       sub: 'WebFetch',
       reason: prompt && `用途：${prompt}`
     }
   }
   if (r.toolName === 'WebSearch')
-    return { title: 'Claude 想搜尋網路', code: str(i.query) ?? '', sub: 'WebSearch' }
+    return { title: `${who}想搜尋網路`, code: str(i.query) ?? '', sub: 'WebSearch' }
   return {
-    title: `Claude 想使用 ${r.toolName}`,
+    title: `${who}想使用 ${r.toolName}`,
     code: JSON.stringify(i, null, 2),
     sub: `cwd: ${cwd}`
   }
 }
+```
+
+**Step 4: ui.tsx、Composer.tsx 與 app.css**
+
+`Avatar` 接受 `className`（以 `cx` 合併，實作頁用 `size-6 text-[11px]`）；`Composer` 接受 `inputRef?: Ref<HTMLInputElement>` 並傳給 `<input ref>`；`app.css` 的 `@theme` 在 `--color-code-ink` 後加上 `--color-code-muted: #a9b3bf;`。
+
+**Step 5: PermissionDialog.tsx（對照 `B4-Implement.dc.html` 的 dialog）**
+
+```tsx
+// src/renderer/src/components/PermissionDialog.tsx
+import { type KeyboardEvent, useEffect, useEffectEvent, useId, useRef, useState } from 'react'
+import type { PermissionRequest, Task } from '@shared/types'
+import { call } from '../api'
+import { APPROVAL_ARM_MS, describeRequest, PREVIEW_COLLAPSED, requesterOf } from '../lib/permission'
+import { usePending } from '../lib/usePending'
+import { useStore } from '../store'
+import { Button, cx, Icons, textareaClass } from './ui'
+
+/** 對話框關掉後焦點要去的地方（原本的位置拿不到焦點時），例如畫面的插話框 */
+type FocusTarget = () => HTMLElement | null | undefined
 
 /** 對照 `B4-Implement.dc.html` 的 dialog；蓋在所在的 `<main>`（需要 relative）上 */
-export function PermissionDialog({ request: r, cwd }: { request: PermissionRequest; cwd: string }) {
+export function PermissionDialog({
+  request: r,
+  cwd,
+  branch,
+  fallbackFocus
+}: {
+  request: PermissionRequest
+  cwd: string
+  /** 提出請求的分岔名稱；主線的請求不給 */
+  branch?: string
+  fallbackFocus?: FocusTarget
+}) {
   const act = useStore((s) => s.act)
   const titleId = useId()
+  const codeId = useId()
   const dialogRef = useRef<HTMLDivElement>(null)
+  // 剛出現時先停用核准與拒絕：連點「允許」時第二下不會落在下一個請求上
+  const [armed, setArmed] = useState(false)
   const [remember, setRemember] = useState(false)
   const [denying, setDenying] = useState(false)
   const [reason, setReason] = useState('')
+  const [expanded, setExpanded] = useState(false)
   const [pending, run] = usePending()
-  const v = describe(r, cwd)
+  const v = describeRequest(r, cwd, branch)
+  const locked = pending || !armed
 
-  // 出現時把焦點移進對話框（使用者可能正在輸入框打字）；刻意不放在「允許」上，免得按 Enter 就核准
   useEffect(() => {
-    dialogRef.current?.focus()
+    const t = setTimeout(() => setArmed(true), APPROVAL_ARM_MS)
+    return () => clearTimeout(t)
   }, [])
+
+  const restoreFocus = useEffectEvent((prev: Element | null) => {
+    if (prev instanceof HTMLElement && prev !== document.body && prev.isConnected) prev.focus()
+    // 原本的位置不在了或拿不到焦點（例如還被遮罩擋住）時交給畫面決定
+    if (!document.activeElement || document.activeElement === document.body)
+      fallbackFocus?.()?.focus()
+  })
+  // 出現時把焦點移進對話框（使用者可能正在輸入框打字）；刻意不放在「允許」上，免得按 Enter 就核准。
+  // 關掉時把焦點還給原本的位置；下一個排隊的請求出現時會再把焦點移到新的對話框。
+  useEffect(() => {
+    const prev = document.activeElement
+    dialogRef.current?.focus()
+    return () => restoreFocus(prev)
+  }, [])
+
+  const leaveDeny = () => {
+    // 先把焦點放回對話框，拒絕原因的輸入框消失後焦點才不會掉到 body
+    dialogRef.current?.focus()
+    setDenying(false)
+  }
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && denying) {
+      e.stopPropagation()
+      leaveDeny()
+    }
+  }
 
   const resolve = (allow: boolean) =>
     run(() =>
@@ -14060,13 +14486,16 @@ export function PermissionDialog({ request: r, cwd }: { request: PermissionReque
       )
     )
 
+  const longPreview = !!v.preview && v.preview.length > PREVIEW_COLLAPSED
   return (
     <div className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-ink/28 p-6">
       <div
         ref={dialogRef}
         role="dialog"
         aria-labelledby={titleId}
+        aria-describedby={codeId}
         tabIndex={-1}
+        onKeyDown={onKeyDown}
         className="flex max-h-full w-full max-w-[480px] flex-col gap-4 overflow-y-auto rounded-[20px] bg-surface p-6 shadow-dialog outline-none"
       >
         <div className="flex flex-col gap-1">
@@ -14075,7 +14504,10 @@ export function PermissionDialog({ request: r, cwd }: { request: PermissionReque
             {v.title}
           </span>
         </div>
-        <div className="flex flex-col gap-1.5 rounded-xl bg-code px-4 py-3.5 font-mono text-[13px] text-code-ink">
+        <div
+          id={codeId}
+          className="flex flex-col gap-1.5 rounded-xl bg-code px-4 py-3.5 font-mono text-[13px] text-code-ink"
+        >
           <span className="break-all whitespace-pre-wrap">{v.code}</span>
           {v.sub && <span className="text-[11px] break-all text-code-muted">{v.sub}</span>}
         </div>
@@ -14086,12 +14518,26 @@ export function PermissionDialog({ request: r, cwd }: { request: PermissionReque
           </span>
         )}
         {v.preview && (
-          <pre
-            aria-label="要寫入的內容"
-            className="m-0 max-h-40 overflow-auto rounded-xl bg-fill-2 px-3.5 py-2.5 font-mono text-xs break-all whitespace-pre-wrap text-ink-2"
-          >
-            {v.preview}
-          </pre>
+          <div className="flex flex-col gap-1.5">
+            <pre
+              aria-label="要寫入的內容"
+              className={cx(
+                'm-0 overflow-auto rounded-xl bg-fill-2 px-3.5 py-2.5 font-mono text-xs break-all whitespace-pre-wrap text-ink-2',
+                expanded ? 'max-h-80' : 'max-h-40'
+              )}
+            >
+              {longPreview && !expanded ? `${v.preview.slice(0, PREVIEW_COLLAPSED)}…` : v.preview}
+            </pre>
+            {longPreview && !expanded && (
+              <button
+                type="button"
+                onClick={() => setExpanded(true)}
+                className="cursor-pointer self-start text-xs text-brand hover:text-brand-hover"
+              >
+                顯示完整內容（共 {v.preview.length} 字）
+              </button>
+            )}
+          </div>
         )}
         {v.reason && <span className="text-[13px] text-ink-2">{v.reason}</span>}
         {r.suggestedPattern ? (
@@ -14121,27 +14567,27 @@ export function PermissionDialog({ request: r, cwd }: { request: PermissionReque
               autoFocus
               value={reason}
               onChange={(e) => setReason(e.target.value)}
-              placeholder="告訴 Claude 為什麼不行、該怎麼做（選填）"
+              placeholder="告訴 Claude 為什麼不行、該怎麼做（選填，Esc 返回）"
               className={textareaClass}
             />
             <div className="flex justify-end gap-2.5">
-              <Button disabled={pending} onClick={() => setDenying(false)}>
+              <Button disabled={pending} onClick={leaveDeny}>
                 返回
               </Button>
-              <Button variant="dark" disabled={pending} onClick={() => void resolve(false)}>
+              <Button variant="dark" disabled={locked} onClick={() => void resolve(false)}>
                 送出拒絕
               </Button>
             </div>
           </div>
         ) : (
           <div className="flex justify-end gap-2.5">
-            <Button className="px-[18px]" disabled={pending} onClick={() => setDenying(true)}>
+            <Button className="px-[18px]" disabled={locked} onClick={() => setDenying(true)}>
               拒絕並說明
             </Button>
             <Button
               variant="primary"
               className="px-[22px]"
-              disabled={pending}
+              disabled={locked}
               onClick={() => void resolve(true)}
             >
               允許
@@ -14155,12 +14601,27 @@ export function PermissionDialog({ request: r, cwd }: { request: PermissionReque
 
 /**
  * 任務有等待中的核准請求時蓋在畫面上。請求依序排隊（task.pendingPermission 是最早的一個），
- * 以 id 為 key：換下一個請求時勾選、拒絕原因等狀態重新開始。
+ * 以 id 為 key：換下一個請求時勾選、拒絕原因、停用時間都重新開始，焦點也移到新的對話框。
+ * fallbackFocus：請求都處理完、原本的位置拿不到焦點時，焦點要去的地方（例如插話框）。
  */
-export function PendingPermission({ task }: { task: Task }) {
+export function PendingPermission({
+  task,
+  fallbackFocus
+}: {
+  task: Task
+  fallbackFocus?: FocusTarget
+}) {
   const r = task.pendingPermission
   if (!r) return null
-  return <PermissionDialog key={r.id} request={r} cwd={task.worktreePath} />
+  return (
+    <PermissionDialog
+      key={r.id}
+      request={r}
+      cwd={task.worktreePath}
+      branch={requesterOf(task, r)}
+      fallbackFocus={fallbackFocus}
+    />
+  )
 }
 ```
 
@@ -14168,7 +14629,7 @@ export function PendingPermission({ task }: { task: Task }) {
 
 ```tsx
 // src/renderer/src/screens/ImplementScreen.tsx
-import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { msgDisplay } from '@shared/protocol'
 import type { DiffStats, PlanStep, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
@@ -14181,7 +14642,7 @@ import { Avatar, Button, cx, Icons, Pill, Spinner } from '../components/ui'
 import { isBusy } from '../lib/stage'
 import {
   implementEvents,
-  relativeTo,
+  latestQuestionEvents,
   type ToolCall,
   toolLabel,
   toolSummary,
@@ -14194,6 +14655,8 @@ import { useStickToBottom } from '../lib/useStickToBottom'
 import { useStore } from '../store'
 
 type ToolEvent = TimelineEvent & { tool: ToolCall }
+/** 工具呼叫的結果：失敗，或使用者在核准對話框拒絕 */
+type ToolOutcome = 'failed' | 'denied'
 const isToolCall = (e: TimelineEvent): e is ToolEvent => e.kind === 'tool_call' && !!e.tool
 /** 進行中的步驟裡列出最近幾個工具呼叫 */
 const RECENT_TOOLS = 8
@@ -14204,19 +14667,20 @@ function ToolRows({
   tools,
   root,
   waitingId,
-  failed
+  outcomes
 }: {
   tools: ToolEvent[]
   /** worktree：路徑顯示成相對於它 */
   root: string
   waitingId?: string
-  failed: Set<string>
+  outcomes: Map<string, ToolOutcome>
 }) {
   return (
     <ul className="m-0 flex list-none flex-col gap-0.5 p-0 text-[13px]">
       {tools.map((e) => {
         const waiting = e.id === waitingId
-        const target = relativeTo(root, toolTarget(e.tool))
+        const target = toolTarget(e.tool, root)
+        const outcome = outcomes.get(e.tool.id)
         return (
           <li
             key={e.id}
@@ -14238,8 +14702,10 @@ function ToolRows({
             </code>
             {waiting ? (
               <span className="ml-auto flex-none text-xs text-decision-ink">等待核准</span>
+            ) : outcome === 'denied' ? (
+              <span className="ml-auto flex-none text-xs text-muted">已拒絕</span>
             ) : (
-              failed.has(e.tool.id) && (
+              outcome === 'failed' && (
                 <span className="ml-auto flex-none text-xs text-danger">失敗</span>
               )
             )}
@@ -14397,170 +14863,193 @@ export function ImplementScreen({
   const [stopping, runStop] = usePending()
   const [showing, runShow] = usePending()
   const [, runResume] = usePending()
+  const composerRef = useRef<HTMLInputElement>(null)
 
   const busy = isBusy(task)
   const running = task.runState === 'running' || task.runState === 'waiting_permission'
   const total = task.plan.length
   const done = task.plan.filter((s) => s.status === 'done').length
   const runningIdx = task.plan.findIndex((s) => s.status === 'running')
-  const openQuestion = task.questions.some((q) => q.status === 'open')
 
   const tools = events.filter(isToolCall).slice(-RECENT_TOOLS)
-  const failed = new Set(
-    events.filter((e) => e.kind === 'tool_result' && e.tool?.isError).map((e) => e.tool!.id)
+  const outcomes = new Map<string, ToolOutcome>(
+    events
+      .filter((e) => e.kind === 'tool_result' && e.tool?.isError)
+      .map((e) => [e.tool!.id, e.tool!.denied ? 'denied' : 'failed'])
   )
+  // 重新提問過的問題只在最後一次出現的位置畫卡片
+  const latest = latestQuestionEvents(events)
   const chat = events.filter(
     (e) =>
       e.kind === 'user_text' ||
       e.kind === 'assistant_text' ||
-      e.kind === 'question' ||
-      e.kind === 'system'
+      e.kind === 'system' ||
+      (e.kind === 'question' && latest.has(e.id))
   )
-  // 等待核准的請求對應到最近一個相同的工具呼叫（請求本身沒有 tool_use id）
+  const isOpen = (id?: string) => task.questions.some((q) => q.id === id && q.status === 'open')
+  // 這段實作裡沒有出現過的開放問題（例如核准前提出、還沒回答）放在最上方，才不會沒有地方回答
+  const asked = new Set(chat.filter((e) => e.kind === 'question').map((e) => e.ref))
+  const orphanQuestions = task.questions.filter((q) => q.status === 'open' && !asked.has(q.id))
+  const waitingForAnswer =
+    orphanQuestions.length > 0 || chat.some((e) => e.kind === 'question' && isOpen(e.ref))
+  // 等待核准的請求以 toolUseId 對應時間軸上的工具呼叫；舊資料沒有 id 時找最近一個相同的呼叫
   const p = task.pendingPermission
-  const waitingId = p
-    ? tools.findLast(
-        (e) => toolSummary(e.tool) === toolSummary({ id: '', name: p.toolName, input: p.input })
-      )?.id
-    : undefined
+  const waitingId = !p
+    ? undefined
+    : p.toolUseId
+      ? tools.find((e) => e.tool.id === p.toolUseId)?.id
+      : tools.findLast(
+          (e) => toolSummary(e.tool) === toolSummary({ id: '', name: p.toolName, input: p.input })
+        )?.id
 
   const status =
     task.runState === 'waiting_permission' ? (
       <Pill tone="decision">等待核准</Pill>
     ) : task.runState === 'running' ? (
       <Pill tone="brand">進行中</Pill>
-    ) : openQuestion ? (
+    ) : waitingForAnswer ? (
       <Pill tone="decision">等你回答</Pill>
     ) : (
       <Pill tone="muted">暫停中</Pill>
     )
   const toolList = tools.length > 0 && (
     <div className="pr-4 pb-3.5 pl-[52px]">
-      <ToolRows tools={tools} root={task.worktreePath} waitingId={waitingId} failed={failed} />
+      <ToolRows tools={tools} root={task.worktreePath} waitingId={waitingId} outcomes={outcomes} />
     </div>
   )
 
   return (
     <>
       <main className="relative flex min-w-0 flex-1 flex-col rounded-2xl bg-surface shadow-card">
-        <div className="flex flex-wrap items-center gap-4 px-7 py-[18px]">
-          <div className="flex min-w-0 flex-col">
-            <span className="text-lg font-bold">{task.title}</span>
-            <span className="truncate font-mono text-[11px] text-muted">{task.branch}</span>
-          </div>
-          {nav}
-        </div>
-
-        <div
-          ref={scrollRef}
-          onScroll={onScroll}
-          className="flex min-h-0 flex-1 flex-col overflow-y-auto px-7 pt-2 pb-6"
-        >
-          <div className="mx-auto flex w-full max-w-[800px] flex-col gap-2.5">
-            <div className="mb-1.5 flex items-center gap-3">
-              <span className="text-[13px] text-muted">進度</span>
-              <span
-                role="progressbar"
-                aria-label="進度"
-                aria-valuemin={0}
-                aria-valuemax={total}
-                aria-valuenow={done}
-                aria-valuetext={total ? `${done} / ${total}` : '還沒有步驟'}
-                className="flex h-1.5 flex-1 rounded-[3px] bg-line-soft"
-              >
-                <span
-                  className="rounded-[3px] bg-brand transition-[width]"
-                  style={{ width: `${total ? (done / total) * 100 : 0}%` }}
-                />
-              </span>
-              <span className="font-mono text-xs">
-                {done} / {total || '?'}
-              </span>
+        {/* 有等待中的核准請求時，遮罩後面的內容不能用鍵盤或滑鼠操作 */}
+        <div className="contents" inert={!!task.pendingPermission}>
+          <div className="flex flex-wrap items-center gap-4 px-7 py-[18px]">
+            <div className="flex min-w-0 flex-col">
+              <span className="text-lg font-bold">{task.title}</span>
+              <span className="truncate font-mono text-[11px] text-muted">{task.branch}</span>
             </div>
+            {nav}
+          </div>
 
-            {task.plan.map((s, i) =>
-              i === runningIdx ? (
+          <div
+            ref={scrollRef}
+            onScroll={onScroll}
+            className="flex min-h-0 flex-1 flex-col overflow-y-auto px-7 pt-2 pb-6"
+          >
+            <div className="mx-auto flex w-full max-w-[800px] flex-col gap-2.5">
+              <div className="mb-1.5 flex items-center gap-3">
+                <span className="text-[13px] text-muted">進度</span>
+                <span
+                  role="progressbar"
+                  aria-label="進度"
+                  aria-valuemin={0}
+                  aria-valuemax={total}
+                  aria-valuenow={done}
+                  aria-valuetext={total ? `${done} / ${total}` : '還沒有步驟'}
+                  className="flex h-1.5 flex-1 rounded-[3px] bg-line-soft"
+                >
+                  <span
+                    className="rounded-[3px] bg-brand transition-[width]"
+                    style={{ width: `${total ? (done / total) * 100 : 0}%` }}
+                  />
+                </span>
+                <span className="font-mono text-xs">
+                  {done} / {total || '?'}
+                </span>
+              </div>
+
+              {orphanQuestions.map((q) => (
+                <QuestionCard key={q.id} task={task} question={q} readOnly={readOnly} />
+              ))}
+
+              {task.plan.map((s, i) =>
+                i === runningIdx ? (
+                  <section
+                    key={s.id}
+                    aria-label="進行中的步驟"
+                    className="overflow-hidden rounded-2xl shadow-focus"
+                  >
+                    <div className="flex items-center gap-3 px-4 py-3.5">
+                      <span className="flex size-6 flex-none items-center justify-center rounded-full text-xs font-bold text-brand shadow-[inset_0_0_0_2px_var(--color-brand)]">
+                        {i + 1}
+                      </span>
+                      <span className="flex-1 font-medium">
+                        <InlineCode text={s.title} />
+                      </span>
+                      {status}
+                    </div>
+                    {toolList}
+                  </section>
+                ) : (
+                  <StepRow key={s.id} step={s} index={i} />
+                )
+              )}
+
+              {/* 還沒列出步驟（剛開始讀程式碼）或步驟之間：仍然看得到 Claude 在做什麼 */}
+              {runningIdx < 0 && busy && tools.length > 0 && (
                 <section
-                  key={s.id}
-                  aria-label="進行中的步驟"
+                  aria-label="最近的動作"
                   className="overflow-hidden rounded-2xl shadow-focus"
                 >
                   <div className="flex items-center gap-3 px-4 py-3.5">
-                    <span className="flex size-6 flex-none items-center justify-center rounded-full text-xs font-bold text-brand shadow-[inset_0_0_0_2px_var(--color-brand)]">
-                      {i + 1}
+                    <span className="flex size-6 flex-none items-center justify-center">
+                      <Spinner decorative />
                     </span>
                     <span className="flex-1 font-medium">
-                      <InlineCode text={s.title} />
+                      {total ? '最近的動作' : '正在規劃步驟'}
                     </span>
                     {status}
                   </div>
                   {toolList}
                 </section>
-              ) : (
-                <StepRow key={s.id} step={s} index={i} />
-              )
-            )}
+              )}
 
-            {/* 還沒列出步驟（剛開始讀程式碼）或步驟之間：仍然看得到 Claude 在做什麼 */}
-            {runningIdx < 0 && busy && tools.length > 0 && (
-              <section aria-label="最近的動作" className="overflow-hidden rounded-2xl shadow-focus">
-                <div className="flex items-center gap-3 px-4 py-3.5">
-                  <span className="flex size-6 flex-none items-center justify-center">
-                    <Spinner decorative />
-                  </span>
-                  <span className="flex-1 font-medium">
-                    {total ? '最近的動作' : '正在規劃步驟'}
-                  </span>
-                  {status}
-                </div>
-                {toolList}
-              </section>
-            )}
+              {chat.map((e) => (
+                <ChatItem key={e.id} task={task} e={e} readOnly={readOnly} />
+              ))}
 
-            {chat.map((e) => (
-              <ChatItem key={e.id} task={task} e={e} readOnly={readOnly} />
-            ))}
-
-            <RunStatus
-              task={task}
-              onResume={() => void runResume(() => act(() => call('run:resume', task.id)))}
-            />
-          </div>
-        </div>
-
-        {!readOnly && (
-          <div className="px-7 pb-[22px]">
-            <div className="mx-auto max-w-[800px]">
-              <Composer
-                label="插話"
-                placeholder="插話給 Claude…"
-                // 整理報告時主程序不接受主線訊息
-                disabled={task.runState === 'finalizing'}
-                onSend={(t) => {
-                  stick()
-                  void act(() => call('tasks:send', task.id, 'main', t))
-                }}
-                extra={
-                  running && (
-                    <button
-                      type="button"
-                      disabled={stopping}
-                      onClick={() =>
-                        void runStop(() => act(() => call('run:stop', task.id, 'main')))
-                      }
-                      className="flex h-10 flex-none cursor-pointer items-center gap-1.5 rounded-full bg-surface px-4 text-[13px] text-danger disabled:cursor-default disabled:opacity-50"
-                    >
-                      <Icons.Stop width={12} height={12} />
-                      停止
-                    </button>
-                  )
-                }
+              <RunStatus
+                task={task}
+                onResume={() => void runResume(() => act(() => call('run:resume', task.id)))}
               />
             </div>
           </div>
-        )}
 
-        <PendingPermission task={task} />
+          {!readOnly && (
+            <div className="px-7 pb-[22px]">
+              <div className="mx-auto max-w-[800px]">
+                <Composer
+                  inputRef={composerRef}
+                  label="插話"
+                  placeholder="插話給 Claude…"
+                  // 整理報告時主程序不接受主線訊息
+                  disabled={task.runState === 'finalizing'}
+                  onSend={(t) => {
+                    stick()
+                    void act(() => call('tasks:send', task.id, 'main', t))
+                  }}
+                  extra={
+                    running && (
+                      <button
+                        type="button"
+                        disabled={stopping}
+                        onClick={() =>
+                          void runStop(() => act(() => call('run:stop', task.id, 'main')))
+                        }
+                        className="flex h-10 flex-none cursor-pointer items-center gap-1.5 rounded-full bg-surface px-4 text-[13px] text-danger disabled:cursor-default disabled:opacity-50"
+                      >
+                        <Icons.Stop width={12} height={12} />
+                        停止
+                      </button>
+                    )
+                  }
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <PendingPermission task={task} fallbackFocus={() => composerRef.current} />
       </main>
 
       <aside
@@ -14602,12 +15091,120 @@ export function ImplementScreen({
 
 **Step 7: 釐清頁與規格頁也顯示核准對話框**
 
-兩個畫面的 `<main>` 加上 `relative`，在 `</main>` 前加上（import `PendingPermission` from `'../components/PermissionDialog'`）：
+ClarifyScreen 最終版：
 
 ```tsx
+// src/renderer/src/screens/ClarifyScreen.tsx
+import { type ReactNode, useRef } from 'react'
+import type { Task } from '@shared/types'
+import { call } from '../api'
+import { BranchPanel } from '../components/BranchPanel'
+import { Composer } from '../components/Composer'
+import { PendingPermission } from '../components/PermissionDialog'
+import { RunStatus, Timeline } from '../components/Timeline'
+import { awaitingCounterReply, isBusy } from '../lib/stage'
+import { useTimeline } from '../lib/timeline'
+import { usePending } from '../lib/usePending'
+import { useStickToBottom } from '../lib/useStickToBottom'
+import { useStore } from '../store'
+
+export function ClarifyScreen({
+  task,
+  nav,
+  readOnly,
+  onOpenStage
+}: {
+  task: Task
+  nav: ReactNode
+  readOnly: boolean
+  onOpenStage: (s: 'spec' | 'report') => void
+}) {
+  const act = useStore((s) => s.act)
+  const setActiveBranch = useStore((s) => s.setActiveBranch)
+  const events = useTimeline(task.id)
+  // 卡片內容（反問回覆等）只改 task 不加事件，所以也看 updatedAt
+  const {
+    ref: scrollRef,
+    onScroll,
+    stick
+  } = useStickToBottom<HTMLDivElement>(`${events.length}:${task.updatedAt}`, task.id)
+  // 主線執行中不能分岔（主程序會拒絕），但可以插話
+  const busy = isBusy(task)
+  // 問題卡片在等反問的回答時自己會顯示等待中，底部就不再重複顯示「處理中」
+  const cardWaiting = task.questions.some((q) => awaitingCounterReply(task, q))
+  const [branching, runBranch] = usePending()
+  const composerRef = useRef<HTMLInputElement>(null)
+  const branchFrom = (text: string) =>
+    runBranch(async () => {
+      const title = text
+        .replace(/[`*_#>]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 24)
+      const b = await act(() =>
+        call('branch:open', task.id, {
+          title,
+          seed: `針對這段內容深入討論：\n${text.slice(0, 600)}`
+        })
+      )
+      if (b) setActiveBranch(task.id, b.id)
+    })
+  return (
+    <>
+      <main className="relative flex min-w-0 flex-1 flex-col rounded-2xl bg-surface shadow-card">
+        {/* 有等待中的核准請求時，遮罩後面的內容不能用鍵盤或滑鼠操作 */}
+        <div className="contents" inert={!!task.pendingPermission}>
+          <div className="flex flex-wrap items-center gap-4 px-7 py-[18px]">
+            <span className="text-lg font-bold">{task.title}</span>
+            {nav}
+          </div>
+          <div
+            ref={scrollRef}
+            onScroll={onScroll}
+            className="flex min-h-0 flex-1 flex-col overflow-y-auto px-7 pt-2 pb-6"
+          >
+            <div className="mx-auto flex w-full max-w-[800px] flex-col gap-5">
+              <Timeline
+                task={task}
+                channel="main"
+                events={events}
+                readOnly={readOnly}
+                onBranchFrom={busy ? undefined : (t) => void branchFrom(t)}
+                branchPending={branching}
+                onOpenStage={onOpenStage}
+              />
+              <RunStatus
+                task={task}
+                quiet={cardWaiting}
+                onResume={() => void act(() => call('run:resume', task.id))}
+              />
+            </div>
+          </div>
+          {!readOnly && (
+            <div className="px-7 pb-[22px]">
+              <div className="mx-auto max-w-[800px]">
+                <Composer
+                  inputRef={composerRef}
+                  placeholder="補充需求或直接回答…"
+                  onSend={(t) => {
+                    stick()
+                    void act(() => call('tasks:send', task.id, 'main', t))
+                  }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
         {/* 釐清中 Claude（主線或分岔）要讀網頁、搜尋網路時也要核准 */}
-        <PendingPermission task={task} />
+        <PendingPermission task={task} fallbackFocus={() => composerRef.current} />
+      </main>
+      <BranchPanel task={task} events={events} readOnly={readOnly} />
+    </>
+  )
+}
 ```
+
+SpecScreen：`<main>` 裡的標題、捲動區與核准列包進 `<div className="contents" inert={masked}>`（`masked = !!task.pendingPermission`），`</main>` 前加上 `<PendingPermission task={task} fallbackFocus={() => feedbackRef.current} />`（`feedbackRef` 掛在修改意見的 `<input>`）；「還沒有規格」的畫面同樣包 `inert` 並加上 `<PendingPermission task={task} />`。
 
 **Step 8: TaskScreen 加入實作頁**
 
@@ -14650,7 +15247,7 @@ export function TaskScreen({ taskId }: { taskId: string }) {
 
 **Step 9: 確認通過** — `npm test` 全部通過；`npm run typecheck`、`npm run lint` PASS
 
-**Step 10: 手動驗證** — 核准規格後進入實作頁：進度與步驟更新、shell 指令跳出核准框、勾選後同樣指令不再詢問、插話會出現在時間軸、停止按鈕可中斷；修改 `.claude/settings.json` 時對話框顯示路徑、說明與要寫入的內容。
+**Step 10: 手動驗證** — 核准規格後進入實作頁：進度與步驟更新、shell 指令跳出核准框、勾選後同樣指令不再詢問、拒絕的指令標「已拒絕」、插話會出現在時間軸、停止按鈕可中斷；修改 `.claude/settings.json` 時對話框顯示路徑、說明與要寫入的內容；連點「允許」不會核准到下一個請求。
 
 **Step 11: Commit**
 
