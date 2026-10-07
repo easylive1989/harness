@@ -1,0 +1,117 @@
+// tests/renderer/BranchPanel.test.tsx
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { beforeEach, expect, test, vi } from 'vitest'
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(async () => undefined),
+  onEvent: vi.fn(() => () => {}),
+  errorText: String
+}))
+import { call } from '@renderer/api'
+import { BranchPanel } from '@renderer/components/BranchPanel'
+import { resetStoreInternals, useStore } from '@renderer/store'
+import { msg } from '@shared/protocol'
+import type { Branch, TimelineEvent } from '@shared/types'
+import { makeTask } from '../fixtures/task'
+
+const concluded: Branch = {
+  id: 'b1',
+  title: '計數存放位置',
+  status: 'concluded',
+  running: false,
+  createdAt: '',
+  conclusion: { decision: '用 Redis', rationale: 'x', deferred: [] }
+}
+const concluding: Branch = {
+  id: 'b2',
+  title: '通知使用者',
+  fromQuestionId: 'q2',
+  status: 'concluding',
+  running: false,
+  createdAt: '',
+  conclusion: { decision: '寄通知信', rationale: '避免騷擾', deferred: ['重設連結'] }
+}
+const open: Branch = { ...concluding, status: 'open', conclusion: undefined }
+const task = makeTask({ branches: [concluded, concluding] })
+
+const ev = (id: string, over: Partial<TimelineEvent>): TimelineEvent => ({
+  id,
+  ts: '',
+  channel: 'branch:b2',
+  kind: 'user_text',
+  ...over
+})
+const talk = [
+  ev('e1', { text: msg.branchOpen('通知使用者', '') }),
+  ev('e2', { kind: 'assistant_text', text: '會有騷擾的風險。' }),
+  ev('e3', { channel: 'main', kind: 'assistant_text', text: '主線的訊息' })
+]
+
+beforeEach(() => {
+  vi.mocked(call).mockClear()
+  resetStoreInternals()
+  useStore.setState({ activeBranch: { t1: 'b2' }, timelines: { t1: [] }, toast: undefined })
+})
+
+test('沒有分岔時顯示說明', () => {
+  useStore.setState({ activeBranch: {} })
+  render(<BranchPanel task={makeTask()} events={[]} />)
+  expect(screen.getByRole('complementary', { name: '分岔討論' })).toHaveTextContent('還沒有分岔')
+})
+
+test('顯示結論預覽，確認後帶回主線', async () => {
+  render(<BranchPanel task={task} events={[]} />)
+  expect(screen.getByText('帶回主線的結論（預覽）')).toBeInTheDocument()
+  expect(screen.getByText('寄通知信')).toBeInTheDocument()
+  expect(screen.getByText(/重設連結/)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '確認並帶回主線' }))
+  expect(call).toHaveBeenCalledWith('branch:confirm', 't1', 'b2', undefined)
+  await userEvent.click(screen.getByRole('button', { name: '重新整理結論' }))
+  expect(call).toHaveBeenCalledWith('branch:conclude', 't1', 'b2')
+})
+
+test('在分岔中送出訊息，Claude 回覆過後可以帶回主線', async () => {
+  render(<BranchPanel task={{ ...task, branches: [open] }} events={talk} />)
+  expect(screen.getByText('開始討論：通知使用者')).toBeInTheDocument()
+  expect(screen.getByText('會有騷擾的風險。')).toBeInTheDocument()
+  expect(screen.queryByText('主線的訊息')).not.toBeInTheDocument()
+  await userEvent.type(screen.getByRole('textbox', { name: '分岔訊息' }), '再想想{Enter}')
+  expect(call).toHaveBeenCalledWith('tasks:send', 't1', 'branch:b2', '再想想')
+  expect(screen.getByRole('textbox', { name: '分岔訊息' })).toHaveValue('')
+  await userEvent.click(screen.getByRole('button', { name: '帶回主線' }))
+  expect(call).toHaveBeenCalledWith('branch:conclude', 't1', 'b2')
+})
+
+test('Claude 還沒在分岔回覆前不能帶回主線；執行中停用輸入', () => {
+  const { rerender } = render(
+    <BranchPanel task={{ ...task, branches: [open] }} events={talk.slice(0, 1)} />
+  )
+  expect(screen.getByRole('button', { name: '帶回主線' })).toBeDisabled()
+  rerender(<BranchPanel task={{ ...task, branches: [{ ...open, running: true }] }} events={talk} />)
+  expect(screen.getByRole('textbox', { name: '分岔訊息' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '帶回主線' })).toBeDisabled()
+  expect(screen.getByText('Claude 正在回覆…')).toBeInTheDocument()
+})
+
+test('切換分岔；已帶回的分岔只能看', async () => {
+  render(<BranchPanel task={task} events={[]} />)
+  const chip = screen.getByRole('button', { name: /計數存放位置 · 已帶回/ })
+  expect(chip).toHaveAttribute('aria-pressed', 'false')
+  await userEvent.click(chip)
+  expect(useStore.getState().activeBranch.t1).toBe('b1')
+  expect(chip).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.getByText('已帶回主線的結論')).toBeInTheDocument()
+  expect(screen.queryByRole('textbox', { name: '分岔訊息' })).not.toBeInTheDocument()
+})
+
+test('記住的分岔不存在時，改顯示還沒帶回的分岔', () => {
+  useStore.setState({ activeBranch: { t1: 'gone' } })
+  render(<BranchPanel task={task} events={[]} />)
+  expect(screen.getByRole('button', { name: /通知使用者/ })).toHaveAttribute('aria-pressed', 'true')
+})
+
+test('唯讀時不能送出或帶回', () => {
+  render(<BranchPanel task={{ ...task, branches: [open] }} events={talk} readOnly />)
+  expect(screen.queryByRole('textbox', { name: '分岔訊息' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '帶回主線' })).not.toBeInTheDocument()
+})

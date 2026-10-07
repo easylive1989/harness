@@ -11204,61 +11204,273 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 30：分岔面板與釐清畫面
 
 **Files:**
+- Create: `src/renderer/src/lib/useStickToBottom.ts`
 - Create: `src/renderer/src/components/BranchPanel.tsx`
 - Create: `src/renderer/src/components/Composer.tsx`
 - Create: `src/renderer/src/screens/ClarifyScreen.tsx`
 - Modify: `src/renderer/src/screens/TaskScreen.tsx`
-- Test: `tests/renderer/BranchPanel.test.tsx`
+- Test: `tests/renderer/BranchPanel.test.tsx`、`tests/renderer/ClarifyScreen.test.tsx`
 
 **Step 1: 寫失敗測試**
 
 ```tsx
+// tests/renderer/BranchPanel.test.tsx
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, test, vi } from 'vitest'
-vi.mock('@renderer/api', () => ({ call: vi.fn(async () => undefined), onEvent: vi.fn(() => () => {}), errorText: String }))
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(async () => undefined),
+  onEvent: vi.fn(() => () => {}),
+  errorText: String
+}))
 import { call } from '@renderer/api'
 import { BranchPanel } from '@renderer/components/BranchPanel'
-import { useStore } from '@renderer/store'
+import { resetStoreInternals, useStore } from '@renderer/store'
+import { msg } from '@shared/protocol'
+import type { Branch, TimelineEvent } from '@shared/types'
 import { makeTask } from '../fixtures/task'
 
-const task = makeTask({
-  branches: [
-    { id: 'b1', title: '計數存放位置', status: 'concluded', running: false, createdAt: '', conclusion: { decision: '用 Redis', rationale: 'x', deferred: [] } },
-    { id: 'b2', title: '通知使用者', status: 'concluding', running: false, createdAt: '', conclusion: { decision: '寄通知信', rationale: '避免騷擾', deferred: ['重設連結'] } }
-  ]
+const concluded: Branch = {
+  id: 'b1',
+  title: '計數存放位置',
+  status: 'concluded',
+  running: false,
+  createdAt: '',
+  conclusion: { decision: '用 Redis', rationale: 'x', deferred: [] }
+}
+const concluding: Branch = {
+  id: 'b2',
+  title: '通知使用者',
+  fromQuestionId: 'q2',
+  status: 'concluding',
+  running: false,
+  createdAt: '',
+  conclusion: { decision: '寄通知信', rationale: '避免騷擾', deferred: ['重設連結'] }
+}
+const open: Branch = { ...concluding, status: 'open', conclusion: undefined }
+const task = makeTask({ branches: [concluded, concluding] })
+
+const ev = (id: string, over: Partial<TimelineEvent>): TimelineEvent => ({
+  id,
+  ts: '',
+  channel: 'branch:b2',
+  kind: 'user_text',
+  ...over
+})
+const talk = [
+  ev('e1', { text: msg.branchOpen('通知使用者', '') }),
+  ev('e2', { kind: 'assistant_text', text: '會有騷擾的風險。' }),
+  ev('e3', { channel: 'main', kind: 'assistant_text', text: '主線的訊息' })
+]
+
+beforeEach(() => {
+  vi.mocked(call).mockClear()
+  resetStoreInternals()
+  useStore.setState({ activeBranch: { t1: 'b2' }, timelines: { t1: [] }, toast: undefined })
 })
 
-beforeEach(() => { vi.mocked(call).mockClear(); useStore.setState({ activeBranch: { t1: 'b2' }, timelines: { t1: [] } }) })
+test('沒有分岔時顯示說明', () => {
+  useStore.setState({ activeBranch: {} })
+  render(<BranchPanel task={makeTask()} events={[]} />)
+  expect(screen.getByRole('complementary', { name: '分岔討論' })).toHaveTextContent('還沒有分岔')
+})
 
 test('顯示結論預覽，確認後帶回主線', async () => {
   render(<BranchPanel task={task} events={[]} />)
+  expect(screen.getByText('帶回主線的結論（預覽）')).toBeInTheDocument()
   expect(screen.getByText('寄通知信')).toBeInTheDocument()
   expect(screen.getByText(/重設連結/)).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: '確認並帶回主線' }))
   expect(call).toHaveBeenCalledWith('branch:confirm', 't1', 'b2', undefined)
+  await userEvent.click(screen.getByRole('button', { name: '重新整理結論' }))
+  expect(call).toHaveBeenCalledWith('branch:conclude', 't1', 'b2')
 })
 
-test('在分岔中送出訊息', async () => {
-  useStore.setState({ activeBranch: { t1: 'b2' } })
-  render(<BranchPanel task={{ ...task, branches: [{ ...task.branches[1], status: 'open', conclusion: undefined }] }} events={[]} />)
+test('在分岔中送出訊息，Claude 回覆過後可以帶回主線', async () => {
+  render(<BranchPanel task={{ ...task, branches: [open] }} events={talk} />)
+  expect(screen.getByText('開始討論：通知使用者')).toBeInTheDocument()
+  expect(screen.getByText('會有騷擾的風險。')).toBeInTheDocument()
+  expect(screen.queryByText('主線的訊息')).not.toBeInTheDocument()
   await userEvent.type(screen.getByRole('textbox', { name: '分岔訊息' }), '再想想{Enter}')
   expect(call).toHaveBeenCalledWith('tasks:send', 't1', 'branch:b2', '再想想')
+  expect(screen.getByRole('textbox', { name: '分岔訊息' })).toHaveValue('')
   await userEvent.click(screen.getByRole('button', { name: '帶回主線' }))
   expect(call).toHaveBeenCalledWith('branch:conclude', 't1', 'b2')
+})
+
+test('Claude 還沒在分岔回覆前不能帶回主線；執行中停用輸入', () => {
+  const { rerender } = render(
+    <BranchPanel task={{ ...task, branches: [open] }} events={talk.slice(0, 1)} />
+  )
+  expect(screen.getByRole('button', { name: '帶回主線' })).toBeDisabled()
+  rerender(<BranchPanel task={{ ...task, branches: [{ ...open, running: true }] }} events={talk} />)
+  expect(screen.getByRole('textbox', { name: '分岔訊息' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '帶回主線' })).toBeDisabled()
+  expect(screen.getByText('Claude 正在回覆…')).toBeInTheDocument()
+})
+
+test('切換分岔；已帶回的分岔只能看', async () => {
+  render(<BranchPanel task={task} events={[]} />)
+  const chip = screen.getByRole('button', { name: /計數存放位置 · 已帶回/ })
+  expect(chip).toHaveAttribute('aria-pressed', 'false')
+  await userEvent.click(chip)
+  expect(useStore.getState().activeBranch.t1).toBe('b1')
+  expect(chip).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.getByText('已帶回主線的結論')).toBeInTheDocument()
+  expect(screen.queryByRole('textbox', { name: '分岔訊息' })).not.toBeInTheDocument()
+})
+
+test('記住的分岔不存在時，改顯示還沒帶回的分岔', () => {
+  useStore.setState({ activeBranch: { t1: 'gone' } })
+  render(<BranchPanel task={task} events={[]} />)
+  expect(screen.getByRole('button', { name: /通知使用者/ })).toHaveAttribute('aria-pressed', 'true')
+})
+
+test('唯讀時不能送出或帶回', () => {
+  render(<BranchPanel task={{ ...task, branches: [open] }} events={talk} readOnly />)
+  expect(screen.queryByRole('textbox', { name: '分岔訊息' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '帶回主線' })).not.toBeInTheDocument()
+})
+```
+
+```tsx
+// tests/renderer/ClarifyScreen.test.tsx
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { beforeEach, expect, test, vi } from 'vitest'
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(async () => ({ id: 'b1' })),
+  onEvent: vi.fn(() => () => {}),
+  errorText: String
+}))
+import { call } from '@renderer/api'
+import { ClarifyScreen } from '@renderer/screens/ClarifyScreen'
+import { TaskScreen } from '@renderer/screens/TaskScreen'
+import { resetStoreInternals, useStore } from '@renderer/store'
+import type { TimelineEvent } from '@shared/types'
+import { makeTask } from '../fixtures/task'
+
+const events: TimelineEvent[] = [
+  { id: 'e1', ts: '', channel: 'main', kind: 'user_text', text: '加上登入失敗鎖定' },
+  { id: 'e2', ts: '', channel: 'main', kind: 'assistant_text', text: '有幾件事要先確認。' }
+]
+
+beforeEach(() => {
+  vi.mocked(call).mockClear()
+  resetStoreInternals()
+  useStore.setState({ activeBranch: {}, timelines: { t1: events }, toast: undefined })
+})
+
+test('顯示主線時間軸，從輸入框送出訊息', async () => {
+  render(<ClarifyScreen task={makeTask()} nav={null} readOnly={false} onOpenStage={() => {}} />)
+  expect(screen.getByText('加上登入失敗鎖定')).toBeInTheDocument()
+  expect(screen.getByRole('complementary', { name: '分岔討論' })).toBeInTheDocument()
+  const send = screen.getByRole('button', { name: '送出' })
+  expect(send).toBeDisabled()
+  await userEvent.type(screen.getByRole('textbox', { name: '訊息' }), '也要記錄稽核日誌{Enter}')
+  expect(call).toHaveBeenCalledWith('tasks:send', 't1', 'main', '也要記錄稽核日誌')
+  expect(screen.getByRole('textbox', { name: '訊息' })).toHaveValue('')
+})
+
+test('從 Claude 的訊息開分岔並切過去', async () => {
+  render(<ClarifyScreen task={makeTask()} nav={null} readOnly={false} onOpenStage={() => {}} />)
+  await userEvent.click(screen.getByRole('button', { name: '從這則訊息分岔' }))
+  expect(call).toHaveBeenCalledWith('branch:open', 't1', {
+    title: '有幾件事要先確認。',
+    seed: '針對這段內容深入討論：\n有幾件事要先確認。'
+  })
+  expect(useStore.getState().activeBranch.t1).toBe('b1')
+})
+
+test('Claude 執行中不能從訊息分岔，但仍可插話', () => {
+  render(
+    <ClarifyScreen
+      task={makeTask({ runState: 'running' })}
+      nav={null}
+      readOnly={false}
+      onOpenStage={() => {}}
+    />
+  )
+  expect(screen.queryByRole('button', { name: '從這則訊息分岔' })).not.toBeInTheDocument()
+  expect(screen.getByRole('textbox', { name: '訊息' })).toBeEnabled()
+})
+
+test('唯讀時沒有輸入框', () => {
+  render(<ClarifyScreen task={makeTask()} nav={null} readOnly onOpenStage={() => {}} />)
+  expect(screen.queryByRole('textbox', { name: '訊息' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '從這則訊息分岔' })).not.toBeInTheDocument()
+})
+
+test('TaskScreen：釐清中的任務顯示釐清畫面；回看釐清時唯讀', async () => {
+  useStore.setState({ tasks: { t1: makeTask() } })
+  const { unmount } = render(<TaskScreen taskId="t1" />)
+  expect(screen.getByRole('textbox', { name: '訊息' })).toBeInTheDocument()
+  unmount()
+  useStore.setState({ tasks: { t1: makeTask({ status: 'spec_review' }) } })
+  render(<TaskScreen taskId="t1" />)
+  await userEvent.click(screen.getByRole('button', { name: /釐清/ }))
+  expect(screen.getByText('加上登入失敗鎖定')).toBeInTheDocument()
+  expect(screen.queryByRole('textbox', { name: '訊息' })).not.toBeInTheDocument()
+})
+
+test('TaskScreen：已丟棄的任務即使停在釐清也唯讀', () => {
+  useStore.setState({ tasks: { t1: makeTask({ status: 'discarded' }) } })
+  render(<TaskScreen taskId="t1" />)
+  expect(screen.getByText('加上登入失敗鎖定')).toBeInTheDocument()
+  expect(screen.queryByRole('textbox', { name: '訊息' })).not.toBeInTheDocument()
 })
 ```
 
 **Step 2: 確認失敗**
 
-**Step 3: Composer.tsx**
+**Step 3: useStickToBottom.ts 與 Composer.tsx**
+
+對話區內容變多時自動捲到底，使用者往上捲時不打擾（只在 effect 與事件處理裡讀寫 ref；回傳的 ref 解構後直接給 JSX 的 `ref`，react-hooks 7 的 `refs` 規則才不會誤判）。
+
+```ts
+// src/renderer/src/lib/useStickToBottom.ts
+import { type UIEvent, useEffect, useRef } from 'react'
+
+/** 距離底部多少 px 以內算「在底部」 */
+const THRESHOLD = 80
+
+/**
+ * 對話捲動區：內容變多時自動捲到底，但使用者往上捲去看舊訊息時不打擾。
+ * `version` 變了代表內容可能變了（例如事件數、任務的 updatedAt）。
+ */
+export function useStickToBottom<T extends HTMLElement>(version: unknown) {
+  const ref = useRef<T>(null)
+  const stick = useRef(true)
+  useEffect(() => {
+    const el = ref.current
+    if (el && stick.current) el.scrollTop = el.scrollHeight
+  }, [version])
+  const onScroll = (e: UIEvent<T>) => {
+    const el = e.currentTarget
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < THRESHOLD
+  }
+  return { ref, onScroll }
+}
+```
 
 ```tsx
+// src/renderer/src/components/Composer.tsx
 import { type FormEvent, type ReactNode, useState } from 'react'
-import { cx, Icons } from './ui'
+import { Icons } from './ui'
 
-export function Composer({ placeholder, disabled, onSend, extra, label = '訊息' }: {
-  placeholder: string; disabled?: boolean; onSend: (text: string) => void; extra?: ReactNode; label?: string
+/** 畫面底部的圓角輸入列（對照 `StyleB.dc.html` 底部的訊息框） */
+export function Composer({
+  placeholder,
+  disabled,
+  onSend,
+  extra,
+  label = '訊息'
+}: {
+  placeholder: string
+  disabled?: boolean
+  onSend: (text: string) => void
+  extra?: ReactNode
+  label?: string
 }) {
   const [text, setText] = useState('')
   const submit = (e: FormEvent) => {
@@ -11268,15 +11480,27 @@ export function Composer({ placeholder, disabled, onSend, extra, label = '訊息
     setText('')
   }
   return (
-    <form onSubmit={submit} className="flex items-center gap-2 rounded-full bg-fill py-2 pr-2 pl-[18px]">
+    <form
+      onSubmit={submit}
+      className="flex items-center gap-2 rounded-full bg-fill py-2 pr-2 pl-[18px]"
+    >
       <label className="flex flex-1">
         <span className="sr-only">{label}</span>
-        <input aria-label={label} value={text} onChange={(e) => setText(e.target.value)} placeholder={placeholder}
-          className="h-8 flex-1 border-none bg-transparent text-ink outline-none placeholder:text-muted-2" />
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={placeholder}
+          disabled={disabled}
+          className="h-8 flex-1 border-none bg-transparent text-ink outline-none placeholder:text-muted-2"
+        />
       </label>
       {extra}
-      <button type="submit" aria-label="送出" disabled={disabled || !text.trim()}
-        className={cx('flex size-10 items-center justify-center rounded-full bg-brand text-white disabled:opacity-40')}>
+      <button
+        type="submit"
+        aria-label="送出"
+        disabled={disabled || !text.trim()}
+        className="flex size-10 flex-none cursor-pointer items-center justify-center rounded-full bg-brand text-white hover:bg-brand-hover disabled:cursor-default disabled:opacity-40"
+      >
         <Icons.Send />
       </button>
     </form>
@@ -11286,44 +11510,86 @@ export function Composer({ placeholder, disabled, onSend, extra, label = '訊息
 
 **Step 4: BranchPanel.tsx（對照 `StyleB.dc.html` 的 `<aside>`）**
 
+「帶回主線」要等 Claude 在分岔裡回覆過才能按；結論預覽出現後（`concluding`）可以「重新整理結論」或「確認並帶回主線」。
+
 ```tsx
+// src/renderer/src/components/BranchPanel.tsx
 import { type FormEvent, useState } from 'react'
-import type { Task, TimelineEvent } from '@shared/types'
+import type { Branch, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
+import { userTextDisplay } from '../lib/timeline'
+import { useStickToBottom } from '../lib/useStickToBottom'
 import { useStore } from '../store'
 import { Markdown } from './Markdown'
 import { Button, cx, inputClass, Spinner } from './ui'
 
-export function BranchPanel({ task, events, readOnly }: { task: Task; events: TimelineEvent[]; readOnly?: boolean }) {
+function statusText(b: Branch) {
+  if (b.status === 'concluded') return '已帶回'
+  if (b.running) return '討論中'
+  if (b.status === 'concluding') return '待確認'
+  return '進行中'
+}
+
+export function BranchPanel({
+  task,
+  events,
+  readOnly
+}: {
+  task: Task
+  events: TimelineEvent[]
+  readOnly?: boolean
+}) {
   const act = useStore((s) => s.act)
   const setActiveBranch = useStore((s) => s.setActiveBranch)
   const picked = useStore((s) => s.activeBranch[task.id])
   const [text, setText] = useState('')
-  const activeId = picked ?? task.branches.find((b) => b.status !== 'concluded')?.id ?? task.branches.at(-1)?.id
-  const b = task.branches.find((x) => x.id === activeId)
-  const channel = b ? (`branch:${b.id}` as const) : undefined
-  const list = channel ? events.filter((e) => e.channel === channel) : []
+  // 使用者選的分岔不存在（例如開分岔失敗被撤回）時，改顯示還沒帶回的分岔或最後一個
+  const b =
+    task.branches.find((x) => x.id === picked) ??
+    task.branches.find((x) => x.status !== 'concluded') ??
+    task.branches.at(-1)
+  const list = b ? events.filter((e) => e.channel === `branch:${b.id}`) : []
+  const replied = list.some((e) => e.kind === 'assistant_text')
+  const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>(
+    `${b?.id}:${list.length}:${task.updatedAt}`
+  )
+  const fromIndex = b?.fromQuestionId
+    ? task.questions.findIndex((q) => q.id === b.fromQuestionId) + 1
+    : 0
 
   const send = (e: FormEvent) => {
     e.preventDefault()
-    if (!b || !text.trim()) return
     const t = text.trim()
+    if (!b || !t || b.running) return
     setText('')
     void act(() => call('tasks:send', task.id, `branch:${b.id}`, t))
   }
 
   return (
-    <aside aria-label="分岔討論" className="flex w-[340px] flex-none flex-col rounded-2xl bg-surface shadow-card">
+    <aside
+      aria-label="分岔討論"
+      className="flex w-[340px] flex-none flex-col rounded-2xl bg-surface shadow-card"
+    >
       <div className="flex flex-col gap-2.5 px-5 pt-[18px] pb-3">
         <span className="text-[15px] font-bold">分岔討論</span>
         {task.branches.length === 0 ? (
-          <span className="text-[13px] text-muted">還沒有分岔。在 Claude 的訊息旁或問題卡片上按「分岔」，就能另開一段討論，結論再帶回主線。</span>
+          <span className="text-[13px] text-muted">
+            還沒有分岔。在 Claude 的訊息旁或問題卡片上按「分岔」，就能另開一段討論，結論再帶回主線。
+          </span>
         ) : (
           <div className="flex flex-wrap gap-1.5 text-xs">
             {task.branches.map((x) => (
-              <button key={x.id} type="button" onClick={() => setActiveBranch(task.id, x.id)}
-                className={cx('rounded-full px-2.5 py-1', x.id === activeId ? 'bg-brand-soft font-medium text-brand-ink' : 'bg-fill text-muted')}>
-                {x.title} · {x.status === 'concluded' ? '已帶回' : x.running ? '討論中' : '進行中'}
+              <button
+                key={x.id}
+                type="button"
+                aria-pressed={x.id === b?.id}
+                onClick={() => setActiveBranch(task.id, x.id)}
+                className={cx(
+                  'cursor-pointer rounded-full px-2.5 py-1',
+                  x.id === b?.id ? 'bg-brand-soft font-medium text-brand-ink' : 'bg-fill text-muted'
+                )}
+              >
+                {x.title} · {statusText(x)}
               </button>
             ))}
           </div>
@@ -11332,19 +11598,52 @@ export function BranchPanel({ task, events, readOnly }: { task: Task; events: Ti
 
       {b && (
         <>
-          <div className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-5 py-2 text-[13px]">
-            {b.fromQuestionId && <span className="text-xs text-muted-2">從問題 {task.questions.findIndex((q) => q.id === b.fromQuestionId) + 1} 分出，帶著主線的上下文</span>}
-            {list.map((e) => e.kind === 'user_text'
-              ? <div key={e.id} className="max-w-[88%] self-end whitespace-pre-wrap rounded-[16px_16px_6px_16px] bg-fill px-3.5 py-2.5">{e.text}</div>
-              : e.kind === 'assistant_text' ? <Markdown key={e.id} text={e.text ?? ''} />
-              : null)}
-            {b.running && <span className="flex items-center gap-2 text-muted"><Spinner />Claude 正在回覆…</span>}
+          <div
+            ref={scrollRef}
+            onScroll={onScroll}
+            className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-5 py-2 text-[13px]"
+          >
+            {fromIndex > 0 && (
+              <span className="text-xs text-muted-2">
+                從問題 {fromIndex} 分出，帶著主線的上下文
+              </span>
+            )}
+            {list.map((e) =>
+              e.kind === 'user_text' ? (
+                <div
+                  key={e.id}
+                  className="max-w-[88%] self-end rounded-[16px_16px_6px_16px] bg-fill px-3.5 py-2.5 whitespace-pre-wrap"
+                >
+                  {userTextDisplay(e.text ?? '')}
+                </div>
+              ) : e.kind === 'assistant_text' ? (
+                <Markdown key={e.id} text={e.text ?? ''} />
+              ) : e.kind === 'system' || e.kind === 'tool_result' ? (
+                <div key={e.id} className="text-xs break-all text-muted">
+                  {e.text}
+                </div>
+              ) : null
+            )}
+            {b.running && (
+              <span className="flex items-center gap-2 text-muted">
+                <Spinner />
+                Claude 正在回覆…
+              </span>
+            )}
             {b.conclusion && (
               <div className="flex flex-col gap-1 rounded-[14px] bg-decision px-3.5 py-3">
-                <span className="text-xs font-medium text-decision-ink">{b.status === 'concluded' ? '已帶回主線的結論' : '帶回主線的結論（預覽）'}</span>
+                <span className="text-xs font-medium text-decision-ink">
+                  {b.status === 'concluded' ? '已帶回主線的結論' : '帶回主線的結論（預覽）'}
+                </span>
                 <span>{b.conclusion.decision}</span>
-                <span className="text-decision-body">原因：{b.conclusion.rationale}</span>
-                {b.conclusion.deferred.length > 0 && <span className="text-decision-body">延後：{b.conclusion.deferred.join('；')}</span>}
+                {b.conclusion.rationale && (
+                  <span className="text-decision-body">原因：{b.conclusion.rationale}</span>
+                )}
+                {b.conclusion.deferred.length > 0 && (
+                  <span className="text-decision-body">
+                    延後：{b.conclusion.deferred.join('；')}
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -11354,14 +11653,41 @@ export function BranchPanel({ task, events, readOnly }: { task: Task; events: Ti
               <form onSubmit={send} className="flex">
                 <label className="flex flex-1">
                   <span className="sr-only">分岔訊息</span>
-                  <input aria-label="分岔訊息" value={text} onChange={(e) => setText(e.target.value)} disabled={b.running}
-                    placeholder="繼續在分岔裡討論…" className={cx(inputClass, 'flex-1')} />
+                  <input
+                    value={text}
+                    onChange={(e) => setText(e.target.value)}
+                    disabled={b.running}
+                    placeholder="繼續在分岔裡討論…"
+                    className={cx(inputClass, 'flex-1')}
+                  />
                 </label>
               </form>
               {b.status === 'concluding' ? (
-                <Button variant="dark" disabled={b.running} onClick={() => void act(() => call('branch:confirm', task.id, b.id, undefined))}>確認並帶回主線</Button>
+                // 看過預覽後可能又討論了幾句：可以請 Claude 重新整理結論
+                <div className="flex gap-2">
+                  <Button
+                    disabled={b.running}
+                    onClick={() => void act(() => call('branch:conclude', task.id, b.id))}
+                  >
+                    重新整理結論
+                  </Button>
+                  <Button
+                    variant="dark"
+                    className="flex-1"
+                    disabled={b.running}
+                    onClick={() => void act(() => call('branch:confirm', task.id, b.id, undefined))}
+                  >
+                    確認並帶回主線
+                  </Button>
+                </div>
               ) : (
-                <Button variant="dark" disabled={b.running || list.length < 2} onClick={() => void act(() => call('branch:conclude', task.id, b.id))}>帶回主線</Button>
+                <Button
+                  variant="dark"
+                  disabled={b.running || !replied}
+                  onClick={() => void act(() => call('branch:conclude', task.id, b.id))}
+                >
+                  帶回主線
+                </Button>
               )}
             </div>
           )}
@@ -11375,22 +11701,50 @@ export function BranchPanel({ task, events, readOnly }: { task: Task; events: Ti
 **Step 5: ClarifyScreen.tsx（對照 `StyleB.dc.html` 的 `<main>`）**
 
 ```tsx
+// src/renderer/src/screens/ClarifyScreen.tsx
 import type { ReactNode } from 'react'
 import type { Task } from '@shared/types'
 import { call } from '../api'
 import { BranchPanel } from '../components/BranchPanel'
 import { Composer } from '../components/Composer'
-import { RunStatus, Timeline, useTimeline } from '../components/Timeline'
+import { RunStatus, Timeline } from '../components/Timeline'
+import { isBusy } from '../lib/stage'
+import { useTimeline } from '../lib/timeline'
+import { useStickToBottom } from '../lib/useStickToBottom'
 import { useStore } from '../store'
 
-export function ClarifyScreen({ task, nav, readOnly, onOpenStage }: { task: Task; nav: ReactNode; readOnly: boolean; onOpenStage: (s: 'spec' | 'report') => void }) {
+export function ClarifyScreen({
+  task,
+  nav,
+  readOnly,
+  onOpenStage
+}: {
+  task: Task
+  nav: ReactNode
+  readOnly: boolean
+  onOpenStage: (s: 'spec' | 'report') => void
+}) {
   const act = useStore((s) => s.act)
   const setActiveBranch = useStore((s) => s.setActiveBranch)
   const events = useTimeline(task.id)
-  const busy = task.runState === 'running'
+  // 卡片內容（反問回覆等）只改 task 不加事件，所以也看 updatedAt
+  const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>(
+    `${events.length}:${task.updatedAt}`
+  )
+  // 主線執行中不能分岔（主程序會拒絕），但可以插話
+  const busy = isBusy(task)
   const branchFrom = async (text: string) => {
-    const title = text.replace(/\s+/g, ' ').slice(0, 24)
-    const b = await act(() => call('branch:open', task.id, { title, seed: `針對這段內容深入討論：\n${text.slice(0, 600)}` }))
+    const title = text
+      .replace(/[`*_#>]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 24)
+    const b = await act(() =>
+      call('branch:open', task.id, {
+        title,
+        seed: `針對這段內容深入討論：\n${text.slice(0, 600)}`
+      })
+    )
     if (b) setActiveBranch(task.id, b.id)
   }
   return (
@@ -11400,17 +11754,30 @@ export function ClarifyScreen({ task, nav, readOnly, onOpenStage }: { task: Task
           <span className="text-lg font-bold">{task.title}</span>
           {nav}
         </div>
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-7 pt-2 pb-6">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto px-7 pt-2 pb-6"
+        >
           <div className="mx-auto flex w-full max-w-[800px] flex-col gap-5">
-            <Timeline task={task} channel="main" events={events} readOnly={readOnly}
-              onBranchFrom={busy ? undefined : (t) => void branchFrom(t)} onOpenStage={onOpenStage} />
+            <Timeline
+              task={task}
+              channel="main"
+              events={events}
+              readOnly={readOnly}
+              onBranchFrom={busy ? undefined : (t) => void branchFrom(t)}
+              onOpenStage={onOpenStage}
+            />
             <RunStatus task={task} onResume={() => void act(() => call('run:resume', task.id))} />
           </div>
         </div>
         {!readOnly && (
           <div className="px-7 pb-[22px]">
             <div className="mx-auto max-w-[800px]">
-              <Composer placeholder="補充需求或直接回答…" onSend={(t) => void act(() => call('tasks:send', task.id, 'main', t))} />
+              <Composer
+                placeholder="補充需求或直接回答…"
+                onSend={(t) => void act(() => call('tasks:send', task.id, 'main', t))}
+              />
             </div>
           </div>
         )}
@@ -11423,16 +11790,41 @@ export function ClarifyScreen({ task, nav, readOnly, onOpenStage }: { task: Task
 
 **Step 6: TaskScreen 切換到 ClarifyScreen**
 
-把 TaskScreen 的 return 改為：
-
 ```tsx
+// src/renderer/src/screens/TaskScreen.tsx
+import { useState } from 'react'
+import { StageNav } from '../components/StageNav'
+import { currentStage, type Stage } from '../lib/stage'
+import { useStore } from '../store'
+import { ClarifyScreen } from './ClarifyScreen'
+
+export function TaskScreen({ taskId }: { taskId: string }) {
+  const task = useStore((s) => s.tasks[taskId])
+  // 使用者回看的階段，只對選它時的任務與狀態有效；換任務或狀態前進就回到目前階段
+  const [picked, setPicked] = useState<{ key: string; stage: Stage } | null>(null)
+  if (!task) return null
+  const key = `${taskId}:${task.status}`
+  const current = currentStage(task)
+  const shown = picked?.key === key ? picked.stage : current
   const openStage = (s: Stage) => setPicked(s === current ? null : { key, stage: s })
-  if (shown === 'clarify') return <ClarifyScreen task={task} nav={nav} readOnly={current !== 'clarify'} onOpenStage={openStage} />
+  const nav = <StageNav task={task} shown={shown} onSelect={openStage} />
+  // 已丟棄的任務停在哪個階段都只能看
+  const ended = task.status === 'discarded' || task.status === 'done'
+  if (shown === 'clarify')
+    return (
+      <ClarifyScreen
+        task={task}
+        nav={nav}
+        readOnly={ended || current !== 'clarify'}
+        onOpenStage={openStage}
+      />
+    )
   // Task 31–33 補上其他階段
   return <ClarifyScreen task={task} nav={nav} readOnly onOpenStage={openStage} />
+}
 ```
 
-**Step 7: 確認通過** — `npx vitest run tests/renderer` 全部通過；`npm run typecheck` PASS
+**Step 7: 確認通過** — `npx vitest run tests/renderer` 全部通過；`npm run typecheck`、`npm run lint` PASS
 
 **Step 8: 手動驗證（真實 Claude）**
 
@@ -11441,7 +11833,7 @@ export function ClarifyScreen({ task, nav, readOnly, onOpenStage }: { task: Task
 **Step 9: Commit**
 
 ```bash
-git add src/renderer/src tests/renderer/BranchPanel.test.tsx
+git add src/renderer/src tests/renderer/BranchPanel.test.tsx tests/renderer/ClarifyScreen.test.tsx docs/plans
 git commit -m "feat(ui): add clarify screen with branch panel
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
