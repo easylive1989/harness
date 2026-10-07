@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AppEvent } from '@shared/ipc'
-import { msgDisplay, startsImplementation } from '@shared/protocol'
+import { IMPLEMENT_START_REF, msgDisplay, startsImplementation } from '@shared/protocol'
 import { Repository } from '../../src/main/store/repository'
 import { Store } from '../../src/main/store/store'
 import { TaskManager, type TaskManagerDeps } from '../../src/main/tasks/taskManager'
@@ -109,6 +109,22 @@ describe('TaskManager：建立任務與釐清', () => {
     })
     expect(claude.calls[1].prompt).toBe('[answer question_id=q1 option=acct_ip] 帳號 + IP')
     expect(claude.calls[1].options.resume).toBe('sess-0')
+  })
+
+  test('Claude 重新提問已回答的問題時，時間軸再出現一次問題卡片', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser(askQ1)
+    }
+    const id = await create()
+    claude.script = async ({ call, sink }) => {
+      if (call === 1) await sink.askUser({ ...askQ1, question: '計數單位要再確認一次' })
+    }
+    await tm.answerQuestion(id, 'q1', { optionId: 'acct_ip' })
+    await tm.whenIdle(id)
+    expect(tm.get(id).questions[0]).toMatchObject({ status: 'open', text: '計數單位要再確認一次' })
+    const questions = (await tm.timeline(id)).filter((e) => e.kind === 'question')
+    expect(questions.map((e) => e.ref)).toEqual(['q1', 'q1'])
   })
 
   test('反問：回答文字進入卡片，Claude 以同一 question_id 更新卡片', async () => {
@@ -285,6 +301,16 @@ const spec = {
   acceptance: ['測試通過']
 }
 const signalOf = () => ({ signal: new AbortController().signal }) as never
+/** canUseTool 的 options，帶 SDK 給的 toolUseID */
+const toolOpts = (toolUseID: string) =>
+  ({ signal: new AbortController().signal, toolUseID }) as never
+const toolResult = (toolUseId: string, text: string) => ({
+  type: 'user',
+  parent_tool_use_id: null,
+  message: {
+    content: [{ type: 'tool_result', tool_use_id: toolUseId, is_error: true, content: text }]
+  }
+})
 
 describe('TaskManager：規格與實作', () => {
   test('propose_spec → spec_review；要求修改回到 clarifying；核准進入 implementing', async () => {
@@ -312,10 +338,14 @@ describe('TaskManager：規格與實作', () => {
     await tm.whenIdle(id)
     expect(claude.calls.at(-1)!.prompt).toContain('[spec_approved]')
     expect(tm.get(id).status).toBe('implementing')
-    // 實作畫面靠這則訊息找出實作從哪裡開始
+    // 實作畫面靠這則訊息的標記找出實作從哪裡開始；要求修改不是起點
     const userTexts = (await tm.timeline(id)).filter((e) => e.kind === 'user_text')
-    expect(userTexts.map((e) => e.text)).toContain(msgDisplay.specFeedback('上限改 10 次'))
-    expect(startsImplementation(userTexts.at(-1)!.text!)).toBe(true)
+    const feedbackEntry = userTexts.find((e) => e.text === msgDisplay.specFeedback('上限改 10 次'))!
+    expect(startsImplementation(feedbackEntry)).toBe(false)
+    expect(userTexts.at(-1)).toMatchObject({
+      text: msgDisplay.specApproved,
+      ref: IMPLEMENT_START_REF
+    })
     expect(tm.get(id).plan).toEqual([{ id: 's1', title: '寫程式', status: 'running' }])
     await expect(tm.approveSpec(id)).rejects.toThrow()
   })
@@ -328,12 +358,17 @@ describe('TaskManager：規格與實作', () => {
     const id = await create()
     let result: PermissionResult | null | undefined
     claude.script = async ({ options }) => {
-      result = await options.canUseTool!('Bash', { command: 'npm test -- auth' }, signalOf())
+      result = await options.canUseTool!('Bash', { command: 'npm test -- auth' }, toolOpts('tu1'))
     }
     await tm.approveSpec(id)
     await until(() => !!tm.get(id).pendingPermission)
     const req = tm.get(id).pendingPermission!
-    expect(req).toMatchObject({ toolName: 'Bash', suggestedPattern: 'npm test *' })
+    expect(req).toMatchObject({
+      toolName: 'Bash',
+      suggestedPattern: 'npm test *',
+      toolUseId: 'tu1',
+      channel: 'main'
+    })
     expect(tm.get(id).runState).toBe('waiting_permission')
     await tm.resolvePermission(id, req.id, { allow: true, rememberPattern: 'npm test *' })
     await tm.whenIdle(id)
@@ -410,6 +445,7 @@ describe('TaskManager：規格與實作', () => {
     }
     await tm.openBranch(id, { title: '查資料' })
     await until(() => !!tm.get(id).pendingPermission)
+    expect(tm.get(id).pendingPermission!.channel).toBe('branch:b1')
     expect(tm.get(id).runState).toBe('idle')
     expect(tm.get(id).branches[0].running).toBe(true)
     await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: true })
@@ -417,6 +453,30 @@ describe('TaskManager：規格與實作', () => {
     expect(result?.behavior).toBe('allow')
     expect(tm.get(id)).toMatchObject({ runState: 'idle', approvedCommands: [] })
     expect(tm.get(id).branches[0].running).toBe(false)
+  })
+
+  test('使用者拒絕的工具，時間軸上的工具結果標成已拒絕', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    claude.script = async ({ options }) => {
+      await options.canUseTool!('Bash', { command: 'rm -rf dist' }, toolOpts('tu-deny'))
+      return [toolResult('tu-deny', '先不要刪'), toolResult('tu-fail', 'exit 1')]
+    }
+    await tm.approveSpec(id)
+    await until(() => !!tm.get(id).pendingPermission)
+    await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, {
+      allow: false,
+      message: '先不要刪'
+    })
+    await tm.whenIdle(id)
+    const results = (await tm.timeline(id)).filter((e) => e.kind === 'tool_result')
+    expect(results.map((e) => [e.tool?.id, e.tool?.denied])).toEqual([
+      ['tu-deny', true],
+      ['tu-fail', undefined]
+    ])
   })
 
   test('執行中插話會送進同一輪', async () => {
@@ -542,10 +602,28 @@ describe('TaskManager：報告與收尾', () => {
     await tm.whenIdle(id)
     expect(claude.calls.at(-1)!.prompt).toBe('[report_feedback] - (diff:a.ts:3) 改常數')
     const feedback = (await tm.timeline(id)).filter((e) => e.kind === 'user_text').at(-1)!
-    expect(feedback.text).toBe(msgDisplay.reportFeedback(1, false))
-    expect(startsImplementation(feedback.text!)).toBe(true)
+    expect(feedback).toMatchObject({
+      text: msgDisplay.reportFeedback(1, false),
+      ref: IMPLEMENT_START_REF
+    })
     expect(tm.get(id).reportVersions).toEqual([1, 2])
     expect(tm.get(id).status).toBe('reviewing')
+  })
+
+  test('只有整體意見的回饋顯示「送出整體意見」', async () => {
+    const { tm, claude, id } = await toImplementing()
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    claude.script = async () => []
+    await tm.submitReportFeedback(id, [], '命名再一致一點')
+    await tm.whenIdle(id)
+    expect((await tm.timeline(id)).filter((e) => e.kind === 'user_text').at(-1)).toMatchObject({
+      text: '送出整體意見',
+      ref: IMPLEMENT_START_REF
+    })
   })
 
   test('開 PR 與合併都會結束任務', async () => {
@@ -826,6 +904,7 @@ describe('TaskManager：狀態一致性', () => {
         pendingPermission: {
           id: 'p1',
           taskId: 'x',
+          channel: 'main',
           toolName: 'Bash',
           input: { command: 'ls' },
           createdAt: 'x'

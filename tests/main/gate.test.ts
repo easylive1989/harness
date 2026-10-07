@@ -219,6 +219,19 @@ describe('PermissionGate', () => {
     expect(ctx.onApproved).toHaveBeenCalledWith('npm test -- auth', 'npm test *')
   })
 
+  test('核准請求帶上 SDK 的 toolUseID（UI 用來對應時間軸上的工具呼叫）', async () => {
+    const { ctx } = setup('implement')
+    const gate = createPermissionGate(ctx)
+    await gate('Bash', { command: 'npm run build' }, {
+      signal: new AbortController().signal,
+      toolUseID: 'tu1'
+    } as never)
+    expect(ctx.requestApproval).toHaveBeenCalledWith(
+      expect.objectContaining({ toolName: 'Bash', toolUseId: 'tu1' }),
+      expect.anything()
+    )
+  })
+
   test('使用者拒絕時帶回說明', async () => {
     const { call } = setup('implement', { allow: false, message: '先不要跑' } as never)
     expect(await call('Bash', { command: 'npm run build' })).toEqual({

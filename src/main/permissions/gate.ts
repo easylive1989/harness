@@ -15,6 +15,8 @@ export interface ApprovalRequest {
   toolName: string
   input: Record<string, unknown>
   suggestedPattern?: string
+  /** SDK 的 toolUseID：UI 用來對應時間軸上的工具呼叫 */
+  toolUseId?: string
 }
 
 export interface GateContext {
@@ -204,14 +206,14 @@ const deny = (message: string): PermissionResult => ({ behavior: 'deny', message
 
 /** canUseTool：套用規則，需要核准時詢問使用者 */
 export function createPermissionGate(ctx: GateContext): PermissionGate {
-  return async (toolName, input, { signal, mcpServer }) => {
+  return async (toolName, input, { signal, mcpServer, toolUseID }) => {
     if (signal.aborted) return deny('已取消')
     const e = evaluateTool(toolName, input, ctx, { mcpServer })
     if (e.decision === 'allow') return allow(input)
     if (e.decision === 'deny') return deny(e.message ?? `Harness 不允許使用 ${toolName}`)
 
     const d = await ctx.requestApproval(
-      { toolName, input, suggestedPattern: e.suggestedPattern },
+      { toolName, input, suggestedPattern: e.suggestedPattern, toolUseId: toolUseID },
       signal
     )
     if (!d.allow) return deny(d.message?.trim() || '使用者拒絕了這個操作')

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { Options } from '@anthropic-ai/claude-agent-sdk'
 import type { AppEvent, CreateTaskInput } from '@shared/ipc'
-import { msg, msgDisplay } from '@shared/protocol'
+import { IMPLEMENT_START_REF, msg, msgDisplay } from '@shared/protocol'
 import type { ReportInput } from '@shared/report'
 import type {
   Branch,
@@ -111,6 +111,8 @@ export class TaskManager {
   private turnLocks = new Map<string, Promise<unknown>>()
   /** 等待使用者核准的請求，依提出順序；UI 一次顯示最早的一個 */
   private permissionWaiters = new Map<string, PermissionWaiter>()
+  /** 使用者拒絕過的 tool_use id：之後的工具結果在時間軸上標成「已拒絕」而不是失敗 */
+  private deniedToolUses = new Set<string>()
   /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
   /** 報告整理中（邏輯狀態）：進入 reviewing 的同一步就清除 */
@@ -334,20 +336,24 @@ export class TaskManager {
 
   /**
    * 送出使用者訊息：該 channel 有進行中的執行就插話進去，否則以 resume 開新一輪。
-   * silent 不寫入 user_text（例如回答卡片、反問，UI 另有呈現）；display 是時間軸上顯示的文字；
-   * entries 是訊息被接受後要一起寫入的時間軸項目。訊息沒送出時不寫入任何時間軸。
+   * silent 不寫入 user_text（例如回答卡片、反問，UI 另有呈現）；display 是時間軸上顯示的文字，
+   * ref 是 user_text 的標記（例如 IMPLEMENT_START_REF）；entries 是訊息被接受後要一起寫入的時間軸項目。
+   * 訊息沒送出時不寫入任何時間軸。
    */
   async send(
     taskId: string,
     channel: Channel,
     text: string,
-    opts: { display?: string; silent?: boolean; entries?: TimelineEntry[] } = {}
+    opts: { display?: string; ref?: string; silent?: boolean; entries?: TimelineEntry[] } = {}
   ) {
     this.assertCanSend(taskId, channel)
-    const entries: TimelineEntry[] = [
-      ...(opts.silent ? [] : [{ channel, kind: 'user_text' as const, text: opts.display ?? text }]),
-      ...(opts.entries ?? [])
-    ]
+    const userText: TimelineEntry = {
+      channel,
+      kind: 'user_text',
+      text: opts.display ?? text,
+      ...(opts.ref ? { ref: opts.ref } : {})
+    }
+    const entries: TimelineEntry[] = [...(opts.silent ? [] : [userText]), ...(opts.entries ?? [])]
     const key = runKey(taskId, channel)
     await this.chainOn(this.turnLocks, key, async () => {
       // 排隊等 lock 的期間任務可能已開始收尾或整理報告
@@ -551,16 +557,18 @@ export class TaskManager {
           })
         }
         return
-      case 'tool_result':
+      case 'tool_result': {
+        const denied = this.deniedToolUses.delete(e.id)
         if (e.isError) {
           await this.addTimeline(taskId, {
             channel,
             kind: 'tool_result',
             text: e.text.slice(0, 2000),
-            tool: { id: e.id, name: '', isError: true }
+            tool: { id: e.id, name: '', isError: true, ...(denied ? { denied: true } : {}) }
           })
         }
         return
+      }
       case 'turn_end':
         // 使用者停止造成的結束（interrupted）不算錯誤
         if (!e.ok && !e.interrupted) {
@@ -581,7 +589,8 @@ export class TaskManager {
       askUser: (a) =>
         this.enqueue(taskId, async () => {
           if (this.pendingCounter.get(taskId) === a.question_id) this.pendingCounter.delete(taskId)
-          let created = false
+          // 新問題，或重新提問已回答過的問題：時間軸上依提問順序再放一張卡片
+          let added = false
           await this.update(taskId, (t) => {
             const fields = {
               text: a.question,
@@ -591,9 +600,11 @@ export class TaskManager {
               context: a.context
             }
             const q = t.questions.find((x) => x.id === a.question_id)
-            if (q) Object.assign(q, fields, { status: 'open' as const, answer: undefined })
-            else {
-              created = true
+            if (q) {
+              added = q.status === 'answered'
+              Object.assign(q, fields, { status: 'open' as const, answer: undefined })
+            } else {
+              added = true
               t.questions.push({
                 id: a.question_id,
                 ...fields,
@@ -603,7 +614,7 @@ export class TaskManager {
               })
             }
           })
-          if (created)
+          if (added)
             await this.addTimeline(taskId, { channel, kind: 'question', ref: a.question_id })
         }),
       proposeSpec: (a) =>
@@ -834,7 +845,10 @@ export class TaskManager {
 
   approveSpec(taskId: string) {
     return this.transitionAndSend(taskId, 'SPEC_APPROVED', () =>
-      this.send(taskId, 'main', msg.specApproved(), { display: msgDisplay.specApproved })
+      this.send(taskId, 'main', msg.specApproved(), {
+        display: msgDisplay.specApproved,
+        ref: IMPLEMENT_START_REF
+      })
     )
   }
 
@@ -892,6 +906,8 @@ export class TaskManager {
         request: {
           id,
           taskId,
+          channel,
+          toolUseId: req.toolUseId,
           toolName: req.toolName,
           input: req.input,
           suggestedPattern: req.suggestedPattern,
@@ -907,6 +923,7 @@ export class TaskManager {
   async resolvePermission(taskId: string, requestId: string, decision: PermissionDecision) {
     const w = this.permissionWaiters.get(requestId)
     if (!w || w.taskId !== taskId) throw new Error('這個核准請求已經失效')
+    if (!decision.allow && w.request.toolUseId) this.deniedToolUses.add(w.request.toolUseId)
     w.resolve(decision)
   }
 
@@ -1054,7 +1071,8 @@ export class TaskManager {
     if (!items.length && !note) throw new Error('請至少留一則回饋')
     await this.transitionAndSend(taskId, 'REPORT_FEEDBACK', () =>
       this.send(taskId, 'main', msg.reportFeedback(items, note), {
-        display: msgDisplay.reportFeedback(items.length, !!note)
+        display: msgDisplay.reportFeedback(items.length, !!note),
+        ref: IMPLEMENT_START_REF
       })
     )
   }

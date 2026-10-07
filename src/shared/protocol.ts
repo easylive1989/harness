@@ -1,5 +1,5 @@
 // src/shared/protocol.ts
-import type { BranchConclusion, FeedbackItem } from './types'
+import type { BranchConclusion, FeedbackItem, TimelineEvent } from './types'
 
 export interface Tagged {
   tag: string
@@ -50,20 +50,26 @@ export const msg = {
   resume: () => tag('resume', {}, '上一次執行被中斷，請從中斷的地方繼續。')
 }
 
-/**
- * 上面幾則訊息在時間軸上給人看的文字（主程序寫入 user_text 時用）。
- * 實作畫面靠 startsImplementation 從時間軸找出這一段實作從哪裡開始，兩邊共用這裡的定義。
- */
+/** 上面幾則訊息在時間軸上給人看的文字（主程序寫入 user_text 時用） */
 export const msgDisplay = {
   specApproved: '核准規格，開始實作',
   specFeedback: (text: string) => `要求修改規格：${text}`,
   reportFeedback: (count: number, withOverall: boolean) =>
-    `送出 ${count} 則報告回饋${withOverall ? '與整體意見' : ''}`,
+    count ? `送出 ${count} 則報告回饋${withOverall ? '與整體意見' : ''}` : '送出整體意見',
   resume: '繼續執行'
 }
 
-/** 時間軸上的使用者訊息是否標記一段實作的開始（核准規格、送出報告回饋） */
-export function startsImplementation(text: string): boolean {
+/** 核准規格、送出報告回饋寫入的 user_text 帶這個 ref：實作畫面從最後一個標記開始顯示 */
+export const IMPLEMENT_START_REF = 'implement_start'
+
+/**
+ * 時間軸事件是否標記一段實作的開始。看 ref，使用者打出一樣的字也不會被誤認；
+ * 沒有 ref 的舊時間軸（加上標記之前寫入的）才用顯示文字判斷。
+ */
+export function startsImplementation(e: Pick<TimelineEvent, 'kind' | 'text' | 'ref'>): boolean {
+  if (e.kind !== 'user_text') return false
+  if (e.ref !== undefined) return e.ref === IMPLEMENT_START_REF
+  const text = e.text ?? ''
   return text === msgDisplay.specApproved || /^送出 \d+ 則報告回饋(與整體意見)?$/.test(text)
 }
 

@@ -17,6 +17,7 @@ import { makeTask } from '../fixtures/task'
 const req: PermissionRequest = {
   id: 'p1',
   taskId: 't1',
+  channel: 'main',
   toolName: 'Bash',
   input: { command: 'npm test -- auth', description: '跑 auth 測試' },
   suggestedPattern: 'npm test *',

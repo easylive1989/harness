@@ -229,6 +229,7 @@ test('回看規格時有等待中的核准請求也會顯示', () => {
       pendingPermission: {
         id: 'p1',
         taskId: 't1',
+        channel: 'main',
         toolName: 'Bash',
         input: { command: 'npm test' },
         suggestedPattern: 'npm test *',

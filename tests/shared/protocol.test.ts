@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'vitest'
-import { msg, msgDisplay, parseTagged, startsImplementation } from '@shared/protocol'
+import {
+  IMPLEMENT_START_REF,
+  msg,
+  msgDisplay,
+  parseTagged,
+  startsImplementation
+} from '@shared/protocol'
 
 describe('protocol', () => {
   test('answer 含選項與補充文字', () => {
@@ -46,16 +52,30 @@ describe('protocol', () => {
 })
 
 describe('msgDisplay / startsImplementation', () => {
-  test('核准規格與送出報告回饋標記一段實作的開始', () => {
-    expect(startsImplementation(msgDisplay.specApproved)).toBe(true)
-    expect(startsImplementation(msgDisplay.reportFeedback(3, false))).toBe(true)
-    expect(startsImplementation(msgDisplay.reportFeedback(0, true))).toBe(true)
+  const userText = (text: string, ref?: string) => ({ kind: 'user_text' as const, text, ref })
+
+  test('核准規格與送出報告回饋的訊息帶著實作起點標記', () => {
+    expect(startsImplementation(userText(msgDisplay.specApproved, IMPLEMENT_START_REF))).toBe(true)
+    expect(startsImplementation(userText('任何文字', IMPLEMENT_START_REF))).toBe(true)
+    expect(startsImplementation({ kind: 'system', text: '', ref: IMPLEMENT_START_REF })).toBe(false)
   })
 
-  test('其他訊息不算', () => {
-    expect(startsImplementation(msgDisplay.resume)).toBe(false)
-    expect(startsImplementation(msgDisplay.specFeedback('上限改 10 次'))).toBe(false)
-    expect(startsImplementation('核准規格之前想再問一下')).toBe(false)
-    expect(startsImplementation('送出 3 則報告回饋，然後呢？')).toBe(false)
+  test('只看文字不算：使用者打出一樣的字不會被當成起點', () => {
+    expect(startsImplementation(userText(msgDisplay.specApproved, 'other'))).toBe(false)
+    expect(startsImplementation(userText('核准規格之前想再問一下'))).toBe(false)
+    expect(startsImplementation(userText('送出 3 則報告回饋，然後呢？'))).toBe(false)
+    expect(startsImplementation(userText(msgDisplay.resume))).toBe(false)
+  })
+
+  test('沒有標記的舊時間軸才用文字判斷', () => {
+    expect(startsImplementation(userText(msgDisplay.specApproved))).toBe(true)
+    expect(startsImplementation(userText('送出 3 則報告回饋'))).toBe(true)
+    expect(startsImplementation(userText('送出 0 則報告回饋與整體意見'))).toBe(true)
+  })
+
+  test('報告回饋的顯示文字；只有整體意見時不說 0 則', () => {
+    expect(msgDisplay.reportFeedback(3, false)).toBe('送出 3 則報告回饋')
+    expect(msgDisplay.reportFeedback(2, true)).toBe('送出 2 則報告回饋與整體意見')
+    expect(msgDisplay.reportFeedback(0, true)).toBe('送出整體意見')
   })
 })

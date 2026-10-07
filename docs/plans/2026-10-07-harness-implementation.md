@@ -356,6 +356,10 @@ export interface Branch {
 export interface PermissionRequest {
   id: string
   taskId: string
+  /** 提出請求的執行（主線或分岔） */
+  channel: Channel
+  /** SDK 給的 tool_use id：對應時間軸上的工具呼叫 */
+  toolUseId?: string
   toolName: string
   input: Record<string, unknown>
   suggestedPattern?: string
@@ -401,8 +405,15 @@ export interface TimelineEvent {
   channel: Channel
   kind: TimelineKind
   text?: string
-  tool?: { id: string; name: string; input?: Record<string, unknown>; isError?: boolean }
-  /** question id / decision id / spec 版本 / report 版本 */
+  tool?: {
+    id: string
+    name: string
+    input?: Record<string, unknown>
+    isError?: boolean
+    /** 工具結果：使用者在核准對話框拒絕了這個呼叫 */
+    denied?: boolean
+  }
+  /** question id / decision id / spec 版本 / report 版本；user_text 的實作起點標記（IMPLEMENT_START_REF） */
   ref?: string
 }
 
@@ -691,7 +702,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 5：結構化訊息協定
 
-使用者對 Claude 的回應以 `[tag key=value] 內容` 格式送出（見設計文件 3.3）。
+使用者對 Claude 的回應以 `[tag key=value] 內容` 格式送出（見設計文件 3.3）。這些訊息在時間軸上給人看的文字（`msgDisplay`）與「實作從這裡開始」的標記（`IMPLEMENT_START_REF`、`startsImplementation`）也定義在這裡，主程序寫入時間軸、renderer 讀時間軸共用同一份定義。標記放在 user_text 的 `ref`，使用者打出一樣的字不會被誤認；沒有 `ref` 的舊時間軸才退回比對文字。
 
 **Files:**
 - Create: `src/shared/protocol.ts`
@@ -701,7 +712,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ```ts
 import { describe, expect, test } from 'vitest'
-import { msg, parseTagged } from '@shared/protocol'
+import {
+  IMPLEMENT_START_REF,
+  msg,
+  msgDisplay,
+  parseTagged,
+  startsImplementation
+} from '@shared/protocol'
 
 describe('protocol', () => {
   test('answer 含選項與補充文字', () => {
@@ -735,6 +752,35 @@ describe('protocol', () => {
     expect(parseTagged('你好')).toBeNull()
   })
 })
+
+describe('msgDisplay / startsImplementation', () => {
+  const userText = (text: string, ref?: string) => ({ kind: 'user_text' as const, text, ref })
+
+  test('核准規格與送出報告回饋的訊息帶著實作起點標記', () => {
+    expect(startsImplementation(userText(msgDisplay.specApproved, IMPLEMENT_START_REF))).toBe(true)
+    expect(startsImplementation(userText('任何文字', IMPLEMENT_START_REF))).toBe(true)
+    expect(startsImplementation({ kind: 'system', text: '', ref: IMPLEMENT_START_REF })).toBe(false)
+  })
+
+  test('只看文字不算：使用者打出一樣的字不會被當成起點', () => {
+    expect(startsImplementation(userText(msgDisplay.specApproved, 'other'))).toBe(false)
+    expect(startsImplementation(userText('核准規格之前想再問一下'))).toBe(false)
+    expect(startsImplementation(userText('送出 3 則報告回饋，然後呢？'))).toBe(false)
+    expect(startsImplementation(userText(msgDisplay.resume))).toBe(false)
+  })
+
+  test('沒有標記的舊時間軸才用文字判斷', () => {
+    expect(startsImplementation(userText(msgDisplay.specApproved))).toBe(true)
+    expect(startsImplementation(userText('送出 3 則報告回饋'))).toBe(true)
+    expect(startsImplementation(userText('送出 0 則報告回饋與整體意見'))).toBe(true)
+  })
+
+  test('報告回饋的顯示文字；只有整體意見時不說 0 則', () => {
+    expect(msgDisplay.reportFeedback(3, false)).toBe('送出 3 則報告回饋')
+    expect(msgDisplay.reportFeedback(2, true)).toBe('送出 2 則報告回饋與整體意見')
+    expect(msgDisplay.reportFeedback(0, true)).toBe('送出整體意見')
+  })
+})
 ```
 
 **Step 2: 確認失敗** — Run: `npx vitest run tests/shared/protocol.test.ts` → FAIL
@@ -743,7 +789,7 @@ describe('protocol', () => {
 
 ```ts
 // src/shared/protocol.ts
-import type { BranchConclusion, FeedbackItem } from './types'
+import type { BranchConclusion, FeedbackItem, TimelineEvent } from './types'
 
 export interface Tagged { tag: string; attrs: Record<string, string>; body: string }
 
@@ -780,6 +826,29 @@ export const msg = {
   resume: () => tag('resume', {}, '上一次執行被中斷，請從中斷的地方繼續。')
 }
 
+/** 上面幾則訊息在時間軸上給人看的文字（主程序寫入 user_text 時用） */
+export const msgDisplay = {
+  specApproved: '核准規格，開始實作',
+  specFeedback: (text: string) => `要求修改規格：${text}`,
+  reportFeedback: (count: number, withOverall: boolean) =>
+    count ? `送出 ${count} 則報告回饋${withOverall ? '與整體意見' : ''}` : '送出整體意見',
+  resume: '繼續執行'
+}
+
+/** 核准規格、送出報告回饋寫入的 user_text 帶這個 ref：實作畫面從最後一個標記開始顯示 */
+export const IMPLEMENT_START_REF = 'implement_start'
+
+/**
+ * 時間軸事件是否標記一段實作的開始。看 ref，使用者打出一樣的字也不會被誤認；
+ * 沒有 ref 的舊時間軸（加上標記之前寫入的）才用顯示文字判斷。
+ */
+export function startsImplementation(e: Pick<TimelineEvent, 'kind' | 'text' | 'ref'>): boolean {
+  if (e.kind !== 'user_text') return false
+  if (e.ref !== undefined) return e.ref === IMPLEMENT_START_REF
+  const text = e.text ?? ''
+  return text === msgDisplay.specApproved || /^送出 \d+ 則報告回饋(與整體意見)?$/.test(text)
+}
+
 export function parseTagged(s: string): Tagged | null {
   const m = /^\[([a-z_]+)((?:\s+[a-z_]+=[^\s\]]+)*)\](?:\s([\s\S]*))?$/.exec(s)
   if (!m) return null
@@ -792,7 +861,7 @@ export function parseTagged(s: string): Tagged | null {
 }
 ```
 
-**Step 4: 確認通過** — Run: `npx vitest run tests/shared/protocol.test.ts` → 6 passed
+**Step 4: 確認通過** — Run: `npx vitest run tests/shared/protocol.test.ts` → 10 passed
 
 **Step 5: Commit**
 
@@ -2105,6 +2174,19 @@ describe('PermissionGate', () => {
     expect(ctx.onApproved).toHaveBeenCalledWith('npm test -- auth', 'npm test *')
   })
 
+  test('核准請求帶上 SDK 的 toolUseID（UI 用來對應時間軸上的工具呼叫）', async () => {
+    const { ctx } = setup('implement')
+    const gate = createPermissionGate(ctx)
+    await gate('Bash', { command: 'npm run build' }, {
+      signal: new AbortController().signal,
+      toolUseID: 'tu1'
+    } as never)
+    expect(ctx.requestApproval).toHaveBeenCalledWith(
+      expect.objectContaining({ toolName: 'Bash', toolUseId: 'tu1' }),
+      expect.anything()
+    )
+  })
+
   test('使用者拒絕時帶回說明', async () => {
     const { call } = setup('implement', { allow: false, message: '先不要跑' } as never)
     expect(await call('Bash', { command: 'npm run build' })).toEqual({
@@ -2231,6 +2313,8 @@ export interface ApprovalRequest {
   toolName: string
   input: Record<string, unknown>
   suggestedPattern?: string
+  /** SDK 的 toolUseID：UI 用來對應時間軸上的工具呼叫 */
+  toolUseId?: string
 }
 
 export interface GateContext {
@@ -2420,14 +2504,14 @@ const deny = (message: string): PermissionResult => ({ behavior: 'deny', message
 
 /** canUseTool：套用規則，需要核准時詢問使用者 */
 export function createPermissionGate(ctx: GateContext): PermissionGate {
-  return async (toolName, input, { signal, mcpServer }) => {
+  return async (toolName, input, { signal, mcpServer, toolUseID }) => {
     if (signal.aborted) return deny('已取消')
     const e = evaluateTool(toolName, input, ctx, { mcpServer })
     if (e.decision === 'allow') return allow(input)
     if (e.decision === 'deny') return deny(e.message ?? `Harness 不允許使用 ${toolName}`)
 
     const d = await ctx.requestApproval(
-      { toolName, input, suggestedPattern: e.suggestedPattern },
+      { toolName, input, suggestedPattern: e.suggestedPattern, toolUseId: toolUseID },
       signal
     )
     if (!d.allow) return deny(d.message?.trim() || '使用者拒絕了這個操作')
@@ -5232,6 +5316,22 @@ describe('TaskManager：建立任務與釐清', () => {
     expect(claude.calls[1].options.resume).toBe('sess-0')
   })
 
+  test('Claude 重新提問已回答的問題時，時間軸再出現一次問題卡片', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser(askQ1)
+    }
+    const id = await create()
+    claude.script = async ({ call, sink }) => {
+      if (call === 1) await sink.askUser({ ...askQ1, question: '計數單位要再確認一次' })
+    }
+    await tm.answerQuestion(id, 'q1', { optionId: 'acct_ip' })
+    await tm.whenIdle(id)
+    expect(tm.get(id).questions[0]).toMatchObject({ status: 'open', text: '計數單位要再確認一次' })
+    const questions = (await tm.timeline(id)).filter((e) => e.kind === 'question')
+    expect(questions.map((e) => e.ref)).toEqual(['q1', 'q1'])
+  })
+
   test('反問：回答文字進入卡片，Claude 以同一 question_id 更新卡片', async () => {
     const { tm, claude, create } = await setup()
     claude.script = async ({ call, sink }) => {
@@ -5328,7 +5428,7 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { Options } from '@anthropic-ai/claude-agent-sdk'
 import type { AppEvent, CreateTaskInput } from '@shared/ipc'
-import { msg } from '@shared/protocol'
+import { IMPLEMENT_START_REF, msg, msgDisplay } from '@shared/protocol'
 import type { ReportInput } from '@shared/report'
 import type {
   Branch,
@@ -5436,6 +5536,8 @@ export class TaskManager {
   private turnLocks = new Map<string, Promise<unknown>>()
   /** 等待使用者核准的請求，依提出順序；UI 一次顯示最早的一個 */
   private permissionWaiters = new Map<string, PermissionWaiter>()
+  /** 使用者拒絕過的 tool_use id：之後的工具結果在時間軸上標成「已拒絕」而不是失敗 */
+  private deniedToolUses = new Set<string>()
   /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
   /** 報告整理中（邏輯狀態）：進入 reviewing 的同一步就清除 */
@@ -5655,20 +5757,24 @@ export class TaskManager {
 
   /**
    * 送出使用者訊息：該 channel 有進行中的執行就插話進去，否則以 resume 開新一輪。
-   * silent 不寫入 user_text（例如回答卡片、反問，UI 另有呈現）；display 是時間軸上顯示的文字；
-   * entries 是訊息被接受後要一起寫入的時間軸項目。訊息沒送出時不寫入任何時間軸。
+   * silent 不寫入 user_text（例如回答卡片、反問，UI 另有呈現）；display 是時間軸上顯示的文字，
+   * ref 是 user_text 的標記（例如 IMPLEMENT_START_REF）；entries 是訊息被接受後要一起寫入的時間軸項目。
+   * 訊息沒送出時不寫入任何時間軸。
    */
   async send(
     taskId: string,
     channel: Channel,
     text: string,
-    opts: { display?: string; silent?: boolean; entries?: TimelineEntry[] } = {}
+    opts: { display?: string; ref?: string; silent?: boolean; entries?: TimelineEntry[] } = {}
   ) {
     this.assertCanSend(taskId, channel)
-    const entries: TimelineEntry[] = [
-      ...(opts.silent ? [] : [{ channel, kind: 'user_text' as const, text: opts.display ?? text }]),
-      ...(opts.entries ?? [])
-    ]
+    const userText: TimelineEntry = {
+      channel,
+      kind: 'user_text',
+      text: opts.display ?? text,
+      ...(opts.ref ? { ref: opts.ref } : {})
+    }
+    const entries: TimelineEntry[] = [...(opts.silent ? [] : [userText]), ...(opts.entries ?? [])]
     const key = runKey(taskId, channel)
     await this.chainOn(this.turnLocks, key, async () => {
       // 排隊等 lock 的期間任務可能已開始收尾或整理報告
@@ -5872,16 +5978,18 @@ export class TaskManager {
           })
         }
         return
-      case 'tool_result':
+      case 'tool_result': {
+        const denied = this.deniedToolUses.delete(e.id)
         if (e.isError) {
           await this.addTimeline(taskId, {
             channel,
             kind: 'tool_result',
             text: e.text.slice(0, 2000),
-            tool: { id: e.id, name: '', isError: true }
+            tool: { id: e.id, name: '', isError: true, ...(denied ? { denied: true } : {}) }
           })
         }
         return
+      }
       case 'turn_end':
         // 使用者停止造成的結束（interrupted）不算錯誤
         if (!e.ok && !e.interrupted) {
@@ -5902,7 +6010,8 @@ export class TaskManager {
       askUser: (a) =>
         this.enqueue(taskId, async () => {
           if (this.pendingCounter.get(taskId) === a.question_id) this.pendingCounter.delete(taskId)
-          let created = false
+          // 新問題，或重新提問已回答過的問題：時間軸上依提問順序再放一張卡片
+          let added = false
           await this.update(taskId, (t) => {
             const fields = {
               text: a.question,
@@ -5912,9 +6021,11 @@ export class TaskManager {
               context: a.context
             }
             const q = t.questions.find((x) => x.id === a.question_id)
-            if (q) Object.assign(q, fields, { status: 'open' as const, answer: undefined })
-            else {
-              created = true
+            if (q) {
+              added = q.status === 'answered'
+              Object.assign(q, fields, { status: 'open' as const, answer: undefined })
+            } else {
+              added = true
               t.questions.push({
                 id: a.question_id,
                 ...fields,
@@ -5924,7 +6035,7 @@ export class TaskManager {
               })
             }
           })
-          if (created)
+          if (added)
             await this.addTimeline(taskId, { channel, kind: 'question', ref: a.question_id })
         }),
       proposeSpec: (a) =>
@@ -6079,7 +6190,7 @@ export class TaskManager {
 }
 ```
 
-本 Task 的檔頭 import 只保留用得到的（`FeedbackItem`、`Report`、`hasShellOperators`／`matchesPattern`、`prBody` 在 Task 24 才加入）。`finishing`、`finalizing`、`reportJobs`、`permissionWaiters`、`PermissionWaiter`、`persist`、`transitionAndSend` 在本 Task 就先建立（核准、報告與收尾的 Task 會用到）。
+本 Task 的檔頭 import 只保留用得到的（`IMPLEMENT_START_REF`、`msgDisplay` 在 Task 23 才加入；`FeedbackItem`、`Report`、`hasShellOperators`／`matchesPattern`、`prBody` 在 Task 24 才加入）。`finishing`、`finalizing`、`reportJobs`、`permissionWaiters`、`PermissionWaiter`、`persist`、`transitionAndSend` 在本 Task 就先建立（核准、報告與收尾的 Task 會用到）。
 
 **Step 5: 確認通過**
 
@@ -6333,7 +6444,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Step 1: 寫失敗測試**
 
-檔頭加上 `import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'` 與 `until`（from `./fakeClaude`）。SDK 的 `canUseTool` 回傳 `PermissionResult | null`，變數型別要容許 `null`。
+檔頭加上 `import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'`、`until`（from `./fakeClaude`）與 `IMPLEMENT_START_REF`、`msgDisplay`、`startsImplementation`（from `@shared/protocol`）。SDK 的 `canUseTool` 回傳 `PermissionResult | null`，變數型別要容許 `null`。
 
 ```ts
 const spec = {
@@ -6346,6 +6457,17 @@ const spec = {
   acceptance: ['測試通過']
 }
 const signalOf = () => ({ signal: new AbortController().signal }) as never
+/** canUseTool 的 options，帶 SDK 給的 toolUseID */
+const toolOpts = (toolUseID: string) =>
+  ({ signal: new AbortController().signal, toolUseID }) as never
+const toolResult = (toolUseId: string, text: string) => ({
+  type: 'user',
+  parent_tool_use_id: null,
+  message: {
+    content: [{ type: 'tool_result', tool_use_id: toolUseId, is_error: true, content: text }]
+  }
+})
+
 
 describe('TaskManager：規格與實作', () => {
   test('propose_spec → spec_review；要求修改回到 clarifying；核准進入 implementing', async () => {
@@ -6373,6 +6495,14 @@ describe('TaskManager：規格與實作', () => {
     await tm.whenIdle(id)
     expect(claude.calls.at(-1)!.prompt).toContain('[spec_approved]')
     expect(tm.get(id).status).toBe('implementing')
+    // 實作畫面靠這則訊息的標記找出實作從哪裡開始；要求修改不是起點
+    const userTexts = (await tm.timeline(id)).filter((e) => e.kind === 'user_text')
+    const feedbackEntry = userTexts.find((e) => e.text === msgDisplay.specFeedback('上限改 10 次'))!
+    expect(startsImplementation(feedbackEntry)).toBe(false)
+    expect(userTexts.at(-1)).toMatchObject({
+      text: msgDisplay.specApproved,
+      ref: IMPLEMENT_START_REF
+    })
     expect(tm.get(id).plan).toEqual([{ id: 's1', title: '寫程式', status: 'running' }])
     await expect(tm.approveSpec(id)).rejects.toThrow()
   })
@@ -6385,12 +6515,17 @@ describe('TaskManager：規格與實作', () => {
     const id = await create()
     let result: PermissionResult | null | undefined
     claude.script = async ({ options }) => {
-      result = await options.canUseTool!('Bash', { command: 'npm test -- auth' }, signalOf())
+      result = await options.canUseTool!('Bash', { command: 'npm test -- auth' }, toolOpts('tu1'))
     }
     await tm.approveSpec(id)
     await until(() => !!tm.get(id).pendingPermission)
     const req = tm.get(id).pendingPermission!
-    expect(req).toMatchObject({ toolName: 'Bash', suggestedPattern: 'npm test *' })
+    expect(req).toMatchObject({
+      toolName: 'Bash',
+      suggestedPattern: 'npm test *',
+      toolUseId: 'tu1',
+      channel: 'main'
+    })
     expect(tm.get(id).runState).toBe('waiting_permission')
     await tm.resolvePermission(id, req.id, { allow: true, rememberPattern: 'npm test *' })
     await tm.whenIdle(id)
@@ -6467,6 +6602,7 @@ describe('TaskManager：規格與實作', () => {
     }
     await tm.openBranch(id, { title: '查資料' })
     await until(() => !!tm.get(id).pendingPermission)
+    expect(tm.get(id).pendingPermission!.channel).toBe('branch:b1')
     expect(tm.get(id).runState).toBe('idle')
     expect(tm.get(id).branches[0].running).toBe(true)
     await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: true })
@@ -6474,6 +6610,30 @@ describe('TaskManager：規格與實作', () => {
     expect(result?.behavior).toBe('allow')
     expect(tm.get(id)).toMatchObject({ runState: 'idle', approvedCommands: [] })
     expect(tm.get(id).branches[0].running).toBe(false)
+  })
+
+  test('使用者拒絕的工具，時間軸上的工具結果標成已拒絕', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    claude.script = async ({ options }) => {
+      await options.canUseTool!('Bash', { command: 'rm -rf dist' }, toolOpts('tu-deny'))
+      return [toolResult('tu-deny', '先不要刪'), toolResult('tu-fail', 'exit 1')]
+    }
+    await tm.approveSpec(id)
+    await until(() => !!tm.get(id).pendingPermission)
+    await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, {
+      allow: false,
+      message: '先不要刪'
+    })
+    await tm.whenIdle(id)
+    const results = (await tm.timeline(id)).filter((e) => e.kind === 'tool_result')
+    expect(results.map((e) => [e.tool?.id, e.tool?.denied])).toEqual([
+      ['tu-deny', true],
+      ['tu-fail', undefined]
+    ])
   })
 
   test('執行中插話會送進同一輪', async () => {
@@ -6518,6 +6678,8 @@ describe('TaskManager：規格與實作', () => {
 
 **Step 3: 實作（加到 TaskManager，並刪除 Task 21 的 requestApproval／syncPermission／denyWaitersOf stub）**
 
+檔頭的 `@shared/protocol` import 加上 `IMPLEMENT_START_REF`、`msgDisplay`。
+
 核准請求的規則：
 - 等待中的請求依提出順序放在 `permissionWaiters`，`pendingPermission` 永遠是最早的一個；解決一個後自動顯示下一個（同一輪可能平行要求多個核准）。
 - 每個請求記下提出它的 AgentRun；那段執行結束（或因逾時被中止）時，還在等的請求一律拒絕（`執行已結束`）。
@@ -6525,14 +6687,18 @@ describe('TaskManager：規格與實作', () => {
 - `signal` 已 abort 時立即拒絕；abort 時自動拒絕並移除 listener。
 - `stop(taskId, channel)` 只拒絕該 channel 的等待中請求，再 `interrupt()` 該 channel 的執行。
 - `resume` 在主線還沒有 session 時（第一輪就中斷）重新送出原始需求，而不是送 `[resume]`。
-- `approveSpec`／`requestSpecChanges` 經 `transitionAndSend`：先檢查能不能送，再改狀態，送不出去就還原。
+- `approveSpec`／`requestSpecChanges` 經 `transitionAndSend`：先檢查能不能送，再改狀態，送不出去就還原。核准規格寫入的 user_text 帶 `ref: IMPLEMENT_START_REF`（實作畫面從這裡開始顯示）。
+- 請求記下 `channel` 與 SDK 的 `toolUseId`（UI 用來標出分岔的請求、對應時間軸上的工具呼叫）。使用者拒絕的 `toolUseId` 記在 `deniedToolUses`，之後的工具結果標 `denied: true`（UI 顯示「已拒絕」而不是失敗）。
 
 ```ts
   // ───────── 規格 ─────────
 
   approveSpec(taskId: string) {
     return this.transitionAndSend(taskId, 'SPEC_APPROVED', () =>
-      this.send(taskId, 'main', msg.specApproved(), { display: '核准規格，開始實作' })
+      this.send(taskId, 'main', msg.specApproved(), {
+        display: msgDisplay.specApproved,
+        ref: IMPLEMENT_START_REF
+      })
     )
   }
 
@@ -6540,7 +6706,7 @@ describe('TaskManager：規格與實作', () => {
     const body = text.trim()
     if (!body) throw new Error('請說明要修改的地方')
     await this.transitionAndSend(taskId, 'SPEC_CHANGES_REQUESTED', () =>
-      this.send(taskId, 'main', msg.specFeedback(body), { display: `要求修改規格：${body}` })
+      this.send(taskId, 'main', msg.specFeedback(body), { display: msgDisplay.specFeedback(body) })
     )
   }
 
@@ -6590,6 +6756,8 @@ describe('TaskManager：規格與實作', () => {
         request: {
           id,
           taskId,
+          channel,
+          toolUseId: req.toolUseId,
           toolName: req.toolName,
           input: req.input,
           suggestedPattern: req.suggestedPattern,
@@ -6605,6 +6773,7 @@ describe('TaskManager：規格與實作', () => {
   async resolvePermission(taskId: string, requestId: string, decision: PermissionDecision) {
     const w = this.permissionWaiters.get(requestId)
     if (!w || w.taskId !== taskId) throw new Error('這個核准請求已經失效')
+    if (!decision.allow && w.request.toolUseId) this.deniedToolUses.add(w.request.toolUseId)
     w.resolve(decision)
   }
 
@@ -6622,10 +6791,10 @@ describe('TaskManager：規格與實作', () => {
     const t = this.task(taskId)
     // 第一輪還沒拿到 session 就中斷：沒有可續接的對話，重新送出需求
     if (!t.mainSessionId) {
-      await this.send(taskId, 'main', t.request, { display: '繼續執行' })
+      await this.send(taskId, 'main', t.request, { display: msgDisplay.resume })
       return
     }
-    await this.send(taskId, 'main', msg.resume(), { display: '繼續執行' })
+    await this.send(taskId, 'main', msg.resume(), { display: msgDisplay.resume })
   }
 ```
 
@@ -6819,8 +6988,29 @@ describe('TaskManager：報告與收尾', () => {
     await tm.submitReportFeedback(id, [{ anchor: 'diff:a.ts:3', label: 'a.ts:3', text: '改常數' }])
     await tm.whenIdle(id)
     expect(claude.calls.at(-1)!.prompt).toBe('[report_feedback] - (diff:a.ts:3) 改常數')
+    const feedback = (await tm.timeline(id)).filter((e) => e.kind === 'user_text').at(-1)!
+    expect(feedback).toMatchObject({
+      text: msgDisplay.reportFeedback(1, false),
+      ref: IMPLEMENT_START_REF
+    })
     expect(tm.get(id).reportVersions).toEqual([1, 2])
     expect(tm.get(id).status).toBe('reviewing')
+  })
+
+  test('只有整體意見的回饋顯示「送出整體意見」', async () => {
+    const { tm, claude, id } = await toImplementing()
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    claude.script = async () => []
+    await tm.submitReportFeedback(id, [], '命名再一致一點')
+    await tm.whenIdle(id)
+    expect((await tm.timeline(id)).filter((e) => e.kind === 'user_text').at(-1)).toMatchObject({
+      text: '送出整體意見',
+      ref: IMPLEMENT_START_REF
+    })
   })
 
   test('開 PR 與合併都會結束任務', async () => {
@@ -7105,6 +7295,7 @@ describe('TaskManager：狀態一致性', () => {
         pendingPermission: {
           id: 'p1',
           taskId: 'x',
+          channel: 'main',
           toolName: 'Bash',
           input: { command: 'ls' },
           createdAt: 'x'
@@ -7376,7 +7567,8 @@ describe('TaskManager：審查補強', () => {
     if (!items.length && !note) throw new Error('請至少留一則回饋')
     await this.transitionAndSend(taskId, 'REPORT_FEEDBACK', () =>
       this.send(taskId, 'main', msg.reportFeedback(items, note), {
-        display: `送出 ${items.length} 則報告回饋${note ? '與整體意見' : ''}`
+        display: msgDisplay.reportFeedback(items.length, !!note),
+        ref: IMPLEMENT_START_REF
       })
     )
   }
@@ -10954,7 +11146,7 @@ describe('RunStatus', () => {
 
 ```ts
 // src/renderer/src/lib/timeline.ts
-import { BRANCH_RULES, parseTagged, type Tagged } from '@shared/protocol'
+import { BRANCH_RULES, msgDisplay, parseTagged, type Tagged } from '@shared/protocol'
 import type { TimelineEvent } from '@shared/types'
 import { useStore } from '../store'
 
@@ -11010,13 +11202,13 @@ function describeTagged(t: Tagged): string | undefined {
     case 'branch_conclusion':
       return t.attrs.branch ? `帶回分岔結論\n${t.body}` : undefined
     case 'spec_feedback':
-      return `要求修改規格：${t.body}`
+      return msgDisplay.specFeedback(t.body)
     case 'spec_approved':
-      return '核准規格，開始實作'
+      return msgDisplay.specApproved
     case 'report_feedback':
       return `報告回饋：\n${t.body}`
     case 'resume':
-      return '繼續執行'
+      return msgDisplay.resume
     default:
       return undefined
   }
@@ -13190,18 +13382,16 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Create: `src/renderer/src/components/PermissionDialog.tsx`
 - Create: `src/renderer/src/screens/ImplementScreen.tsx`
-- Modify: `src/shared/protocol.ts`（`msgDisplay`、`startsImplementation`）
-- Modify: `src/main/tasks/taskManager.ts`（時間軸顯示文字改用 `msgDisplay`）
-- Modify: `src/renderer/src/lib/timeline.ts`（`toolTarget`、`relativeTo`、`implementEvents`，`describeTagged` 改用 `msgDisplay`）
+- Modify: `src/renderer/src/lib/timeline.ts`（`toolTarget`、`relativeTo`、`implementEvents`）
 - Modify: `src/renderer/src/components/ui.tsx`（`Avatar` 可傳 `className`）
 - Modify: `src/renderer/src/styles/app.css`（補 `code-muted` token：深色區塊裡的次要文字）
 - Modify: `src/renderer/src/screens/ClarifyScreen.tsx`、`src/renderer/src/screens/SpecScreen.tsx`（顯示核准對話框）
 - Modify: `src/renderer/src/screens/TaskScreen.tsx`
-- Test: `tests/renderer/PermissionDialog.test.tsx`、`tests/renderer/ImplementScreen.test.tsx`、`tests/shared/protocol.test.ts`、`tests/main/taskManager.test.ts`、`tests/renderer/ClarifyScreen.test.tsx`、`tests/renderer/SpecScreen.test.tsx`
+- Test: `tests/renderer/PermissionDialog.test.tsx`、`tests/renderer/ImplementScreen.test.tsx`、`tests/renderer/ClarifyScreen.test.tsx`、`tests/renderer/SpecScreen.test.tsx`
 
 實作頁依 `docs/design/B4-Implement.dc.html`：進度條、步驟（完成／進行中／待做），進行中的步驟裡列出最近的工具呼叫，下面是這一段實作的對話，底部插話框與停止；右邊是變更檔案、本任務已允許的指令與 worktree。
 
-- **實作從哪裡開始**：實作頁只顯示最後一次「核准規格」或「送出報告回饋」之後的主線事件。主程序寫入時間軸的顯示文字與 renderer 的判斷共用 `@shared/protocol` 的 `msgDisplay` / `startsImplementation`，兩邊不會各寫一份字串而對不上；TaskManager 測試也確認寫入的訊息被辨認為實作起點。找不到起點（剛核准、訊息還沒寫入）時是空的，不會閃出釐清階段的對話。
+- **實作從哪裡開始**：實作頁只顯示最後一個實作起點（核准規格或送出報告回饋，`startsImplementation`，見 Task 5）之後的主線事件。找不到起點（剛核准、訊息還沒寫入）時是空的，不會閃出釐清階段的對話。
 - **核准對話框**：`PendingPermission` 以請求 id 為 key 掛 `PermissionDialog`，請求排隊時換下一個會重設勾選與拒絕原因。對話框出現時焦點移到對話框本身（使用者可能正在輸入框打字；刻意不放在「允許」上，免得按 Enter 就核准）。允許／拒絕用 `usePending`，連點只送一次。
   - Bash：顯示 `$ 指令`、cwd、原因（`description`）；有 `suggestedPattern` 才有「本任務內都允許」勾選框；串接的指令沒有樣式，改說明只能逐次核准。
   - Edit／Write／MultiEdit／NotebookEdit：主程序只對 `.git`、`.claude/`、`.mcp.json` 詢問，所以顯示相對路徑、工具名稱、說明「這個檔案會影響 Claude 的權限或 git 設定」，以及要寫入的內容（Write 全文、Edit 的 `-`／`+` 取代前後，最多 4000 字）。
@@ -13215,42 +13405,6 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - 顏色只用 tokens：遮罩 `bg-ink/28`（= `rgba(28,36,48,0.28)`），cwd 文字 `code-muted`，待做步驟的圓圈 `line-strong`。
 
 **Step 1: 寫失敗測試**
-
-`tests/shared/protocol.test.ts`（import 加上 `msgDisplay`、`startsImplementation`）：
-
-```ts
-describe('msgDisplay / startsImplementation', () => {
-  test('核准規格與送出報告回饋標記一段實作的開始', () => {
-    expect(startsImplementation(msgDisplay.specApproved)).toBe(true)
-    expect(startsImplementation(msgDisplay.reportFeedback(3, false))).toBe(true)
-    expect(startsImplementation(msgDisplay.reportFeedback(0, true))).toBe(true)
-  })
-
-  test('其他訊息不算', () => {
-    expect(startsImplementation(msgDisplay.resume)).toBe(false)
-    expect(startsImplementation(msgDisplay.specFeedback('上限改 10 次'))).toBe(false)
-    expect(startsImplementation('核准規格之前想再問一下')).toBe(false)
-    expect(startsImplementation('送出 3 則報告回饋，然後呢？')).toBe(false)
-  })
-})
-```
-
-`tests/main/taskManager.test.ts`（import `msgDisplay`、`startsImplementation`）：在「propose_spec → spec_review…」測試核准之後加上
-
-```ts
-    // 實作畫面靠這則訊息找出實作從哪裡開始
-    const userTexts = (await tm.timeline(id)).filter((e) => e.kind === 'user_text')
-    expect(userTexts.map((e) => e.text)).toContain(msgDisplay.specFeedback('上限改 10 次'))
-    expect(startsImplementation(userTexts.at(-1)!.text!)).toBe(true)
-```
-
-在「回饋 → implementing…」測試的 `[report_feedback]` 斷言之後加上
-
-```ts
-    const feedback = (await tm.timeline(id)).filter((e) => e.kind === 'user_text').at(-1)!
-    expect(feedback.text).toBe(msgDisplay.reportFeedback(1, false))
-    expect(startsImplementation(feedback.text!)).toBe(true)
-```
 
 ```tsx
 // tests/renderer/PermissionDialog.test.tsx
@@ -13272,6 +13426,7 @@ import { makeTask } from '../fixtures/task'
 const req: PermissionRequest = {
   id: 'p1',
   taskId: 't1',
+  channel: 'main',
   toolName: 'Bash',
   input: { command: 'npm test -- auth', description: '跑 auth 測試' },
   suggestedPattern: 'npm test *',
@@ -13579,6 +13734,7 @@ test('等待核准：步驟與對應的指令標示等待核准，並顯示核�
       pendingPermission: {
         id: 'p1',
         taskId: 't1',
+        channel: 'main',
         toolName: 'Bash',
         input: { command: 'npm test -- auth' },
         suggestedPattern: 'npm test *',
@@ -13699,6 +13855,7 @@ test('釐清中 Claude 要讀網頁時也顯示核准對話框', () => {
     pendingPermission: {
       id: 'p1',
       taskId: 't1',
+      channel: 'main',
       toolName: 'WebFetch',
       input: { url: 'https://example.com/docs', prompt: '查 API 限制' },
       createdAt: ''
@@ -13722,6 +13879,7 @@ test('回看規格時有等待中的核准請求也會顯示', () => {
       pendingPermission: {
         id: 'p1',
         taskId: 't1',
+        channel: 'main',
         toolName: 'Bash',
         input: { command: 'npm test' },
         suggestedPattern: 'npm test *',
@@ -13734,45 +13892,11 @@ test('回看規格時有等待中的核准請求也會顯示', () => {
 })
 ```
 
-**Step 2: 確認失敗** — `npx vitest run tests/shared/protocol.test.ts tests/renderer/PermissionDialog.test.tsx tests/renderer/ImplementScreen.test.tsx` → FAIL
+**Step 2: 確認失敗** — `npx vitest run tests/renderer/PermissionDialog.test.tsx tests/renderer/ImplementScreen.test.tsx` → FAIL
 
-**Step 3: protocol.ts 加上顯示文字（放在 `msg` 之後）**
+**Step 3: lib/timeline.ts**
 
-```ts
-/**
- * 上面幾則訊息在時間軸上給人看的文字（主程序寫入 user_text 時用）。
- * 實作畫面靠 startsImplementation 從時間軸找出這一段實作從哪裡開始，兩邊共用這裡的定義。
- */
-export const msgDisplay = {
-  specApproved: '核准規格，開始實作',
-  specFeedback: (text: string) => `要求修改規格：${text}`,
-  reportFeedback: (count: number, withOverall: boolean) =>
-    `送出 ${count} 則報告回饋${withOverall ? '與整體意見' : ''}`,
-  resume: '繼續執行'
-}
-
-/** 時間軸上的使用者訊息是否標記一段實作的開始（核准規格、送出報告回饋） */
-export function startsImplementation(text: string): boolean {
-  return text === msgDisplay.specApproved || /^送出 \d+ 則報告回饋(與整體意見)?$/.test(text)
-}
-```
-
-**Step 4: TaskManager 改用 msgDisplay** — `import { msg, msgDisplay } from '@shared/protocol'`，並把 `send` 的 `display` 換掉：
-
-```ts
-// approveSpec
-this.send(taskId, 'main', msg.specApproved(), { display: msgDisplay.specApproved })
-// requestSpecChanges
-this.send(taskId, 'main', msg.specFeedback(body), { display: msgDisplay.specFeedback(body) })
-// resume（兩處）
-{ display: msgDisplay.resume }
-// submitReportFeedback
-{ display: msgDisplay.reportFeedback(items.length, !!note) }
-```
-
-**Step 5: lib/timeline.ts**
-
-`describeTagged` 的 `spec_feedback`／`spec_approved`／`resume` 改回傳 `msgDisplay.specFeedback(t.body)`、`msgDisplay.specApproved`、`msgDisplay.resume`；`toolSummary` 改用 `toolTarget`：
+`toolSummary` 改用 `toolTarget`：
 
 ```ts
 /** 工具呼叫的對象（檔案、指令、網址…），沒有就是空字串 */
@@ -13803,18 +13927,16 @@ export function toolSummary(tool: ToolCall): string {
  */
 export function implementEvents(events: TimelineEvent[]): TimelineEvent[] {
   const main = events.filter((e) => e.channel === 'main')
-  const start = main.findLastIndex(
-    (e) => e.kind === 'user_text' && startsImplementation(e.text ?? '')
-  )
+  const start = main.findLastIndex((e) => startsImplementation(e))
   return start < 0 ? [] : main.slice(start + 1)
 }
 ```
 
-**Step 6: ui.tsx 與 app.css**
+**Step 4: ui.tsx 與 app.css**
 
 `Avatar` 接受 `className`（以 `cx` 合併，實作頁用 `size-6 text-[11px]`）；`app.css` 的 `@theme` 在 `--color-code-ink` 後加上 `--color-code-muted: #a9b3bf;`。
 
-**Step 7: PermissionDialog.tsx（對照 `B4-Implement.dc.html` 的 dialog）**
+**Step 5: PermissionDialog.tsx（對照 `B4-Implement.dc.html` 的 dialog）**
 
 ```tsx
 // src/renderer/src/components/PermissionDialog.tsx
@@ -14042,7 +14164,7 @@ export function PendingPermission({ task }: { task: Task }) {
 }
 ```
 
-**Step 8: ImplementScreen.tsx（對照 `B4-Implement.dc.html`）**
+**Step 6: ImplementScreen.tsx（對照 `B4-Implement.dc.html`）**
 
 ```tsx
 // src/renderer/src/screens/ImplementScreen.tsx
@@ -14478,7 +14600,7 @@ export function ImplementScreen({
 }
 ```
 
-**Step 9: 釐清頁與規格頁也顯示核准對話框**
+**Step 7: 釐清頁與規格頁也顯示核准對話框**
 
 兩個畫面的 `<main>` 加上 `relative`，在 `</main>` 前加上（import `PendingPermission` from `'../components/PermissionDialog'`）：
 
@@ -14487,7 +14609,7 @@ export function ImplementScreen({
         <PendingPermission task={task} />
 ```
 
-**Step 10: TaskScreen 加入實作頁**
+**Step 8: TaskScreen 加入實作頁**
 
 ```tsx
 // src/renderer/src/screens/TaskScreen.tsx
@@ -14526,11 +14648,11 @@ export function TaskScreen({ taskId }: { taskId: string }) {
 }
 ```
 
-**Step 11: 確認通過** — `npm test` 全部通過；`npm run typecheck`、`npm run lint` PASS
+**Step 9: 確認通過** — `npm test` 全部通過；`npm run typecheck`、`npm run lint` PASS
 
-**Step 12: 手動驗證** — 核准規格後進入實作頁：進度與步驟更新、shell 指令跳出核准框、勾選後同樣指令不再詢問、插話會出現在時間軸、停止按鈕可中斷；修改 `.claude/settings.json` 時對話框顯示路徑、說明與要寫入的內容。
+**Step 10: 手動驗證** — 核准規格後進入實作頁：進度與步驟更新、shell 指令跳出核准框、勾選後同樣指令不再詢問、插話會出現在時間軸、停止按鈕可中斷；修改 `.claude/settings.json` 時對話框顯示路徑、說明與要寫入的內容。
 
-**Step 13: Commit**
+**Step 11: Commit**
 
 ```bash
 git add src tests docs/plans

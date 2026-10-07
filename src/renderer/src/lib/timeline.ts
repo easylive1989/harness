@@ -100,9 +100,7 @@ export function userTextDisplay(text: string): string {
  */
 export function implementEvents(events: TimelineEvent[]): TimelineEvent[] {
   const main = events.filter((e) => e.channel === 'main')
-  const start = main.findLastIndex(
-    (e) => e.kind === 'user_text' && startsImplementation(e.text ?? '')
-  )
+  const start = main.findLastIndex((e) => startsImplementation(e))
   return start < 0 ? [] : main.slice(start + 1)
 }
 

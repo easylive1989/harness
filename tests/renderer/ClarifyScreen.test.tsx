@@ -141,6 +141,7 @@ test('釐清中 Claude 要讀網頁時也顯示核准對話框', () => {
     pendingPermission: {
       id: 'p1',
       taskId: 't1',
+      channel: 'main',
       toolName: 'WebFetch',
       input: { url: 'https://example.com/docs', prompt: '查 API 限制' },
       createdAt: ''

@@ -94,6 +94,10 @@ export interface Branch {
 export interface PermissionRequest {
   id: string
   taskId: string
+  /** 提出請求的執行（主線或分岔） */
+  channel: Channel
+  /** SDK 給的 tool_use id：對應時間軸上的工具呼叫 */
+  toolUseId?: string
   toolName: string
   input: Record<string, unknown>
   suggestedPattern?: string
@@ -150,8 +154,15 @@ export interface TimelineEvent {
   channel: Channel
   kind: TimelineKind
   text?: string
-  tool?: { id: string; name: string; input?: Record<string, unknown>; isError?: boolean }
-  /** question id / decision id / spec 版本 / report 版本 */
+  tool?: {
+    id: string
+    name: string
+    input?: Record<string, unknown>
+    isError?: boolean
+    /** 工具結果：使用者在核准對話框拒絕了這個呼叫 */
+    denied?: boolean
+  }
+  /** question id / decision id / spec 版本 / report 版本；user_text 的實作起點標記（IMPLEMENT_START_REF） */
   ref?: string
 }
 

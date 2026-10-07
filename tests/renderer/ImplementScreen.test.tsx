@@ -134,6 +134,7 @@ test('等待核准：步驟與對應的指令標示等待核准，並顯示核�
       pendingPermission: {
         id: 'p1',
         taskId: 't1',
+        channel: 'main',
         toolName: 'Bash',
         input: { command: 'npm test -- auth' },
         suggestedPattern: 'npm test *',
