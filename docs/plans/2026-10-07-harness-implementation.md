@@ -6,7 +6,7 @@
 
 **Architecture:** Electron 主程序以 `@anthropic-ai/claude-agent-sdk` 驅動本機已登入（訂閱方案）的 Claude Code；app 透過 in-process MCP 工具（`ask_user`、`propose_spec`、`update_plan`、`conclude_branch`、`submit_report`）取得結構化資料，以 `canUseTool` 控制權限。每一輪對話是一個 `query()`（串流輸入以支援插話），以 `resume`／`forkSession` 續接與分岔。任務狀態、時間軸、報告以 JSON 存在 userData。Renderer 是 React + Tailwind v4，依設計稿 B「瓷白」實作。
 
-**Tech Stack:** Electron 39、electron-vite 5、React 19、TypeScript 5.9、Tailwind CSS 4、zustand、zod 4、@anthropic-ai/claude-agent-sdk 0.3.292、Vitest、React Testing Library、git / gh CLI。
+**Tech Stack:** Electron 39、electron-vite 5、React 19、TypeScript 5.9、Tailwind CSS 4、tailwind-merge、zustand、zod 4、@anthropic-ai/claude-agent-sdk 0.3.292、Vitest、React Testing Library、git / gh CLI。
 
 **設計依據：** `docs/plans/2026-10-07-harness-design.md`（架構與行為）、`docs/design/*.dc.html`（畫面，顏色／間距／字級以這些檔案的 inline style 為準）。
 
@@ -8786,14 +8786,23 @@ export function taskStatusLabel(t: Task): { text: string; tone: Tone } {
 
 **Step 6: components/ui.tsx**
 
+先安裝 `npm i tailwind-merge`：`cx` 用它合併 class，呼叫端傳入的 className 才能可靠地覆蓋元件預設值（Tailwind 產生的 CSS 順序不看 class 先後，例如 `text-[13px]` 和 `text-sm` 同時存在時誰贏不一定）。檔案同時匯出非元件（`cx`、`Icons` 等），以檔頭註解關閉 `react-refresh/only-export-components`。
+
 ```tsx
 // src/renderer/src/components/ui.tsx
 // 共用的 UI 元件與樣式常數。這裡同時匯出 cx／TONE_TEXT／Icons 等非元件，
 // 改這個檔時 Vite 會整頁重新載入而不是 fast refresh，換來各畫面只需一個 import 來源。
 /* eslint-disable react-refresh/only-export-components */
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode, SVGProps } from 'react'
+import { extendTailwindMerge } from 'tailwind-merge'
 
-export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ')
+// 讓呼叫端傳入的 className 能覆蓋元件預設的 class（例如 Button 的 h-11 被 h-[42px] 取代）。
+// Tailwind 產生的 CSS 順序不看 class 寫的先後，同一屬性的兩個 class 誰贏不一定，所以要先合併掉。
+const twMerge = extendTailwindMerge({
+  extend: { theme: { shadow: ['card', 'raised', 'focus', 'dialog'] } }
+})
+export const cx = (...c: (string | false | null | undefined)[]) =>
+  twMerge(c.filter(Boolean).join(' '))
 
 type Variant = 'primary' | 'secondary' | 'dark' | 'ghost' | 'danger'
 const VARIANTS: Record<Variant, string> = {
@@ -9503,10 +9512,143 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `src/renderer/src/screens/NewTaskScreen.tsx`
 - Create: `src/renderer/src/components/ClaudeBanner.tsx`
 - Modify: `src/renderer/src/App.tsx`（`view.kind === 'new'` 時渲染 `<NewTaskScreen />`）
+- Test: `tests/renderer/newTask.test.tsx`
+
+**Step 0: 寫測試（先失敗）**
+
+```tsx
+// tests/renderer/newTask.test.tsx
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(),
+  onEvent: vi.fn(() => () => {}),
+  errorText: String
+}))
+import { call } from '@renderer/api'
+import { NewTaskScreen } from '@renderer/screens/NewTaskScreen'
+import { useStore } from '@renderer/store'
+import { makeTask } from '../fixtures/task'
+
+const repos = [
+  { id: 'r1', name: 'shop-api', path: '/Users/me/Github/shop-api', addedAt: '' },
+  { id: 'r2', name: 'web-dashboard', path: '/Users/me/Github/web', addedAt: '' }
+]
+const branches: Record<string, { branches: string[]; current: string }> = {
+  r1: { branches: ['main', 'develop'], current: 'develop' },
+  r2: { branches: ['trunk'], current: 'trunk' },
+  r3: { branches: ['main'], current: 'main' }
+}
+let replies: Record<string, (...args: never[]) => unknown>
+
+beforeEach(() => {
+  replies = {
+    'repos:branches': (id: string) => branches[id],
+    'tasks:create': () => makeTask({ id: 'new1' }),
+    'tasks:timeline': () => [],
+    'repos:pick': () => null,
+    'claude:status': () => ({ found: true, loggedIn: true })
+  }
+  vi.mocked(call).mockReset()
+  vi.mocked(call).mockImplementation((async (ch: string, ...args: never[]) =>
+    replies[ch](...args)) as typeof call)
+  useStore.setState({
+    ready: true,
+    repos,
+    tasks: {},
+    timelines: {},
+    view: { kind: 'new' },
+    toast: undefined,
+    claude: { found: true, loggedIn: true },
+    settings: {
+      defaultModel: 'claude-sonnet-5-5',
+      worktreeRoot: '/wt',
+      branchPrefix: 'harness/',
+      alwaysAllowedCommands: [],
+      loadProjectSettings: false
+    }
+  })
+})
+
+const start = () => screen.getByRole('button', { name: /開始釐清/ })
+
+describe('NewTaskScreen', () => {
+  test('預設選第一個 repo、目前分支與設定的預設模型', async () => {
+    render(<NewTaskScreen />)
+    expect(screen.getByRole('heading', { name: '想改什麼？' })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /shop-api/ })).toBeChecked()
+    expect(screen.getByText('~/Github/shop-api')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByLabelText('從哪個分支開始')).toHaveValue('develop'))
+    expect(screen.getByLabelText('模型')).toHaveValue('claude-sonnet-5-5')
+    expect(start()).toBeDisabled()
+  })
+
+  test('填寫需求後建立任務並打開它', async () => {
+    render(<NewTaskScreen />)
+    await userEvent.click(screen.getByRole('radio', { name: /web-dashboard/ }))
+    await waitFor(() => expect(screen.getByLabelText('從哪個分支開始')).toHaveValue('trunk'))
+    await userEvent.type(screen.getByLabelText('需求'), '加上登入失敗鎖定')
+    await userEvent.selectOptions(screen.getByLabelText('模型'), 'claude-opus-5-5')
+    await userEvent.click(start())
+    expect(call).toHaveBeenCalledWith('tasks:create', {
+      repoId: 'r2',
+      request: '加上登入失敗鎖定',
+      baseBranch: 'trunk',
+      model: 'claude-opus-5-5'
+    })
+    await waitFor(() => expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 'new1' }))
+  })
+
+  test('建立失敗時顯示錯誤並留在原畫面', async () => {
+    replies['tasks:create'] = () => {
+      throw new Error('尚未登入')
+    }
+    render(<NewTaskScreen />)
+    await waitFor(() => expect(screen.getByLabelText('從哪個分支開始')).toHaveValue('develop'))
+    await userEvent.type(screen.getByLabelText('需求'), '需求')
+    await userEvent.click(start())
+    await waitFor(() => expect(useStore.getState().toast).toContain('尚未登入'))
+    expect(useStore.getState().view).toEqual({ kind: 'new' })
+    expect(start()).toBeEnabled()
+  })
+
+  test('沒有 repo 時無法開始；選擇資料夾後選取新加入的 repo', async () => {
+    useStore.setState({ repos: [] })
+    replies['repos:pick'] = () => {
+      const r3 = { id: 'r3', name: 'new-repo', path: '/tmp/new-repo', addedAt: '' }
+      useStore.setState({ repos: [...repos, r3] })
+      return r3
+    }
+    render(<NewTaskScreen />)
+    await userEvent.type(screen.getByLabelText('需求'), '需求')
+    expect(start()).toBeDisabled()
+    await userEvent.click(screen.getByRole('button', { name: /選擇其他資料夾/ }))
+    await waitFor(() => expect(screen.getByRole('radio', { name: /new-repo/ })).toBeChecked())
+    await waitFor(() => expect(start()).toBeEnabled())
+  })
+
+  test('Claude Code 未登入時顯示提示並停用開始', async () => {
+    useStore.setState({ claude: { found: true, loggedIn: false, error: '尚未登入 Claude Code' } })
+    render(<NewTaskScreen />)
+    await userEvent.type(screen.getByLabelText('需求'), '需求')
+    expect(screen.getByRole('alert')).toHaveTextContent('尚未登入 Claude Code')
+    expect(start()).toBeDisabled()
+    await userEvent.click(screen.getByRole('button', { name: '重新檢查' }))
+    expect(call).toHaveBeenCalledWith('claude:status', true)
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
+    await waitFor(() => expect(start()).toBeEnabled())
+  })
+})
+```
+
+選取的 repo、分支清單與分支選擇都以「是哪個 repo 的」為鍵存在 state，畫面上的值由它們推導（不在 effect 裡同步 setState）：選的 repo 不在清單裡時用第一個；分支清單只對載入它的 repo 有效；目前分支不在清單裡（detached HEAD）時用第一個分支。沒有 repo 時顯示提示文字。
 
 **Step 1: ClaudeBanner.tsx**（Claude Code 未就緒時顯示）
 
 ```tsx
+// src/renderer/src/components/ClaudeBanner.tsx
+// Claude Code 未就緒（找不到或未登入）時顯示；登入後按「重新檢查」更新狀態
 import { useStore } from '../store'
 import { call } from '../api'
 import { Button, Icons } from './ui'
@@ -9515,10 +9657,20 @@ export function ClaudeBanner() {
   const { claude, act } = useStore()
   if (claude?.loggedIn) return null
   return (
-    <div role="alert" className="flex items-center gap-3 rounded-xl bg-red-50 px-3.5 py-3 text-[13px] text-danger">
-      <Icons.Info />
+    <div
+      role="alert"
+      className="flex items-center gap-3 rounded-xl bg-danger-soft px-3.5 py-3 text-[13px] text-danger"
+    >
+      <Icons.Info className="flex-none" />
       <span className="flex-1">{claude?.error ?? '正在檢查 Claude Code…'}</span>
-      <Button size="sm" onClick={() => void act(async () => useStore.setState({ claude: await call('claude:status', true) }))}>重新檢查</Button>
+      <Button
+        size="sm"
+        onClick={() =>
+          void act(async () => useStore.setState({ claude: await call('claude:status', true) }))
+        }
+      >
+        重新檢查
+      </Button>
     </div>
   )
 }
@@ -9527,6 +9679,8 @@ export function ClaudeBanner() {
 **Step 2: NewTaskScreen.tsx（對照 `docs/design/B1-NewTask.dc.html`）**
 
 ```tsx
+// src/renderer/src/screens/NewTaskScreen.tsx
+// 對照 docs/design/B1-NewTask.dc.html
 import { useEffect, useState } from 'react'
 import { MODELS, type ModelId } from '@shared/types'
 import { call } from '../api'
@@ -9534,89 +9688,183 @@ import { ClaudeBanner } from '../components/ClaudeBanner'
 import { Button, cx, Icons, inputClass, textareaClass } from '../components/ui'
 import { useStore } from '../store'
 
+/** 把家目錄縮寫成 ~，卡片上比較好讀 */
+const shortPath = (p: string) => p.replace(/^\/(Users|home)\/[^/]+(?=\/|$)/, '~')
+
 export function NewTaskScreen() {
   const { repos, settings, claude, act, open } = useStore()
-  const [repoId, setRepoId] = useState(repos[0]?.id)
+  const [picked, setPicked] = useState<string>()
   const [request, setRequest] = useState('')
-  const [branches, setBranches] = useState<string[]>([])
-  const [base, setBase] = useState('')
+  const [branchInfo, setBranchInfo] = useState<{
+    repoId: string
+    branches: string[]
+    current: string
+  }>()
+  const [baseChoice, setBaseChoice] = useState<{ repoId: string; value: string }>()
   const [model, setModel] = useState<ModelId>(settings?.defaultModel ?? 'claude-opus-5-5')
   const [busy, setBusy] = useState(false)
 
-  useEffect(() => { if (!repoId && repos[0]) setRepoId(repos[0].id) }, [repos, repoId])
+  // 選的 repo 不在清單裡（還沒選、或剛被移除）時用第一個
+  const repoId = repos.some((r) => r.id === picked) ? picked : repos[0]?.id
+  // 分支清單與選擇只對載入它的 repo 有效，切換 repo 時不會沿用上一個 repo 的分支
+  const info = repoId && branchInfo?.repoId === repoId ? branchInfo : undefined
+  const branches = info?.branches ?? []
+  const choice = repoId && baseChoice?.repoId === repoId ? baseChoice.value : undefined
+  // 目前分支不在清單裡（例如 detached HEAD）時用第一個分支
+  const base =
+    choice ?? (info && (branches.includes(info.current) ? info.current : branches[0])) ?? ''
+
   useEffect(() => {
     if (!repoId) return
+    let live = true
     void act(async () => {
       const r = await call('repos:branches', repoId)
-      setBranches(r.branches)
-      setBase(r.current)
+      if (live) setBranchInfo({ repoId, ...r })
     })
+    return () => {
+      live = false
+    }
   }, [repoId, act])
 
+  const ready = !!claude?.loggedIn && !!repoId && !!request.trim() && !!base && !busy
+
   const submit = async () => {
-    if (!repoId || !request.trim()) return
+    if (!ready || !repoId) return
     setBusy(true)
     const task = await act(() => call('tasks:create', { repoId, request, baseBranch: base, model }))
     setBusy(false)
     if (task) await open({ kind: 'task', taskId: task.id })
   }
 
+  const pickFolder = () =>
+    void act(async () => {
+      const r = await call('repos:pick')
+      if (r) setPicked(r.id)
+    })
+
   return (
-    <main className="flex flex-1 flex-col items-center overflow-y-auto rounded-2xl bg-surface px-7 py-14 shadow-card">
+    <main className="flex min-w-0 flex-1 flex-col items-center overflow-y-auto rounded-2xl bg-surface px-7 py-14 shadow-card">
       <div className="flex w-full max-w-[680px] flex-col gap-7">
         <ClaudeBanner />
         <div className="flex flex-col gap-1">
           <h1 className="m-0 text-[26px] font-bold">想改什麼？</h1>
-          <span className="text-muted">選一個 repo，用一兩句話描述需求。Claude 會先讀程式碼，再用問題跟你釐清細節。</span>
+          <span className="text-muted">
+            選一個 repo，用一兩句話描述需求。Claude 會先讀程式碼，再用問題跟你釐清細節。
+          </span>
         </div>
 
         <fieldset className="flex flex-col gap-2.5">
           <legend className="mb-2.5 text-[13px] font-medium">Repo</legend>
-          <div className="grid grid-cols-2 gap-2.5">
-            {repos.map((r) => (
-              <label key={r.id} className={cx('flex cursor-pointer items-center gap-3 rounded-[14px] p-3.5', repoId === r.id ? 'bg-brand-tint shadow-[0_0_0_2px_var(--color-brand)]' : 'bg-fill-2')}>
-                <input type="radio" name="repo" checked={repoId === r.id} onChange={() => setRepoId(r.id)} className="accent-brand" />
-                <span className="flex min-w-0 flex-col">
-                  <span className="font-medium">{r.name}</span>
-                  <span className="truncate font-mono text-[11px] text-muted">{r.path}</span>
-                </span>
-              </label>
-            ))}
-          </div>
-          <button type="button" onClick={() => void act(async () => { const r = await call('repos:pick'); if (r) setRepoId(r.id) })}
-            className="flex h-10 items-center gap-2 self-start rounded-xl border border-dashed border-[#b8c0cc] bg-surface px-3.5 text-[13px] text-ink-2">
-            <Icons.Folder width={14} height={14} />選擇其他資料夾…
+          {repos.length > 0 ? (
+            <div className="grid grid-cols-2 gap-2.5">
+              {repos.map((r) => {
+                const on = repoId === r.id
+                return (
+                  <label
+                    key={r.id}
+                    className={cx(
+                      'flex cursor-pointer items-center gap-3 rounded-[14px] p-3.5',
+                      on ? 'bg-brand-tint shadow-[0_0_0_2px_var(--color-brand)]' : 'bg-fill-2'
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="repo"
+                      checked={on}
+                      onChange={() => setPicked(r.id)}
+                      className="accent-brand"
+                    />
+                    <span className="flex min-w-0 flex-col">
+                      <span className="truncate font-medium">{r.name}</span>
+                      <span
+                        className={cx(
+                          'truncate font-mono text-[11px]',
+                          on ? 'text-brand-muted' : 'text-muted'
+                        )}
+                        title={r.path}
+                      >
+                        {shortPath(r.path)}
+                      </span>
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+          ) : (
+            <span className="text-[13px] text-muted">還沒有加入 repo，先選一個 git 資料夾。</span>
+          )}
+          <button
+            type="button"
+            onClick={pickFolder}
+            className="flex h-10 cursor-pointer items-center gap-2 self-start rounded-xl border border-dashed border-line-strong bg-surface px-3.5 text-[13px] text-ink-2 hover:bg-fill-2"
+          >
+            <Icons.Folder width={14} height={14} />
+            選擇其他資料夾…
           </button>
         </fieldset>
 
         <label className="flex flex-col gap-2.5">
           <span className="text-[13px] font-medium">需求</span>
-          <textarea rows={5} value={request} onChange={(e) => setRequest(e.target.value)}
-            placeholder="例如：登入 API 要加上失敗次數限制，連續失敗太多次就鎖帳號。" className={cx(textareaClass, 'rounded-[14px] px-4 py-3.5 text-sm')} />
+          <textarea
+            rows={5}
+            value={request}
+            onChange={(e) => setRequest(e.target.value)}
+            placeholder="例如：登入 API 要加上失敗次數限制，連續失敗太多次就鎖帳號。"
+            className={cx(
+              textareaClass,
+              'resize-y rounded-[14px] px-4 py-3.5 text-sm leading-[1.65]'
+            )}
+          />
         </label>
 
         <div className="flex flex-wrap gap-4">
           <label className="flex min-w-[200px] flex-1 flex-col gap-2">
             <span className="text-[13px] font-medium">從哪個分支開始</span>
-            <select value={base} onChange={(e) => setBase(e.target.value)} className={inputClass}>
-              {branches.map((b) => <option key={b} value={b}>{b}</option>)}
+            <select
+              value={base}
+              onChange={(e) => repoId && setBaseChoice({ repoId, value: e.target.value })}
+              disabled={!branches.length}
+              className={cx(inputClass, 'px-3 text-sm')}
+            >
+              {branches.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
             </select>
           </label>
           <label className="flex min-w-[200px] flex-1 flex-col gap-2">
             <span className="text-[13px] font-medium">模型</span>
-            <select value={model} onChange={(e) => setModel(e.target.value as ModelId)} className={inputClass}>
-              {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}（{m.hint}）</option>)}
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value as ModelId)}
+              className={cx(inputClass, 'px-3 text-sm')}
+            >
+              {MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}（{m.hint}）
+                </option>
+              ))}
             </select>
           </label>
         </div>
 
         <div className="flex items-center gap-3 rounded-xl bg-fill-2 px-3.5 py-3 text-[13px] text-ink-2">
           <Icons.Info className="flex-none text-brand" />
-          <span>Harness 會建立獨立的 git worktree。釐清階段 Claude 只會讀檔案；規格經你核准後，才會在 worktree 裡改程式碼。</span>
+          <span>
+            Harness 會建立獨立的 git worktree。釐清階段 Claude 只會讀檔案；規格經你核准後，才會在
+            worktree 裡改程式碼。
+          </span>
         </div>
 
-        <Button variant="primary" className="h-[46px] self-end px-6" disabled={!claude?.loggedIn || !repoId || !request.trim() || !base || busy} onClick={() => void submit()}>
-          {busy ? '建立中…' : '開始釐清'}<Icons.Arrow />
+        <Button
+          variant="primary"
+          className="h-[46px] self-end px-6 text-sm"
+          disabled={!ready}
+          onClick={() => void submit()}
+        >
+          {busy ? '建立中…' : '開始釐清'}
+          <Icons.Arrow />
         </Button>
       </div>
     </main>
@@ -9624,15 +9872,24 @@ export function NewTaskScreen() {
 }
 ```
 
+**Step 2.5: App.tsx** — 加上 `import { NewTaskScreen } from './screens/NewTaskScreen'`，內容區改為：
+
+```tsx
+          {view.kind === 'new' && <NewTaskScreen />}
+          {view.kind === 'task' && <TaskScreen taskId={view.taskId} />}
+          {/* Task 34 加入 SettingsScreen */}
+```
+
 **Step 3: 驗證**
 
+Run: `npx vitest run tests/renderer` → PASS
 Run: `npm run typecheck` → PASS
 Run: `npm run dev` → 新任務畫面與設計稿一致；未加入 repo 時「開始釐清」為停用。
 
 **Step 4: Commit**
 
 ```bash
-git add src/renderer/src
+git add src/renderer/src tests/renderer package.json package-lock.json
 git commit -m "feat(ui): add new task screen
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"

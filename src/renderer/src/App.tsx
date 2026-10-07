@@ -2,6 +2,7 @@
 import { useEffect } from 'react'
 import { Sidebar } from './components/Sidebar'
 import { Toast } from './components/Toast'
+import { NewTaskScreen } from './screens/NewTaskScreen'
 import { TaskScreen } from './screens/TaskScreen'
 import { useStore } from './store'
 
@@ -37,8 +38,9 @@ export default function App() {
       <div className="flex min-h-0 flex-1 gap-3 px-3 pb-3">
         <Sidebar />
         <div className="flex min-w-0 flex-1 gap-3">
+          {view.kind === 'new' && <NewTaskScreen />}
           {view.kind === 'task' && <TaskScreen taskId={view.taskId} />}
-          {/* Task 28 加入 NewTaskScreen，Task 34 加入 SettingsScreen */}
+          {/* Task 34 加入 SettingsScreen */}
         </div>
       </div>
       <Toast />

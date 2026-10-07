@@ -3,8 +3,15 @@
 // 改這個檔時 Vite 會整頁重新載入而不是 fast refresh，換來各畫面只需一個 import 來源。
 /* eslint-disable react-refresh/only-export-components */
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode, SVGProps } from 'react'
+import { extendTailwindMerge } from 'tailwind-merge'
 
-export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ')
+// 讓呼叫端傳入的 className 能覆蓋元件預設的 class（例如 Button 的 h-11 被 h-[42px] 取代）。
+// Tailwind 產生的 CSS 順序不看 class 寫的先後，同一屬性的兩個 class 誰贏不一定，所以要先合併掉。
+const twMerge = extendTailwindMerge({
+  extend: { theme: { shadow: ['card', 'raised', 'focus', 'dialog'] } }
+})
+export const cx = (...c: (string | false | null | undefined)[]) =>
+  twMerge(c.filter(Boolean).join(' '))
 
 type Variant = 'primary' | 'secondary' | 'dark' | 'ghost' | 'danger'
 const VARIANTS: Record<Variant, string> = {
