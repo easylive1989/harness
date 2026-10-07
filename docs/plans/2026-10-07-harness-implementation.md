@@ -222,6 +222,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   --shadow-card: 0 1px 3px rgba(16, 24, 40, 0.06);
   --shadow-raised: 0 1px 2px rgba(16, 24, 40, 0.06), 0 2px 8px rgba(16, 24, 40, 0.05);
   --shadow-focus: 0 0 0 1px #cfe3e0, 0 6px 24px rgba(15, 118, 110, 0.1);
+  --shadow-tab: 0 1px 2px rgba(16, 24, 40, 0.08);
   --shadow-dialog: 0 20px 60px rgba(16, 24, 40, 0.25);
 }
 
@@ -2515,7 +2516,7 @@ describe('GitService', () => {
 
   test('detached HEAD：branches 只列真正的分支，branchInfo 的 current 取第一個分支', async () => {
     sh(repo, 'branch', 'develop')
-    sh(repo, 'tag', 'main')
+    sh(repo, 'tag', 'v1')
     sh(repo, 'checkout', '-q', '--detach')
     expect(await git.branches(repo)).toEqual(['develop', 'main'])
     expect(await git.currentBranch(repo)).toBe('HEAD')
@@ -2523,15 +2524,31 @@ describe('GitService', () => {
       branches: ['develop', 'main'],
       current: 'develop'
     })
-    sh(repo, 'checkout', '-q', 'main')
-    expect(await git.branchInfo(repo)).toEqual({ branches: ['develop', 'main'], current: 'main' })
+    sh(repo, 'checkout', '-q', 'develop')
+    expect(await git.branchInfo(repo)).toEqual({
+      branches: ['develop', 'main'],
+      current: 'develop'
+    })
+  })
+
+  test('分支與 tag 同名時仍回傳正確的分支名稱', async () => {
+    // 停在 main 時建立同名 tag；測試本身不再用 main 這個名字下 git 指令，避免 ambiguous 警告
+    sh(repo, 'branch', 'alpha')
+    sh(repo, 'tag', 'main')
+    expect(await git.branches(repo)).toEqual(['alpha', 'main'])
+    expect(await git.currentBranch(repo)).toBe('main')
+    expect(await git.branchInfo(repo)).toEqual({ branches: ['alpha', 'main'], current: 'main' })
   })
 
   test('沒有任何 commit 的 repo：沒有分支，current 為空字串', async () => {
     const empty = await mkdtemp(join(tmpdir(), 'harness-git-empty-'))
-    sh(empty, 'init', '-q', '-b', 'main')
-    expect(await git.branches(empty)).toEqual([])
-    expect(await git.branchInfo(empty)).toEqual({ branches: [], current: '' })
+    try {
+      sh(empty, 'init', '-q', '-b', 'main')
+      expect(await git.branches(empty)).toEqual([])
+      expect(await git.branchInfo(empty)).toEqual({ branches: [], current: '' })
+    } finally {
+      await rm(empty, { recursive: true, force: true })
+    }
   })
 
   test('建立 worktree、commit、diff 與統計', async () => {
@@ -8490,13 +8507,15 @@ vi.mock('@renderer/api', async (importOriginal) => ({
   onEvent: vi.fn(() => () => {})
 }))
 import { call, onEvent } from '@renderer/api'
-import { useStore } from '@renderer/store'
+import { resetStoreInternals, useStore } from '@renderer/store'
 import { makeTask } from '../fixtures/task'
 
 beforeEach(() => {
   vi.mocked(call).mockReset()
+  resetStoreInternals()
   useStore.setState({
     ready: false,
+    claude: undefined,
     tasks: {},
     timelines: {},
     feedback: {},
@@ -8531,6 +8550,50 @@ describe('store.apply', () => {
   })
 })
 
+const ev = (id: string) => ({
+  id,
+  ts: '',
+  channel: 'main' as const,
+  kind: 'assistant_text' as const,
+  text: id
+})
+
+describe('時間軸讀取中的即時事件', () => {
+  test('讀取期間收到的事件會接在快照後面，去掉快照裡已有的並保持順序', async () => {
+    let reply!: (events: ReturnType<typeof ev>[]) => void
+    vi.mocked(call).mockImplementation(
+      (() => new Promise((r) => (reply = r as typeof reply))) as unknown as typeof call
+    )
+    const opening = useStore.getState().open({ kind: 'task', taskId: 'a' })
+    // 讀取中再打開一次不會重複讀取
+    void useStore.getState().open({ kind: 'task', taskId: 'a' })
+    expect(call).toHaveBeenCalledTimes(1)
+    const apply = (id: string) =>
+      useStore.getState().apply({ type: 'timeline', taskId: 'a', event: ev(id) })
+    apply('e2') // 快照裡也有
+    apply('e3')
+    apply('e3') // 重複
+    apply('e4')
+    expect(useStore.getState().timelines.a).toBeUndefined()
+    reply([ev('e1'), ev('e2')])
+    await opening
+    expect(useStore.getState().timelines.a.map((e) => e.id)).toEqual(['e1', 'e2', 'e3', 'e4'])
+    apply('e4')
+    apply('e5')
+    expect(useStore.getState().timelines.a.map((e) => e.id)).toEqual(['e1', 'e2', 'e3', 'e4', 'e5'])
+  })
+
+  test('讀取失敗時丟掉暫存，之後再打開會重新讀取', async () => {
+    vi.mocked(call).mockRejectedValueOnce(new Error('x'))
+    await useStore.getState().open({ kind: 'task', taskId: 'a' })
+    useStore.getState().apply({ type: 'timeline', taskId: 'a', event: ev('e1') })
+    expect(useStore.getState().timelines.a).toBeUndefined()
+    vi.mocked(call).mockResolvedValueOnce([ev('e0')] as never)
+    await useStore.getState().open({ kind: 'task', taskId: 'a' })
+    expect(useStore.getState().timelines.a.map((e) => e.id)).toEqual(['e0'])
+  })
+})
+
 const ipcError = (channel: string, msg: string) =>
   new Error(`Error invoking remote method '${channel}': Error: ${msg}`)
 
@@ -8557,11 +8620,45 @@ describe('store.init / open / act', () => {
     expect(off).toHaveBeenCalled()
   })
 
+  test('初始快照與載入期間收到的任務事件合併，保留 updatedAt 較新的', async () => {
+    let reply!: (tasks: unknown) => void
+    vi.mocked(call).mockImplementation((async (ch: string) => {
+      if (ch === 'tasks:list') return new Promise<unknown>((r) => (reply = r))
+      if (ch === 'claude:status') return { found: true, loggedIn: true }
+      return ch === 'repos:list' ? [] : {}
+    }) as typeof call)
+    const unsubscribe = useStore.getState().init()
+    const apply = (t: ReturnType<typeof makeTask>) =>
+      useStore.getState().apply({ type: 'task', task: t })
+    apply(makeTask({ id: 'a', title: '事件較新', updatedAt: '2026-10-07T00:00:02.000Z' }))
+    apply(makeTask({ id: 'b', title: '事件較舊', updatedAt: '2026-10-07T00:00:00.000Z' }))
+    apply(makeTask({ id: 'c', title: '只有事件', status: 'done' }))
+    await vi.waitFor(() => expect(reply).toBeDefined())
+    reply([
+      makeTask({
+        id: 'a',
+        title: '快照較舊',
+        updatedAt: '2026-10-07T00:00:01.000Z',
+        status: 'done'
+      }),
+      makeTask({
+        id: 'b',
+        title: '快照較新',
+        updatedAt: '2026-10-07T00:00:01.000Z',
+        status: 'done'
+      })
+    ])
+    await vi.waitFor(() => expect(useStore.getState().ready).toBe(true))
+    const t = useStore.getState().tasks
+    expect([t.a.title, t.b.title, t.c.title]).toEqual(['事件較新', '快照較新', '只有事件'])
+    unsubscribe()
+  })
+
   test('載入失敗時仍進入畫面並顯示錯誤', async () => {
     vi.mocked(call).mockRejectedValue(ipcError('repos:list', '讀取失敗'))
     const unsubscribe = useStore.getState().init()
     await vi.waitFor(() => expect(useStore.getState().ready).toBe(true))
-    expect(useStore.getState().toast).toBe('讀取失敗')
+    expect(useStore.getState().toast?.text).toBe('讀取失敗')
     unsubscribe()
   })
 
@@ -8570,7 +8667,7 @@ describe('store.init / open / act', () => {
     await useStore.getState().open({ kind: 'task', taskId: 'x' })
     expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 'x' })
     expect(useStore.getState().timelines.x).toBeUndefined()
-    expect(useStore.getState().toast).toBe('找不到任務')
+    expect(useStore.getState().toast?.text).toBe('找不到任務')
   })
 
   test('act 回傳結果；失敗時只留主程序的訊息', async () => {
@@ -8579,7 +8676,7 @@ describe('store.init / open / act', () => {
       throw ipcError('tasks:create', '尚未登入')
     })
     expect(r).toBeUndefined()
-    expect(useStore.getState().toast).toBe('尚未登入')
+    expect(useStore.getState().toast?.text).toBe('尚未登入')
     useStore.getState().dismissToast()
     expect(useStore.getState().toast).toBeUndefined()
   })
@@ -8630,6 +8727,29 @@ describe('store.recheckClaude（視窗取得焦點時）', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('store.recheckClaude：claude 沒有值', () => {
+  test('初始載入失敗、claude 沒有值時也會重新偵測', async () => {
+    vi.mocked(call).mockResolvedValue({ found: true, loggedIn: true } as never)
+    useStore.setState({ ready: true, claude: undefined })
+    await useStore.getState().recheckClaude()
+    expect(call).toHaveBeenCalledWith('claude:status', true)
+    expect(useStore.getState().claude?.loggedIn).toBe(true)
+    await useStore.getState().recheckClaude()
+    expect(call).toHaveBeenCalledTimes(1)
+  })
+
+  test('resetStoreInternals 清掉節流', async () => {
+    vi.mocked(call).mockResolvedValue({ found: true, loggedIn: false } as never)
+    useStore.setState({ ready: true, claude: { found: true, loggedIn: false } })
+    await useStore.getState().recheckClaude()
+    await useStore.getState().recheckClaude()
+    expect(call).toHaveBeenCalledTimes(1)
+    resetStoreInternals()
+    await useStore.getState().recheckClaude()
+    expect(call).toHaveBeenCalledTimes(2)
   })
 })
 ```
@@ -8684,7 +8804,7 @@ import { call, errorText, onEvent } from './api'
 
 export type View = { kind: 'new' } | { kind: 'task'; taskId: string } | { kind: 'settings' }
 
-interface State {
+export interface State {
   ready: boolean
   claude?: ClaudeStatus
   settings?: Settings
@@ -8694,7 +8814,8 @@ interface State {
   view: View
   activeBranch: Record<string, string | undefined>
   feedback: Record<string, FeedbackItem[]>
-  toast?: string
+  /** id 每次遞增：同樣的錯誤再出現一次也會重新計時 */
+  toast?: { id: number; text: string }
   /** 訂閱主程序事件並載入初始資料；回傳取消訂閱（給 useEffect 的 cleanup 用） */
   init(): () => void
   apply(e: AppEvent): void
@@ -8704,6 +8825,7 @@ interface State {
   addFeedback(taskId: string, item: FeedbackItem): void
   removeFeedback(taskId: string, anchor: string): void
   clearFeedback(taskId: string): void
+  showToast(text: string): void
   dismissToast(): void
   /** 視窗重新取得焦點時呼叫：Claude Code 未就緒就重新偵測（最多每 5 秒一次） */
   recheckClaude(): Promise<void>
@@ -8712,8 +8834,24 @@ interface State {
 /** 視窗取得焦點時重新偵測 Claude Code 的最短間隔 */
 export const CLAUDE_RECHECK_MS = 5000
 
-// 上次因視窗取得焦點而重新偵測的時間（只在這個模組內用來節流）
+// 上次因視窗取得焦點而重新偵測的時間（節流用）
 let lastClaudeRecheck = -Infinity
+let toastSeq = 0
+/** 正在讀取時間軸的任務 → 讀取期間收到的即時事件（快照回來後併進去） */
+const loadingTimelines = new Map<string, TimelineEvent[]>()
+/** 每份時間軸已有的事件 id（以陣列本身為鍵，直接 setState 換掉陣列時會自動重建） */
+const timelineIds = new WeakMap<TimelineEvent[], Set<string>>()
+const idsOf = (list: TimelineEvent[]) => {
+  let ids = timelineIds.get(list)
+  if (!ids) timelineIds.set(list, (ids = new Set(list.map((e) => e.id))))
+  return ids
+}
+
+/** 測試用：清掉模組層級的節流與讀取中狀態 */
+export function resetStoreInternals() {
+  lastClaudeRecheck = -Infinity
+  loadingTimelines.clear()
+}
 
 export const useStore = create<State>((set, get) => ({
   ready: false,
@@ -8738,19 +8876,22 @@ export const useStore = create<State>((set, get) => ({
           call('tasks:list')
         ])
         const first = get().ready
-        set({
-          claude,
-          settings,
-          repos,
-          tasks: Object.fromEntries(tasks.map((t) => [t.id, t])),
-          ready: true
+        set((s) => {
+          // 載入期間可能已經從事件收到較新的任務狀態：同一任務保留 updatedAt 較新的那份
+          const merged: Record<string, Task> = Object.fromEntries(tasks.map((t) => [t.id, t]))
+          for (const t of Object.values(s.tasks)) {
+            const snap = merged[t.id]
+            if (!snap || t.updatedAt > snap.updatedAt) merged[t.id] = t
+          }
+          return { claude, settings, repos, tasks: merged, ready: true }
         })
         // StrictMode 會讓 init 跑兩次：只有第一次載入時自動打開進行中的任務
         const active = tasks.find((t) => t.status !== 'discarded' && t.status !== 'done')
         if (!first && active && get().view.kind === 'new')
           await get().open({ kind: 'task', taskId: active.id })
       } catch (e) {
-        set({ toast: errorText(e), ready: true })
+        get().showToast(errorText(e))
+        set({ ready: true })
       }
     })()
     return () => {
@@ -8763,31 +8904,55 @@ export const useStore = create<State>((set, get) => ({
     if (e.type === 'task') set((s) => ({ tasks: { ...s.tasks, [e.task.id]: e.task } }))
     else if (e.type === 'repos') set({ repos: e.repos })
     else if (e.type === 'timeline') {
+      const buffer = loadingTimelines.get(e.taskId)
+      if (buffer) {
+        buffer.push(e.event)
+        return
+      }
       set((s) => {
+        // 只附加到已載入的時間軸；還沒打開過的任務等打開時再整份讀取
         const list = s.timelines[e.taskId]
-        if (!list || list.some((x) => x.id === e.event.id)) return {}
-        return { timelines: { ...s.timelines, [e.taskId]: [...list, e.event] } }
+        if (!list) return {}
+        const ids = idsOf(list)
+        if (ids.has(e.event.id)) return {}
+        const next = [...list, e.event]
+        ids.add(e.event.id)
+        timelineIds.set(next, ids)
+        return { timelines: { ...s.timelines, [e.taskId]: next } }
       })
     }
   },
 
   async open(view) {
     set({ view })
-    if (view.kind === 'task' && !get().timelines[view.taskId]) {
-      const events = await get().act(() => call('tasks:timeline', view.taskId))
-      if (!events) return
-      // 同時打開兩次時，先回來的那份已經在接收即時事件，保留它
-      set((s) =>
-        s.timelines[view.taskId] ? {} : { timelines: { ...s.timelines, [view.taskId]: events } }
-      )
-    }
+    if (view.kind !== 'task') return
+    const id = view.taskId
+    if (get().timelines[id] || loadingTimelines.has(id)) return
+    // 讀取期間的即時事件先暫存，快照回來後接在後面（去掉快照裡已有的）
+    loadingTimelines.set(id, [])
+    const events = await get().act(() => call('tasks:timeline', id))
+    const buffered = loadingTimelines.get(id) ?? []
+    loadingTimelines.delete(id)
+    if (!events) return
+    set((s) => {
+      if (s.timelines[id]) return {}
+      const ids = new Set(events.map((e) => e.id))
+      const list = [...events]
+      for (const e of buffered) {
+        if (ids.has(e.id)) continue
+        ids.add(e.id)
+        list.push(e)
+      }
+      timelineIds.set(list, ids)
+      return { timelines: { ...s.timelines, [id]: list } }
+    })
   },
 
   async act(fn) {
     try {
       return await fn()
     } catch (e) {
-      set({ toast: errorText(e) })
+      get().showToast(errorText(e))
       return undefined
     }
   },
@@ -8809,11 +8974,13 @@ export const useStore = create<State>((set, get) => ({
       }
     })),
   clearFeedback: (taskId) => set((s) => ({ feedback: { ...s.feedback, [taskId]: [] } })),
+  showToast: (text) => set({ toast: { id: ++toastSeq, text } }),
   dismissToast: () => set({ toast: undefined }),
 
   async recheckClaude() {
     const { ready, claude } = get()
-    if (!ready || !claude || claude.loggedIn) return
+    // claude 還沒有值（例如初始載入失敗）也當成未就緒
+    if (!ready || claude?.loggedIn) return
     const now = Date.now()
     if (now - lastClaudeRecheck < CLAUDE_RECHECK_MS) return
     lastClaudeRecheck = now
@@ -8826,7 +8993,7 @@ export const useStore = create<State>((set, get) => ({
 }))
 ```
 
-`store.init()` 同步訂閱事件、回傳取消訂閱函式，資料在背景載入（App 的 `useEffect` 直接回傳它當 cleanup，StrictMode 重跑時不會重複訂閱）；載入失敗時仍設 `ready` 並顯示 toast。`open()` 讀時間軸失敗時走 `act` 顯示 toast。視窗重新取得焦點（`window` 的 `focus`）時，若 Claude Code 未就緒就以 `claude:status(true)` 重新偵測，最多每 5 秒一次（`recheckClaude`），使用者到終端機登入後回來不必手動按「重新檢查」；init 回傳的 cleanup 也會移除這個監聽。
+`store.init()` 同步訂閱事件、回傳取消訂閱函式，資料在背景載入（App 的 `useEffect` 直接回傳它當 cleanup，StrictMode 重跑時不會重複訂閱）；載入失敗時仍設 `ready` 並顯示 toast。`open()` 讀時間軸失敗時走 `act` 顯示 toast。視窗重新取得焦點（`window` 的 `focus`）時，若 Claude Code 未就緒就以 `claude:status(true)` 重新偵測，最多每 5 秒一次（`recheckClaude`），使用者到終端機登入後回來不必手動按「重新檢查」；init 回傳的 cleanup 也會移除這個監聽。`open()` 讀取時間軸期間收到的即時事件先暫存，快照回來後接在後面（以 id 去重、保持順序）；同一任務讀取中不會重複讀取。初始快照與載入期間從事件收到的任務合併，同一任務保留 `updatedAt` 較新的。每份時間軸的事件 id 以 `WeakMap<陣列, Set>` 快取來去重。`toast` 是 `{ id, text }`，同樣的錯誤再出現也會重新計時。`resetStoreInternals()` 給測試清掉節流與讀取中狀態。
 
 **Step 5: lib/stage.ts**
 
@@ -8918,7 +9085,7 @@ import { extendTailwindMerge } from 'tailwind-merge'
 // 讓呼叫端傳入的 className 能覆蓋元件預設的 class（例如 Button 的 h-11 被 h-[42px] 取代）。
 // Tailwind 產生的 CSS 順序不看 class 寫的先後，同一屬性的兩個 class 誰贏不一定，所以要先合併掉。
 const twMerge = extendTailwindMerge({
-  extend: { theme: { shadow: ['card', 'raised', 'focus', 'dialog'] } }
+  extend: { theme: { shadow: ['card', 'raised', 'focus', 'tab', 'dialog'] } }
 })
 export const cx = (...c: (string | false | null | undefined)[]) =>
   twMerge(c.filter(Boolean).join(' '))
@@ -9114,11 +9281,12 @@ vi.mock('@renderer/api', () => ({
   errorText: String
 }))
 import { call } from '@renderer/api'
+import App from '@renderer/App'
 import { Markdown } from '@renderer/components/Markdown'
 import { Sidebar } from '@renderer/components/Sidebar'
 import { Toast } from '@renderer/components/Toast'
 import { TaskScreen } from '@renderer/screens/TaskScreen'
-import { useStore } from '@renderer/store'
+import { resetStoreInternals, useStore } from '@renderer/store'
 import { makeTask } from '../fixtures/task'
 
 const repos = [
@@ -9126,9 +9294,13 @@ const repos = [
   { id: 'r2', name: 'web-dashboard', path: '/Users/me/web', addedAt: '' }
 ]
 
+const realInit = useStore.getState().init
+
 beforeEach(() => {
   vi.mocked(call).mockClear()
+  resetStoreInternals()
   useStore.setState({
+    init: realInit,
     ready: true,
     repos,
     tasks: {},
@@ -9213,30 +9385,81 @@ describe('Sidebar', () => {
   })
 })
 
-describe('TaskScreen', () => {
+describe('Sidebar 焦點', () => {
+  test('焦點換到手動收合的 repo 裡的任務時，那個 repo 重新展開', async () => {
+    useStore.setState({
+      tasks: {
+        a: makeTask({ id: 'a', repoId: 'r1', title: '任務 A', createdAt: '2026-10-07T02:00:00Z' }),
+        b: makeTask({ id: 'b', repoId: 'r2', title: '任務 B', createdAt: '2026-10-07T01:00:00Z' })
+      },
+      view: { kind: 'task', taskId: 'a' }
+    })
+    render(<Sidebar />)
+    const web = screen.getByRole('button', { name: /web-dashboard/ })
+    await userEvent.click(web) // 展開 r2
+    await userEvent.click(web) // 再手動收合 r2
+    expect(web).toHaveAttribute('aria-expanded', 'false')
+    act(() => useStore.setState({ view: { kind: 'task', taskId: 'b' } }))
+    expect(screen.getByRole('button', { name: /web-dashboard/ })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+    expect(screen.getByRole('button', { name: /任務 B/ })).toHaveAttribute('aria-current', 'page')
+  })
+})
+
+describe('TaskScreen / StageNav', () => {
+  const stage = (name: RegExp) =>
+    within(screen.getByRole('navigation', { name: '任務階段' })).getByRole('button', { name })
+
   test('可回看已經過的階段；狀態改變時回到目前階段', async () => {
     useStore.setState({ tasks: { a: makeTask({ id: 'a', status: 'spec_review' }) } })
     render(<TaskScreen taskId="a" />)
-    const tabs = within(screen.getByRole('tablist', { name: '任務階段' }))
-    expect(tabs.getByRole('tab', { name: /規格/ })).toHaveAttribute('aria-selected', 'true')
-    expect(tabs.getByRole('tab', { name: /實作/ })).toBeDisabled()
-    await userEvent.click(tabs.getByRole('tab', { name: /釐清/ }))
-    expect(tabs.getByRole('tab', { name: /釐清/ })).toHaveAttribute('aria-selected', 'true')
+    expect(stage(/規格/)).toHaveAttribute('aria-current', 'step')
+    expect(stage(/規格/)).toHaveAttribute('aria-pressed', 'true')
+    expect(stage(/實作/)).toBeDisabled()
+    await userEvent.click(stage(/釐清/))
+    expect(stage(/釐清/)).toHaveAttribute('aria-pressed', 'true')
+    expect(stage(/規格/)).toHaveAttribute('aria-pressed', 'false')
+    expect(stage(/規格/)).toHaveAttribute('aria-current', 'step')
     act(() => useStore.setState({ tasks: { a: makeTask({ id: 'a', status: 'implementing' }) } }))
-    expect(tabs.getByRole('tab', { name: /實作/ })).toHaveAttribute('aria-selected', 'true')
+    expect(stage(/實作/)).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  test('App 換任務時回到該任務的目前階段', async () => {
+    useStore.setState({
+      init: () => () => {},
+      tasks: {
+        a: makeTask({ id: 'a', repoId: 'r1', title: '任務 A', status: 'spec_review' }),
+        b: makeTask({ id: 'b', repoId: 'r1', title: '任務 B', status: 'spec_review' })
+      },
+      timelines: { a: [], b: [] },
+      view: { kind: 'task', taskId: 'a' }
+    })
+    render(<App />)
+    expect(screen.getByText('shop-api · 任務 A')).toBeInTheDocument()
+    await userEvent.click(stage(/釐清/))
+    expect(stage(/釐清/)).toHaveAttribute('aria-pressed', 'true')
+    await userEvent.click(screen.getByRole('button', { name: /任務 B/ }))
+    expect(screen.getByText('shop-api · 任務 B')).toBeInTheDocument()
+    expect(stage(/規格/)).toHaveAttribute('aria-pressed', 'true')
   })
 })
 
 describe('Toast', () => {
-  test('顯示錯誤，可關閉，8 秒後自動消失', async () => {
+  test('顯示錯誤，可關閉，8 秒後自動消失；同樣的錯誤再出現會重新計時', () => {
     vi.useFakeTimers()
     try {
-      useStore.setState({ toast: '出錯了' })
+      act(() => useStore.getState().showToast('出錯了'))
       render(<Toast />)
       expect(screen.getByRole('alert')).toHaveTextContent('出錯了')
-      act(() => vi.advanceTimersByTime(8000))
+      act(() => vi.advanceTimersByTime(6000))
+      act(() => useStore.getState().showToast('出錯了'))
+      act(() => vi.advanceTimersByTime(6000))
+      expect(screen.getByRole('alert')).toHaveTextContent('出錯了')
+      act(() => vi.advanceTimersByTime(2000))
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-      act(() => useStore.setState({ toast: '又出錯了' }))
+      act(() => useStore.getState().showToast('又出錯了'))
       act(() => screen.getByRole('button', { name: '關閉' }).click())
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     } finally {
@@ -9252,10 +9475,25 @@ describe('Markdown', () => {
     expect(call).toHaveBeenCalledWith('shell:openExternal', 'https://example.com')
     expect(screen.getByText('code').tagName).toBe('CODE')
   })
+
+  test('不渲染原始 HTML，javascript: 連結失效', async () => {
+    const { container } = render(
+      <Markdown
+        text={
+          '<img src="x" onerror="alert(1)"><script>alert(2)</script>\n\n[點我](javascript:alert(3))'
+        }
+      />
+    )
+    expect(container.querySelector('img, script')).toBeNull()
+    const link = screen.getByText('點我')
+    expect(link.getAttribute('href') ?? '').not.toMatch(/javascript:/i)
+    await userEvent.click(link)
+    expect(call).not.toHaveBeenCalled()
+  })
 })
 ```
 
-側欄依設計稿：目前任務所在的 repo（沒有打開任務時是最新任務的 repo）展開、粗體、徽章為品牌色；其他 repo 收合只顯示任務數，點標題可展開／收合（`aria-expanded`）。TaskScreen 的「回看階段」以 `taskId:status` 為鍵記在 state 裡，換任務或狀態前進時自然回到目前階段（不在 effect 裡 setState，符合 react-hooks 7 的 `set-state-in-effect`）。
+側欄依設計稿：目前任務所在的 repo（沒有打開任務時是最新任務的 repo）展開、粗體、徽章為品牌色；其他 repo 收合只顯示任務數，點標題可展開／收合（`aria-expanded`）。焦點換到另一個任務時，清掉該任務所在 repo 的手動收合（render 期間比對前一個焦點來調整 state）。StageNav 是 `<nav>` 裡的按鈕：`aria-current="step"` 標目前階段、`aria-pressed` 標正在顯示的階段，陰影用 `shadow-tab` token。TaskScreen 的「回看階段」以 `taskId:status` 為鍵記在 state 裡，換任務或狀態前進時自然回到目前階段（不在 effect 裡 setState，符合 react-hooks 7 的 `set-state-in-effect`）。
 
 **Step 1: Markdown.tsx**
 
@@ -9306,6 +9544,7 @@ import { useState } from 'react'
 import { MODELS, type Task } from '@shared/types'
 import { call } from '../api'
 import { taskStatusLabel } from '../lib/stage'
+import { useShallow } from 'zustand/react/shallow'
 import { useStore } from '../store'
 import { Button, cx, Icons, TONE_TEXT } from './ui'
 
@@ -9344,15 +9583,37 @@ function TaskItem({ task, active, onClick }: { task: Task; active: boolean; onCl
 }
 
 export function Sidebar() {
-  const { repos, tasks, view, open, claude, settings, act } = useStore()
+  const { repos, tasks, view, claude, settings } = useStore(
+    useShallow((s) => ({
+      repos: s.repos,
+      tasks: s.tasks,
+      view: s.view,
+      claude: s.claude,
+      settings: s.settings
+    }))
+  )
+  const open = useStore((s) => s.open)
+  const act = useStore((s) => s.act)
   // 使用者手動展開／收合過的 repo；沒動過的依「目前焦點」決定
   const [toggled, setToggled] = useState<Record<string, boolean>>({})
   const list = Object.values(tasks)
     .filter((t) => t.status !== 'discarded')
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   const activeId = view.kind === 'task' ? view.taskId : undefined
-  // 焦點 repo：目前打開的任務所在的 repo，否則是最新任務的 repo
-  const focusRepo = (list.find((t) => t.id === activeId) ?? list[0])?.repoId
+  // 焦點任務：目前打開的任務，否則是最新的任務；它所在的 repo 預設展開
+  const focus = list.find((t) => t.id === activeId) ?? list[0]
+  const focusRepo = focus?.repoId
+  // 焦點換到另一個任務時，清掉它所在 repo 的手動收合，讓那個 repo 一定看得到
+  // （React 文件建議的「render 期間依前一個值調整 state」，不用 effect）
+  const [prevFocus, setPrevFocus] = useState(focus?.id)
+  if (prevFocus !== focus?.id) {
+    setPrevFocus(focus?.id)
+    if (focusRepo && focusRepo in toggled) {
+      const rest = { ...toggled }
+      delete rest[focusRepo]
+      setToggled(rest)
+    }
+  }
   const model = MODELS.find((m) => m.id === settings?.defaultModel)?.label ?? ''
   return (
     <nav
@@ -9451,8 +9712,7 @@ export function StageNav({
   const current = currentStage(task)
   const order = STAGES.map((s) => s.id)
   return (
-    <div
-      role="tablist"
+    <nav
       aria-label="任務階段"
       className="ml-auto flex items-center gap-1 rounded-full bg-fill p-1 text-xs"
     >
@@ -9463,14 +9723,15 @@ export function StageNav({
           <button
             key={s.id}
             type="button"
-            role="tab"
-            aria-selected={shown === s.id}
+            // aria-current 標出任務目前所在的階段，aria-pressed 標出畫面正在顯示的階段
+            aria-current={s.id === current ? 'step' : undefined}
+            aria-pressed={shown === s.id}
             disabled={!can}
             onClick={() => onSelect(s.id)}
             className={cx(
               'rounded-full px-3 py-1 disabled:cursor-default',
               shown === s.id
-                ? 'bg-surface font-medium text-brand shadow-[0_1px_2px_rgba(16,24,40,0.08)]'
+                ? 'bg-surface font-medium text-brand shadow-tab'
                 : can
                   ? 'cursor-pointer text-brand hover:bg-surface/60'
                   : 'text-muted-2'
@@ -9480,7 +9741,7 @@ export function StageNav({
           </button>
         )
       })}
-    </div>
+    </nav>
   )
 }
 ```
@@ -9493,20 +9754,25 @@ import { useEffect } from 'react'
 import { useStore } from '../store'
 import { Icons } from './ui'
 
+export const TOAST_MS = 8000
+
 export function Toast() {
-  const { toast, dismissToast } = useStore()
+  const toast = useStore((s) => s.toast)
+  const dismissToast = useStore((s) => s.dismissToast)
+  // 以 id 為依賴：同樣的錯誤再出現一次（新的 id）也會重新計時
+  const id = toast?.id
   useEffect(() => {
-    if (!toast) return
-    const t = setTimeout(dismissToast, 8000)
+    if (id === undefined) return
+    const t = setTimeout(dismissToast, TOAST_MS)
     return () => clearTimeout(t)
-  }, [toast, dismissToast])
+  }, [id, dismissToast])
   if (!toast) return null
   return (
     <div
       role="alert"
       className="fixed right-5 bottom-5 z-50 flex max-w-md items-start gap-3 rounded-2xl bg-ink px-4 py-3 text-[13px] text-white shadow-dialog"
     >
-      <span className="flex-1 whitespace-pre-wrap">{toast}</span>
+      <span className="flex-1 whitespace-pre-wrap">{toast.text}</span>
       <button
         type="button"
         aria-label="關閉"
@@ -9564,7 +9830,7 @@ import { useEffect } from 'react'
 import { Sidebar } from './components/Sidebar'
 import { Toast } from './components/Toast'
 import { TaskScreen } from './screens/TaskScreen'
-import { useStore } from './store'
+import { type State, useStore } from './store'
 
 /** 視窗用 hiddenInset 標題列：這一條是拖曳區，左側留給紅綠燈 */
 function TitleBar({ title }: { title: string }) {
@@ -9575,8 +9841,20 @@ function TitleBar({ title }: { title: string }) {
   )
 }
 
+/** 標題列文字（選出字串，任務其他欄位變動時不必重繪 App） */
+function titleOf(s: State): string {
+  if (s.view.kind === 'settings') return '設定'
+  if (s.view.kind === 'new') return '新任務'
+  const task = s.tasks[s.view.taskId]
+  const repo = task && s.repos.find((r) => r.id === task.repoId)
+  return [repo?.name, task?.title].filter(Boolean).join(' · ')
+}
+
 export default function App() {
-  const { ready, init, view, tasks, repos } = useStore()
+  const ready = useStore((s) => s.ready)
+  const init = useStore((s) => s.init)
+  const view = useStore((s) => s.view)
+  const title = useStore(titleOf)
   useEffect(() => init(), [init])
   if (!ready)
     return (
@@ -9584,21 +9862,14 @@ export default function App() {
         載入中…
       </div>
     )
-  const task = view.kind === 'task' ? tasks[view.taskId] : undefined
-  const repo = task ? repos.find((r) => r.id === task.repoId) : undefined
-  const title =
-    view.kind === 'settings'
-      ? '設定'
-      : view.kind === 'new'
-        ? '新任務'
-        : [repo?.name, task?.title].filter(Boolean).join(' · ')
   return (
     <div className="flex h-full flex-col">
       <TitleBar title={title} />
       <div className="flex min-h-0 flex-1 gap-3 px-3 pb-3">
         <Sidebar />
         <div className="flex min-w-0 flex-1 gap-3">
-          {view.kind === 'task' && <TaskScreen taskId={view.taskId} />}
+          {/* key：換任務時重建，回看階段等畫面狀態不會帶到下一個任務 */}
+          {view.kind === 'task' && <TaskScreen key={view.taskId} taskId={view.taskId} />}
           {/* Task 28 加入 NewTaskScreen，Task 34 加入 SettingsScreen */}
         </div>
       </div>
@@ -9697,8 +9968,10 @@ describe('NewTaskScreen', () => {
     render(<NewTaskScreen />)
     expect(screen.getByRole('heading', { name: '想改什麼？' })).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /shop-api/ })).toBeChecked()
-    expect(screen.getByText('~/Github/shop-api')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByLabelText('從哪個分支開始')).toHaveValue('develop'))
+    // 選取的 repo 卡片顯示路徑與目前分支（設計稿 B1）
+    expect(screen.getByText('~/Github/shop-api · develop')).toBeInTheDocument()
+    expect(screen.getByText('~/Github/web')).toBeInTheDocument()
     expect(screen.getByLabelText('模型')).toHaveValue('claude-sonnet-5-5')
     expect(start()).toBeDisabled()
   })
@@ -9727,7 +10000,7 @@ describe('NewTaskScreen', () => {
     await waitFor(() => expect(screen.getByLabelText('從哪個分支開始')).toHaveValue('develop'))
     await userEvent.type(screen.getByLabelText('需求'), '需求')
     await userEvent.click(start())
-    await waitFor(() => expect(useStore.getState().toast).toContain('尚未登入'))
+    await waitFor(() => expect(useStore.getState().toast?.text).toContain('尚未登入'))
     expect(useStore.getState().view).toEqual({ kind: 'new' })
     expect(start()).toBeEnabled()
   })
@@ -9758,6 +10031,32 @@ describe('NewTaskScreen', () => {
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
     await waitFor(() => expect(start()).toBeEnabled())
   })
+
+  test('切換 repo 後，上一個 repo 較慢回來的分支不會蓋掉目前的', async () => {
+    let slowReply!: (v: { branches: string[]; current: string }) => void
+    replies['repos:branches'] = (id: string) =>
+      id === 'r1' ? new Promise((r) => (slowReply = r)) : branches[id]
+    render(<NewTaskScreen />)
+    await userEvent.click(screen.getByRole('radio', { name: /web-dashboard/ }))
+    await waitFor(() => expect(screen.getByLabelText('從哪個分支開始')).toHaveValue('trunk'))
+    slowReply({ branches: ['main', 'old'], current: 'old' })
+    await new Promise((r) => setTimeout(r, 0))
+    const select = screen.getByLabelText('從哪個分支開始')
+    expect(select).toHaveValue('trunk')
+    expect([...(select as HTMLSelectElement).options].map((o) => o.value)).toEqual(['trunk'])
+  })
+
+  test('重新檢查進行中時按鈕停用', async () => {
+    useStore.setState({ claude: { found: true, loggedIn: false, error: '尚未登入 Claude Code' } })
+    let done!: (v: unknown) => void
+    replies['claude:status'] = () => new Promise((r) => (done = r))
+    render(<NewTaskScreen />)
+    await userEvent.click(screen.getByRole('button', { name: '重新檢查' }))
+    expect(screen.getByRole('button', { name: '檢查中…' })).toBeDisabled()
+    done({ found: true, loggedIn: false, error: '還是沒登入' })
+    await waitFor(() => expect(screen.getByRole('button', { name: '重新檢查' })).toBeEnabled())
+    expect(screen.getByRole('alert')).toHaveTextContent('還是沒登入')
+  })
 })
 ```
 
@@ -9768,13 +10067,21 @@ describe('NewTaskScreen', () => {
 ```tsx
 // src/renderer/src/components/ClaudeBanner.tsx
 // Claude Code 未就緒（找不到或未登入）時顯示；登入後按「重新檢查」更新狀態
-import { useStore } from '../store'
+import { useState } from 'react'
 import { call } from '../api'
+import { useStore } from '../store'
 import { Button, Icons } from './ui'
 
 export function ClaudeBanner() {
-  const { claude, act } = useStore()
+  const claude = useStore((s) => s.claude)
+  const act = useStore((s) => s.act)
+  const [checking, setChecking] = useState(false)
   if (claude?.loggedIn) return null
+  const recheck = async () => {
+    setChecking(true)
+    await act(async () => useStore.setState({ claude: await call('claude:status', true) }))
+    setChecking(false)
+  }
   return (
     <div
       role="alert"
@@ -9782,13 +10089,8 @@ export function ClaudeBanner() {
     >
       <Icons.Info className="flex-none" />
       <span className="flex-1">{claude?.error ?? '正在檢查 Claude Code…'}</span>
-      <Button
-        size="sm"
-        onClick={() =>
-          void act(async () => useStore.setState({ claude: await call('claude:status', true) }))
-        }
-      >
-        重新檢查
+      <Button size="sm" disabled={checking} onClick={() => void recheck()}>
+        {checking ? '檢查中…' : '重新檢查'}
       </Button>
     </div>
   )
@@ -9811,7 +10113,11 @@ import { useStore } from '../store'
 const shortPath = (p: string) => p.replace(/^\/(Users|home)\/[^/]+(?=\/|$)/, '~')
 
 export function NewTaskScreen() {
-  const { repos, settings, claude, act, open } = useStore()
+  const repos = useStore((s) => s.repos)
+  const defaultModel = useStore((s) => s.settings?.defaultModel)
+  const loggedIn = useStore((s) => !!s.claude?.loggedIn)
+  const act = useStore((s) => s.act)
+  const open = useStore((s) => s.open)
   const [picked, setPicked] = useState<string>()
   const [request, setRequest] = useState('')
   const [branchInfo, setBranchInfo] = useState<{
@@ -9820,7 +10126,7 @@ export function NewTaskScreen() {
     current: string
   }>()
   const [baseChoice, setBaseChoice] = useState<{ repoId: string; value: string }>()
-  const [model, setModel] = useState<ModelId>(settings?.defaultModel ?? 'claude-opus-5-5')
+  const [model, setModel] = useState<ModelId>(defaultModel ?? 'claude-opus-5-5')
   const [busy, setBusy] = useState(false)
 
   // 選的 repo 不在清單裡（還沒選、或剛被移除）時用第一個
@@ -9845,7 +10151,7 @@ export function NewTaskScreen() {
     }
   }, [repoId, act])
 
-  const ready = !!claude?.loggedIn && !!repoId && !!request.trim() && !!base && !busy
+  const ready = loggedIn && !!repoId && !!request.trim() && !!base && !busy
 
   const submit = async () => {
     if (!ready || !repoId) return
@@ -9903,6 +10209,7 @@ export function NewTaskScreen() {
                         title={r.path}
                       >
                         {shortPath(r.path)}
+                        {on && info?.current ? ` · ${info.current}` : ''}
                       </span>
                     </span>
                   </label>
@@ -9995,7 +10302,8 @@ export function NewTaskScreen() {
 
 ```tsx
           {view.kind === 'new' && <NewTaskScreen />}
-          {view.kind === 'task' && <TaskScreen taskId={view.taskId} />}
+          {/* key：換任務時重建，回看階段等畫面狀態不會帶到下一個任務 */}
+          {view.kind === 'task' && <TaskScreen key={view.taskId} taskId={view.taskId} />}
           {/* Task 34 加入 SettingsScreen */}
 ```
 

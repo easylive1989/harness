@@ -8,7 +8,7 @@ import { extendTailwindMerge } from 'tailwind-merge'
 // 讓呼叫端傳入的 className 能覆蓋元件預設的 class（例如 Button 的 h-11 被 h-[42px] 取代）。
 // Tailwind 產生的 CSS 順序不看 class 寫的先後，同一屬性的兩個 class 誰贏不一定，所以要先合併掉。
 const twMerge = extendTailwindMerge({
-  extend: { theme: { shadow: ['card', 'raised', 'focus', 'dialog'] } }
+  extend: { theme: { shadow: ['card', 'raised', 'focus', 'tab', 'dialog'] } }
 })
 export const cx = (...c: (string | false | null | undefined)[]) =>
   twMerge(c.filter(Boolean).join(' '))

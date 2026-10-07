@@ -8,11 +8,12 @@ vi.mock('@renderer/api', () => ({
   errorText: String
 }))
 import { call } from '@renderer/api'
+import App from '@renderer/App'
 import { Markdown } from '@renderer/components/Markdown'
 import { Sidebar } from '@renderer/components/Sidebar'
 import { Toast } from '@renderer/components/Toast'
 import { TaskScreen } from '@renderer/screens/TaskScreen'
-import { useStore } from '@renderer/store'
+import { resetStoreInternals, useStore } from '@renderer/store'
 import { makeTask } from '../fixtures/task'
 
 const repos = [
@@ -20,9 +21,13 @@ const repos = [
   { id: 'r2', name: 'web-dashboard', path: '/Users/me/web', addedAt: '' }
 ]
 
+const realInit = useStore.getState().init
+
 beforeEach(() => {
   vi.mocked(call).mockClear()
+  resetStoreInternals()
   useStore.setState({
+    init: realInit,
     ready: true,
     repos,
     tasks: {},
@@ -107,30 +112,81 @@ describe('Sidebar', () => {
   })
 })
 
-describe('TaskScreen', () => {
+describe('Sidebar 焦點', () => {
+  test('焦點換到手動收合的 repo 裡的任務時，那個 repo 重新展開', async () => {
+    useStore.setState({
+      tasks: {
+        a: makeTask({ id: 'a', repoId: 'r1', title: '任務 A', createdAt: '2026-10-07T02:00:00Z' }),
+        b: makeTask({ id: 'b', repoId: 'r2', title: '任務 B', createdAt: '2026-10-07T01:00:00Z' })
+      },
+      view: { kind: 'task', taskId: 'a' }
+    })
+    render(<Sidebar />)
+    const web = screen.getByRole('button', { name: /web-dashboard/ })
+    await userEvent.click(web) // 展開 r2
+    await userEvent.click(web) // 再手動收合 r2
+    expect(web).toHaveAttribute('aria-expanded', 'false')
+    act(() => useStore.setState({ view: { kind: 'task', taskId: 'b' } }))
+    expect(screen.getByRole('button', { name: /web-dashboard/ })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+    expect(screen.getByRole('button', { name: /任務 B/ })).toHaveAttribute('aria-current', 'page')
+  })
+})
+
+describe('TaskScreen / StageNav', () => {
+  const stage = (name: RegExp) =>
+    within(screen.getByRole('navigation', { name: '任務階段' })).getByRole('button', { name })
+
   test('可回看已經過的階段；狀態改變時回到目前階段', async () => {
     useStore.setState({ tasks: { a: makeTask({ id: 'a', status: 'spec_review' }) } })
     render(<TaskScreen taskId="a" />)
-    const tabs = within(screen.getByRole('tablist', { name: '任務階段' }))
-    expect(tabs.getByRole('tab', { name: /規格/ })).toHaveAttribute('aria-selected', 'true')
-    expect(tabs.getByRole('tab', { name: /實作/ })).toBeDisabled()
-    await userEvent.click(tabs.getByRole('tab', { name: /釐清/ }))
-    expect(tabs.getByRole('tab', { name: /釐清/ })).toHaveAttribute('aria-selected', 'true')
+    expect(stage(/規格/)).toHaveAttribute('aria-current', 'step')
+    expect(stage(/規格/)).toHaveAttribute('aria-pressed', 'true')
+    expect(stage(/實作/)).toBeDisabled()
+    await userEvent.click(stage(/釐清/))
+    expect(stage(/釐清/)).toHaveAttribute('aria-pressed', 'true')
+    expect(stage(/規格/)).toHaveAttribute('aria-pressed', 'false')
+    expect(stage(/規格/)).toHaveAttribute('aria-current', 'step')
     act(() => useStore.setState({ tasks: { a: makeTask({ id: 'a', status: 'implementing' }) } }))
-    expect(tabs.getByRole('tab', { name: /實作/ })).toHaveAttribute('aria-selected', 'true')
+    expect(stage(/實作/)).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  test('App 換任務時回到該任務的目前階段', async () => {
+    useStore.setState({
+      init: () => () => {},
+      tasks: {
+        a: makeTask({ id: 'a', repoId: 'r1', title: '任務 A', status: 'spec_review' }),
+        b: makeTask({ id: 'b', repoId: 'r1', title: '任務 B', status: 'spec_review' })
+      },
+      timelines: { a: [], b: [] },
+      view: { kind: 'task', taskId: 'a' }
+    })
+    render(<App />)
+    expect(screen.getByText('shop-api · 任務 A')).toBeInTheDocument()
+    await userEvent.click(stage(/釐清/))
+    expect(stage(/釐清/)).toHaveAttribute('aria-pressed', 'true')
+    await userEvent.click(screen.getByRole('button', { name: /任務 B/ }))
+    expect(screen.getByText('shop-api · 任務 B')).toBeInTheDocument()
+    expect(stage(/規格/)).toHaveAttribute('aria-pressed', 'true')
   })
 })
 
 describe('Toast', () => {
-  test('顯示錯誤，可關閉，8 秒後自動消失', async () => {
+  test('顯示錯誤，可關閉，8 秒後自動消失；同樣的錯誤再出現會重新計時', () => {
     vi.useFakeTimers()
     try {
-      useStore.setState({ toast: '出錯了' })
+      act(() => useStore.getState().showToast('出錯了'))
       render(<Toast />)
       expect(screen.getByRole('alert')).toHaveTextContent('出錯了')
-      act(() => vi.advanceTimersByTime(8000))
+      act(() => vi.advanceTimersByTime(6000))
+      act(() => useStore.getState().showToast('出錯了'))
+      act(() => vi.advanceTimersByTime(6000))
+      expect(screen.getByRole('alert')).toHaveTextContent('出錯了')
+      act(() => vi.advanceTimersByTime(2000))
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-      act(() => useStore.setState({ toast: '又出錯了' }))
+      act(() => useStore.getState().showToast('又出錯了'))
       act(() => screen.getByRole('button', { name: '關閉' }).click())
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     } finally {
@@ -145,5 +201,20 @@ describe('Markdown', () => {
     await userEvent.click(screen.getByRole('link', { name: '文件' }))
     expect(call).toHaveBeenCalledWith('shell:openExternal', 'https://example.com')
     expect(screen.getByText('code').tagName).toBe('CODE')
+  })
+
+  test('不渲染原始 HTML，javascript: 連結失效', async () => {
+    const { container } = render(
+      <Markdown
+        text={
+          '<img src="x" onerror="alert(1)"><script>alert(2)</script>\n\n[點我](javascript:alert(3))'
+        }
+      />
+    )
+    expect(container.querySelector('img, script')).toBeNull()
+    const link = screen.getByText('點我')
+    expect(link.getAttribute('href') ?? '').not.toMatch(/javascript:/i)
+    await userEvent.click(link)
+    expect(call).not.toHaveBeenCalled()
   })
 })

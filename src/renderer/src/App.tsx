@@ -4,7 +4,7 @@ import { Sidebar } from './components/Sidebar'
 import { Toast } from './components/Toast'
 import { NewTaskScreen } from './screens/NewTaskScreen'
 import { TaskScreen } from './screens/TaskScreen'
-import { useStore } from './store'
+import { type State, useStore } from './store'
 
 /** 視窗用 hiddenInset 標題列：這一條是拖曳區，左側留給紅綠燈 */
 function TitleBar({ title }: { title: string }) {
@@ -15,8 +15,20 @@ function TitleBar({ title }: { title: string }) {
   )
 }
 
+/** 標題列文字（選出字串，任務其他欄位變動時不必重繪 App） */
+function titleOf(s: State): string {
+  if (s.view.kind === 'settings') return '設定'
+  if (s.view.kind === 'new') return '新任務'
+  const task = s.tasks[s.view.taskId]
+  const repo = task && s.repos.find((r) => r.id === task.repoId)
+  return [repo?.name, task?.title].filter(Boolean).join(' · ')
+}
+
 export default function App() {
-  const { ready, init, view, tasks, repos } = useStore()
+  const ready = useStore((s) => s.ready)
+  const init = useStore((s) => s.init)
+  const view = useStore((s) => s.view)
+  const title = useStore(titleOf)
   useEffect(() => init(), [init])
   if (!ready)
     return (
@@ -24,14 +36,6 @@ export default function App() {
         載入中…
       </div>
     )
-  const task = view.kind === 'task' ? tasks[view.taskId] : undefined
-  const repo = task ? repos.find((r) => r.id === task.repoId) : undefined
-  const title =
-    view.kind === 'settings'
-      ? '設定'
-      : view.kind === 'new'
-        ? '新任務'
-        : [repo?.name, task?.title].filter(Boolean).join(' · ')
   return (
     <div className="flex h-full flex-col">
       <TitleBar title={title} />
@@ -39,7 +43,8 @@ export default function App() {
         <Sidebar />
         <div className="flex min-w-0 flex-1 gap-3">
           {view.kind === 'new' && <NewTaskScreen />}
-          {view.kind === 'task' && <TaskScreen taskId={view.taskId} />}
+          {/* key：換任務時重建，回看階段等畫面狀態不會帶到下一個任務 */}
+          {view.kind === 'task' && <TaskScreen key={view.taskId} taskId={view.taskId} />}
           {/* Task 34 加入 SettingsScreen */}
         </div>
       </div>

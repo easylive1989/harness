@@ -6,13 +6,15 @@ vi.mock('@renderer/api', async (importOriginal) => ({
   onEvent: vi.fn(() => () => {})
 }))
 import { call, onEvent } from '@renderer/api'
-import { useStore } from '@renderer/store'
+import { resetStoreInternals, useStore } from '@renderer/store'
 import { makeTask } from '../fixtures/task'
 
 beforeEach(() => {
   vi.mocked(call).mockReset()
+  resetStoreInternals()
   useStore.setState({
     ready: false,
+    claude: undefined,
     tasks: {},
     timelines: {},
     feedback: {},
@@ -47,6 +49,50 @@ describe('store.apply', () => {
   })
 })
 
+const ev = (id: string) => ({
+  id,
+  ts: '',
+  channel: 'main' as const,
+  kind: 'assistant_text' as const,
+  text: id
+})
+
+describe('時間軸讀取中的即時事件', () => {
+  test('讀取期間收到的事件會接在快照後面，去掉快照裡已有的並保持順序', async () => {
+    let reply!: (events: ReturnType<typeof ev>[]) => void
+    vi.mocked(call).mockImplementation(
+      (() => new Promise((r) => (reply = r as typeof reply))) as unknown as typeof call
+    )
+    const opening = useStore.getState().open({ kind: 'task', taskId: 'a' })
+    // 讀取中再打開一次不會重複讀取
+    void useStore.getState().open({ kind: 'task', taskId: 'a' })
+    expect(call).toHaveBeenCalledTimes(1)
+    const apply = (id: string) =>
+      useStore.getState().apply({ type: 'timeline', taskId: 'a', event: ev(id) })
+    apply('e2') // 快照裡也有
+    apply('e3')
+    apply('e3') // 重複
+    apply('e4')
+    expect(useStore.getState().timelines.a).toBeUndefined()
+    reply([ev('e1'), ev('e2')])
+    await opening
+    expect(useStore.getState().timelines.a.map((e) => e.id)).toEqual(['e1', 'e2', 'e3', 'e4'])
+    apply('e4')
+    apply('e5')
+    expect(useStore.getState().timelines.a.map((e) => e.id)).toEqual(['e1', 'e2', 'e3', 'e4', 'e5'])
+  })
+
+  test('讀取失敗時丟掉暫存，之後再打開會重新讀取', async () => {
+    vi.mocked(call).mockRejectedValueOnce(new Error('x'))
+    await useStore.getState().open({ kind: 'task', taskId: 'a' })
+    useStore.getState().apply({ type: 'timeline', taskId: 'a', event: ev('e1') })
+    expect(useStore.getState().timelines.a).toBeUndefined()
+    vi.mocked(call).mockResolvedValueOnce([ev('e0')] as never)
+    await useStore.getState().open({ kind: 'task', taskId: 'a' })
+    expect(useStore.getState().timelines.a.map((e) => e.id)).toEqual(['e0'])
+  })
+})
+
 const ipcError = (channel: string, msg: string) =>
   new Error(`Error invoking remote method '${channel}': Error: ${msg}`)
 
@@ -73,11 +119,45 @@ describe('store.init / open / act', () => {
     expect(off).toHaveBeenCalled()
   })
 
+  test('初始快照與載入期間收到的任務事件合併，保留 updatedAt 較新的', async () => {
+    let reply!: (tasks: unknown) => void
+    vi.mocked(call).mockImplementation((async (ch: string) => {
+      if (ch === 'tasks:list') return new Promise<unknown>((r) => (reply = r))
+      if (ch === 'claude:status') return { found: true, loggedIn: true }
+      return ch === 'repos:list' ? [] : {}
+    }) as typeof call)
+    const unsubscribe = useStore.getState().init()
+    const apply = (t: ReturnType<typeof makeTask>) =>
+      useStore.getState().apply({ type: 'task', task: t })
+    apply(makeTask({ id: 'a', title: '事件較新', updatedAt: '2026-10-07T00:00:02.000Z' }))
+    apply(makeTask({ id: 'b', title: '事件較舊', updatedAt: '2026-10-07T00:00:00.000Z' }))
+    apply(makeTask({ id: 'c', title: '只有事件', status: 'done' }))
+    await vi.waitFor(() => expect(reply).toBeDefined())
+    reply([
+      makeTask({
+        id: 'a',
+        title: '快照較舊',
+        updatedAt: '2026-10-07T00:00:01.000Z',
+        status: 'done'
+      }),
+      makeTask({
+        id: 'b',
+        title: '快照較新',
+        updatedAt: '2026-10-07T00:00:01.000Z',
+        status: 'done'
+      })
+    ])
+    await vi.waitFor(() => expect(useStore.getState().ready).toBe(true))
+    const t = useStore.getState().tasks
+    expect([t.a.title, t.b.title, t.c.title]).toEqual(['事件較新', '快照較新', '只有事件'])
+    unsubscribe()
+  })
+
   test('載入失敗時仍進入畫面並顯示錯誤', async () => {
     vi.mocked(call).mockRejectedValue(ipcError('repos:list', '讀取失敗'))
     const unsubscribe = useStore.getState().init()
     await vi.waitFor(() => expect(useStore.getState().ready).toBe(true))
-    expect(useStore.getState().toast).toBe('讀取失敗')
+    expect(useStore.getState().toast?.text).toBe('讀取失敗')
     unsubscribe()
   })
 
@@ -86,7 +166,7 @@ describe('store.init / open / act', () => {
     await useStore.getState().open({ kind: 'task', taskId: 'x' })
     expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 'x' })
     expect(useStore.getState().timelines.x).toBeUndefined()
-    expect(useStore.getState().toast).toBe('找不到任務')
+    expect(useStore.getState().toast?.text).toBe('找不到任務')
   })
 
   test('act 回傳結果；失敗時只留主程序的訊息', async () => {
@@ -95,7 +175,7 @@ describe('store.init / open / act', () => {
       throw ipcError('tasks:create', '尚未登入')
     })
     expect(r).toBeUndefined()
-    expect(useStore.getState().toast).toBe('尚未登入')
+    expect(useStore.getState().toast?.text).toBe('尚未登入')
     useStore.getState().dismissToast()
     expect(useStore.getState().toast).toBeUndefined()
   })
@@ -146,5 +226,28 @@ describe('store.recheckClaude（視窗取得焦點時）', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('store.recheckClaude：claude 沒有值', () => {
+  test('初始載入失敗、claude 沒有值時也會重新偵測', async () => {
+    vi.mocked(call).mockResolvedValue({ found: true, loggedIn: true } as never)
+    useStore.setState({ ready: true, claude: undefined })
+    await useStore.getState().recheckClaude()
+    expect(call).toHaveBeenCalledWith('claude:status', true)
+    expect(useStore.getState().claude?.loggedIn).toBe(true)
+    await useStore.getState().recheckClaude()
+    expect(call).toHaveBeenCalledTimes(1)
+  })
+
+  test('resetStoreInternals 清掉節流', async () => {
+    vi.mocked(call).mockResolvedValue({ found: true, loggedIn: false } as never)
+    useStore.setState({ ready: true, claude: { found: true, loggedIn: false } })
+    await useStore.getState().recheckClaude()
+    await useStore.getState().recheckClaude()
+    expect(call).toHaveBeenCalledTimes(1)
+    resetStoreInternals()
+    await useStore.getState().recheckClaude()
+    expect(call).toHaveBeenCalledTimes(2)
   })
 })

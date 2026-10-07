@@ -32,7 +32,7 @@ describe('GitService', () => {
 
   test('detached HEAD：branches 只列真正的分支，branchInfo 的 current 取第一個分支', async () => {
     sh(repo, 'branch', 'develop')
-    sh(repo, 'tag', 'main')
+    sh(repo, 'tag', 'v1')
     sh(repo, 'checkout', '-q', '--detach')
     expect(await git.branches(repo)).toEqual(['develop', 'main'])
     expect(await git.currentBranch(repo)).toBe('HEAD')
@@ -40,15 +40,31 @@ describe('GitService', () => {
       branches: ['develop', 'main'],
       current: 'develop'
     })
-    sh(repo, 'checkout', '-q', 'main')
-    expect(await git.branchInfo(repo)).toEqual({ branches: ['develop', 'main'], current: 'main' })
+    sh(repo, 'checkout', '-q', 'develop')
+    expect(await git.branchInfo(repo)).toEqual({
+      branches: ['develop', 'main'],
+      current: 'develop'
+    })
+  })
+
+  test('分支與 tag 同名時仍回傳正確的分支名稱', async () => {
+    // 停在 main 時建立同名 tag；測試本身不再用 main 這個名字下 git 指令，避免 ambiguous 警告
+    sh(repo, 'branch', 'alpha')
+    sh(repo, 'tag', 'main')
+    expect(await git.branches(repo)).toEqual(['alpha', 'main'])
+    expect(await git.currentBranch(repo)).toBe('main')
+    expect(await git.branchInfo(repo)).toEqual({ branches: ['alpha', 'main'], current: 'main' })
   })
 
   test('沒有任何 commit 的 repo：沒有分支，current 為空字串', async () => {
     const empty = await mkdtemp(join(tmpdir(), 'harness-git-empty-'))
-    sh(empty, 'init', '-q', '-b', 'main')
-    expect(await git.branches(empty)).toEqual([])
-    expect(await git.branchInfo(empty)).toEqual({ branches: [], current: '' })
+    try {
+      sh(empty, 'init', '-q', '-b', 'main')
+      expect(await git.branches(empty)).toEqual([])
+      expect(await git.branchInfo(empty)).toEqual({ branches: [], current: '' })
+    } finally {
+      await rm(empty, { recursive: true, force: true })
+    }
   })
 
   test('建立 worktree、commit、diff 與統計', async () => {

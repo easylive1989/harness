@@ -11,7 +11,11 @@ import { useStore } from '../store'
 const shortPath = (p: string) => p.replace(/^\/(Users|home)\/[^/]+(?=\/|$)/, '~')
 
 export function NewTaskScreen() {
-  const { repos, settings, claude, act, open } = useStore()
+  const repos = useStore((s) => s.repos)
+  const defaultModel = useStore((s) => s.settings?.defaultModel)
+  const loggedIn = useStore((s) => !!s.claude?.loggedIn)
+  const act = useStore((s) => s.act)
+  const open = useStore((s) => s.open)
   const [picked, setPicked] = useState<string>()
   const [request, setRequest] = useState('')
   const [branchInfo, setBranchInfo] = useState<{
@@ -20,7 +24,7 @@ export function NewTaskScreen() {
     current: string
   }>()
   const [baseChoice, setBaseChoice] = useState<{ repoId: string; value: string }>()
-  const [model, setModel] = useState<ModelId>(settings?.defaultModel ?? 'claude-opus-5-5')
+  const [model, setModel] = useState<ModelId>(defaultModel ?? 'claude-opus-5-5')
   const [busy, setBusy] = useState(false)
 
   // 選的 repo 不在清單裡（還沒選、或剛被移除）時用第一個
@@ -45,7 +49,7 @@ export function NewTaskScreen() {
     }
   }, [repoId, act])
 
-  const ready = !!claude?.loggedIn && !!repoId && !!request.trim() && !!base && !busy
+  const ready = loggedIn && !!repoId && !!request.trim() && !!base && !busy
 
   const submit = async () => {
     if (!ready || !repoId) return
@@ -103,6 +107,7 @@ export function NewTaskScreen() {
                         title={r.path}
                       >
                         {shortPath(r.path)}
+                        {on && info?.current ? ` · ${info.current}` : ''}
                       </span>
                     </span>
                   </label>

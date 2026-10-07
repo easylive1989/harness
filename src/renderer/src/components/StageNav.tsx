@@ -15,8 +15,7 @@ export function StageNav({
   const current = currentStage(task)
   const order = STAGES.map((s) => s.id)
   return (
-    <div
-      role="tablist"
+    <nav
       aria-label="任務階段"
       className="ml-auto flex items-center gap-1 rounded-full bg-fill p-1 text-xs"
     >
@@ -27,14 +26,15 @@ export function StageNav({
           <button
             key={s.id}
             type="button"
-            role="tab"
-            aria-selected={shown === s.id}
+            // aria-current 標出任務目前所在的階段，aria-pressed 標出畫面正在顯示的階段
+            aria-current={s.id === current ? 'step' : undefined}
+            aria-pressed={shown === s.id}
             disabled={!can}
             onClick={() => onSelect(s.id)}
             className={cx(
               'rounded-full px-3 py-1 disabled:cursor-default',
               shown === s.id
-                ? 'bg-surface font-medium text-brand shadow-[0_1px_2px_rgba(16,24,40,0.08)]'
+                ? 'bg-surface font-medium text-brand shadow-tab'
                 : can
                   ? 'cursor-pointer text-brand hover:bg-surface/60'
                   : 'text-muted-2'
@@ -44,6 +44,6 @@ export function StageNav({
           </button>
         )
       })}
-    </div>
+    </nav>
   )
 }

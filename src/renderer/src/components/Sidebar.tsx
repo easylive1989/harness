@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { MODELS, type Task } from '@shared/types'
 import { call } from '../api'
 import { taskStatusLabel } from '../lib/stage'
+import { useShallow } from 'zustand/react/shallow'
 import { useStore } from '../store'
 import { Button, cx, Icons, TONE_TEXT } from './ui'
 
@@ -42,15 +43,37 @@ function TaskItem({ task, active, onClick }: { task: Task; active: boolean; onCl
 }
 
 export function Sidebar() {
-  const { repos, tasks, view, open, claude, settings, act } = useStore()
+  const { repos, tasks, view, claude, settings } = useStore(
+    useShallow((s) => ({
+      repos: s.repos,
+      tasks: s.tasks,
+      view: s.view,
+      claude: s.claude,
+      settings: s.settings
+    }))
+  )
+  const open = useStore((s) => s.open)
+  const act = useStore((s) => s.act)
   // 使用者手動展開／收合過的 repo；沒動過的依「目前焦點」決定
   const [toggled, setToggled] = useState<Record<string, boolean>>({})
   const list = Object.values(tasks)
     .filter((t) => t.status !== 'discarded')
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   const activeId = view.kind === 'task' ? view.taskId : undefined
-  // 焦點 repo：目前打開的任務所在的 repo，否則是最新任務的 repo
-  const focusRepo = (list.find((t) => t.id === activeId) ?? list[0])?.repoId
+  // 焦點任務：目前打開的任務，否則是最新的任務；它所在的 repo 預設展開
+  const focus = list.find((t) => t.id === activeId) ?? list[0]
+  const focusRepo = focus?.repoId
+  // 焦點換到另一個任務時，清掉它所在 repo 的手動收合，讓那個 repo 一定看得到
+  // （React 文件建議的「render 期間依前一個值調整 state」，不用 effect）
+  const [prevFocus, setPrevFocus] = useState(focus?.id)
+  if (prevFocus !== focus?.id) {
+    setPrevFocus(focus?.id)
+    if (focusRepo && focusRepo in toggled) {
+      const rest = { ...toggled }
+      delete rest[focusRepo]
+      setToggled(rest)
+    }
+  }
   const model = MODELS.find((m) => m.id === settings?.defaultModel)?.label ?? ''
   return (
     <nav

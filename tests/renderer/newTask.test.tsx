@@ -59,8 +59,10 @@ describe('NewTaskScreen', () => {
     render(<NewTaskScreen />)
     expect(screen.getByRole('heading', { name: '想改什麼？' })).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /shop-api/ })).toBeChecked()
-    expect(screen.getByText('~/Github/shop-api')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByLabelText('從哪個分支開始')).toHaveValue('develop'))
+    // 選取的 repo 卡片顯示路徑與目前分支（設計稿 B1）
+    expect(screen.getByText('~/Github/shop-api · develop')).toBeInTheDocument()
+    expect(screen.getByText('~/Github/web')).toBeInTheDocument()
     expect(screen.getByLabelText('模型')).toHaveValue('claude-sonnet-5-5')
     expect(start()).toBeDisabled()
   })
@@ -89,7 +91,7 @@ describe('NewTaskScreen', () => {
     await waitFor(() => expect(screen.getByLabelText('從哪個分支開始')).toHaveValue('develop'))
     await userEvent.type(screen.getByLabelText('需求'), '需求')
     await userEvent.click(start())
-    await waitFor(() => expect(useStore.getState().toast).toContain('尚未登入'))
+    await waitFor(() => expect(useStore.getState().toast?.text).toContain('尚未登入'))
     expect(useStore.getState().view).toEqual({ kind: 'new' })
     expect(start()).toBeEnabled()
   })
@@ -119,5 +121,31 @@ describe('NewTaskScreen', () => {
     expect(call).toHaveBeenCalledWith('claude:status', true)
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
     await waitFor(() => expect(start()).toBeEnabled())
+  })
+
+  test('切換 repo 後，上一個 repo 較慢回來的分支不會蓋掉目前的', async () => {
+    let slowReply!: (v: { branches: string[]; current: string }) => void
+    replies['repos:branches'] = (id: string) =>
+      id === 'r1' ? new Promise((r) => (slowReply = r)) : branches[id]
+    render(<NewTaskScreen />)
+    await userEvent.click(screen.getByRole('radio', { name: /web-dashboard/ }))
+    await waitFor(() => expect(screen.getByLabelText('從哪個分支開始')).toHaveValue('trunk'))
+    slowReply({ branches: ['main', 'old'], current: 'old' })
+    await new Promise((r) => setTimeout(r, 0))
+    const select = screen.getByLabelText('從哪個分支開始')
+    expect(select).toHaveValue('trunk')
+    expect([...(select as HTMLSelectElement).options].map((o) => o.value)).toEqual(['trunk'])
+  })
+
+  test('重新檢查進行中時按鈕停用', async () => {
+    useStore.setState({ claude: { found: true, loggedIn: false, error: '尚未登入 Claude Code' } })
+    let done!: (v: unknown) => void
+    replies['claude:status'] = () => new Promise((r) => (done = r))
+    render(<NewTaskScreen />)
+    await userEvent.click(screen.getByRole('button', { name: '重新檢查' }))
+    expect(screen.getByRole('button', { name: '檢查中…' })).toBeDisabled()
+    done({ found: true, loggedIn: false, error: '還是沒登入' })
+    await waitFor(() => expect(screen.getByRole('button', { name: '重新檢查' })).toBeEnabled())
+    expect(screen.getByRole('alert')).toHaveTextContent('還是沒登入')
   })
 })
