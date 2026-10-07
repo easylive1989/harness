@@ -10331,9 +10331,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 29：問題卡片與時間軸
 
 **Files:**
+- Create: `src/renderer/src/lib/timeline.ts`（工具摘要、使用者訊息的可讀文字、`useTimeline`）
 - Create: `src/renderer/src/components/QuestionCard.tsx`
 - Create: `src/renderer/src/components/Timeline.tsx`
-- Test: `tests/renderer/QuestionCard.test.tsx`
+- Modify: `src/renderer/src/lib/stage.ts`（補 `isBusy`）
+- Test: `tests/renderer/QuestionCard.test.tsx`、`tests/renderer/Timeline.test.tsx`
 
 **Step 1: 寫失敗測試**
 
@@ -10342,148 +10344,568 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-vi.mock('@renderer/api', () => ({ call: vi.fn(async () => ({ id: 'b1' })), onEvent: vi.fn(() => () => {}), errorText: String }))
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(async () => ({ id: 'b1' })),
+  onEvent: vi.fn(() => () => {}),
+  errorText: String
+}))
 import { call } from '@renderer/api'
-import { QuestionCard } from '@renderer/components/QuestionCard'
+import { AnsweredQuestionRow, QuestionCard } from '@renderer/components/QuestionCard'
+import { resetStoreInternals, useStore } from '@renderer/store'
 import type { Question } from '@shared/types'
 import { makeTask } from '../fixtures/task'
 
 const q: Question = {
-  id: 'q3', text: '達到上限後要怎麼處理？', status: 'open', allowFreeText: true, askedAt: '',
-  options: [{ id: 'lock15', label: '鎖定 15 分鐘', description: '自動解除' }, { id: 'email', label: 'email 重設才解鎖' }],
+  id: 'q3',
+  text: '達到上限後要怎麼處理？',
+  status: 'open',
+  allowFreeText: true,
+  askedAt: '',
+  options: [
+    { id: 'lock15', label: '鎖定 15 分鐘', description: '自動解除' },
+    { id: 'email', label: 'email 重設才解鎖' }
+  ],
   recommendedOptionId: 'lock15',
-  followups: [{ role: 'user', text: '會洩漏帳號嗎？' }, { role: 'assistant', text: '一律回 429 就不會。' }]
+  followups: [
+    { role: 'user', text: '會洩漏帳號嗎？' },
+    { role: 'assistant', text: '一律回 429 就不會。' }
+  ]
 }
 const task = makeTask({ questions: [q] })
 
-beforeEach(() => vi.mocked(call).mockClear())
+beforeEach(() => {
+  vi.mocked(call).mockClear()
+  resetStoreInternals()
+  useStore.setState({ activeBranch: {}, toast: undefined })
+})
 
 describe('QuestionCard', () => {
   test('預設選建議選項，確認後送出答案', async () => {
     render(<QuestionCard task={task} question={q} />)
+    expect(screen.getByRole('radiogroup', { name: '達到上限後要怎麼處理？' })).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /鎖定 15 分鐘/ })).toBeChecked()
     expect(screen.getByText('建議')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('radio', { name: /email/ }))
     await userEvent.click(screen.getByRole('button', { name: '確認答案' }))
-    expect(call).toHaveBeenCalledWith('tasks:answer', 't1', 'q3', { optionId: 'email', text: undefined })
+    expect(call).toHaveBeenCalledWith('tasks:answer', 't1', 'q3', {
+      optionId: 'email',
+      text: undefined
+    })
   })
 
   test('選「其他」時送出自由文字', async () => {
     render(<QuestionCard task={task} question={q} />)
     await userEvent.click(screen.getByRole('radio', { name: /其他/ }))
+    expect(screen.getByRole('button', { name: '確認答案' })).toBeDisabled()
     await userEvent.type(screen.getByRole('textbox', { name: '自己描述' }), '鎖 30 分鐘')
     await userEvent.click(screen.getByRole('button', { name: '確認答案' }))
-    expect(call).toHaveBeenCalledWith('tasks:answer', 't1', 'q3', { optionId: undefined, text: '鎖 30 分鐘' })
+    expect(call).toHaveBeenCalledWith('tasks:answer', 't1', 'q3', {
+      optionId: undefined,
+      text: '鎖 30 分鐘'
+    })
+  })
+
+  test('Claude 更新卡片後原本選的選項不見了，就回到建議選項', () => {
+    const { rerender } = render(<QuestionCard task={task} question={q} />)
+    const updated: Question = {
+      ...q,
+      options: [{ id: 'captcha', label: '改要求驗證碼' }, ...q.options.slice(0, 1)],
+      recommendedOptionId: 'captcha'
+    }
+    rerender(<QuestionCard task={makeTask({ questions: [updated] })} question={updated} />)
+    expect(screen.getByRole('radio', { name: /改要求驗證碼/ })).toBeChecked()
   })
 
   test('顯示反問紀錄並可再次反問', async () => {
     render(<QuestionCard task={task} question={q} />)
+    expect(screen.getByText('你反問了 1 次')).toBeInTheDocument()
     expect(screen.getByText('一律回 429 就不會。')).toBeInTheDocument()
     await userEvent.type(screen.getByRole('textbox', { name: '反問' }), '那 IP 呢？{Enter}')
     expect(call).toHaveBeenCalledWith('tasks:counter', 't1', 'q3', '那 IP 呢？')
+    expect(screen.getByRole('textbox', { name: '反問' })).toHaveValue('')
   })
 
-  test('升級成分岔', async () => {
+  test('反問送出後等待回答時顯示處理中', () => {
+    const waiting: Question = {
+      ...q,
+      followups: [...q.followups, { role: 'user', text: '那 IP 呢？' }]
+    }
+    render(<QuestionCard task={{ ...task, runState: 'running' }} question={waiting} />)
+    expect(screen.getByText('Claude 正在回答…')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '反問' })).toBeDisabled()
+  })
+
+  test('升級成分岔並切到新分岔', async () => {
     render(<QuestionCard task={task} question={q} />)
     await userEvent.click(screen.getByRole('button', { name: '升級成分岔' }))
-    expect(call).toHaveBeenCalledWith('branch:open', 't1', { title: '達到上限後要怎麼處理？', fromQuestionId: 'q3' })
+    expect(call).toHaveBeenCalledWith('branch:open', 't1', {
+      title: '達到上限後要怎麼處理？',
+      fromQuestionId: 'q3'
+    })
+    expect(useStore.getState().activeBranch.t1).toBe('b1')
   })
 
   test('Claude 執行中時停用操作', () => {
     render(<QuestionCard task={{ ...task, runState: 'running' }} question={q} />)
     expect(screen.getByRole('button', { name: '確認答案' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '升級成分岔' })).toBeDisabled()
+  })
+
+  test('唯讀時不能作答也沒有反問欄', () => {
+    render(<QuestionCard task={task} question={q} readOnly />)
+    expect(screen.getByRole('radio', { name: /鎖定 15 分鐘/ })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: '確認答案' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: '反問' })).not.toBeInTheDocument()
+  })
+})
+
+describe('AnsweredQuestionRow', () => {
+  test('顯示問題與答案（選項加補充）', () => {
+    render(
+      <AnsweredQuestionRow
+        question={{ ...q, status: 'answered', answer: { optionId: 'lock15', text: '但要記錄' } }}
+      />
+    )
+    expect(screen.getByText('達到上限後要怎麼處理？')).toBeInTheDocument()
+    expect(screen.getByText('鎖定 15 分鐘；但要記錄')).toBeInTheDocument()
+  })
+})
+```
+
+```tsx
+// tests/renderer/Timeline.test.tsx
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(async () => undefined),
+  onEvent: vi.fn(() => () => {}),
+  errorText: String
+}))
+import { call } from '@renderer/api'
+import { RunStatus, Timeline } from '@renderer/components/Timeline'
+import { toolSummary, userTextDisplay } from '@renderer/lib/timeline'
+import { resetStoreInternals, useStore } from '@renderer/store'
+import { BRANCH_RULES, msg } from '@shared/protocol'
+import type { TimelineEvent } from '@shared/types'
+import { makeTask } from '../fixtures/task'
+
+let seq = 0
+const ev = (over: Partial<TimelineEvent>): TimelineEvent => ({
+  id: `e${++seq}`,
+  ts: '',
+  channel: 'main',
+  kind: 'system',
+  ...over
+})
+
+beforeEach(() => {
+  vi.mocked(call).mockClear()
+  resetStoreInternals()
+  useStore.setState({ activeBranch: {}, toast: undefined })
+})
+
+describe('userTextDisplay', () => {
+  test('一般文字原樣顯示', () => {
+    expect(userTextDisplay('加上登入失敗鎖定')).toBe('加上登入失敗鎖定')
+  })
+
+  test('協定訊息轉成可讀文字，不露出分岔規則', () => {
+    const open = userTextDisplay(msg.branchOpen('計數存放位置', '來源問題：存哪裡？'))
+    expect(open).toBe('開始討論：計數存放位置')
+    expect(open).not.toContain(BRANCH_RULES.split('\n')[0])
+    expect(userTextDisplay(msg.answer('q1', 'redis', 'Redis'))).toBe('回答：Redis')
+    expect(userTextDisplay(msg.counterQuestion('q1', '會洩漏嗎？'))).toBe('反問：會洩漏嗎？')
+    expect(userTextDisplay(msg.conclude())).toBe('請 Claude 整理這個分岔的結論')
+    expect(userTextDisplay(msg.resume())).toBe('繼續執行')
+    expect(userTextDisplay(msg.specApproved())).toBe('核准規格，開始實作')
+    expect(
+      userTextDisplay(
+        msg.branchConclusion('b1', { decision: '用 Redis', rationale: '共享', deferred: [] })
+      )
+    ).toBe('帶回分岔結論\n決策：用 Redis\n原因：共享')
+  })
+
+  test('不認得的標籤照原文顯示', () => {
+    expect(userTextDisplay('[todo] 記得寫測試')).toBe('[todo] 記得寫測試')
+  })
+})
+
+describe('toolSummary', () => {
+  test('工具名稱與目標', () => {
+    expect(toolSummary({ id: 'x', name: 'Read', input: { file_path: 'src/a.ts' } })).toBe(
+      '讀取 src/a.ts'
+    )
+    expect(toolSummary({ id: 'x', name: 'mcp__foo' })).toBe('mcp__foo')
+  })
+})
+
+describe('Timeline', () => {
+  const q = {
+    id: 'q1',
+    text: '計數要以什麼為單位？',
+    status: 'answered' as const,
+    allowFreeText: false,
+    askedAt: '',
+    options: [{ id: 'combo', label: '帳號 + IP 組合' }],
+    answer: { optionId: 'combo' },
+    followups: []
+  }
+  const task = makeTask({
+    questions: [q],
+    branches: [
+      { id: 'b1', title: '計數存放位置', status: 'concluded', running: false, createdAt: '' }
+    ],
+    decisions: [
+      {
+        id: 'd1',
+        text: '使用既有 Redis',
+        rationale: '多台機器要共享狀態',
+        source: { type: 'branch', ref: 'b1' }
+      }
+    ]
+  })
+
+  test('依 channel 篩選並呈現各種事件', async () => {
+    const events = [
+      ev({ kind: 'user_text', text: '登入 API 要加上失敗次數限制' }),
+      ev({
+        kind: 'tool_call',
+        tool: { id: 't1', name: 'Read', input: { file_path: 'src/auth/login.ts' } }
+      }),
+      ev({ kind: 'tool_call', tool: { id: 't2', name: 'Read', input: { file_path: 'src/x.ts' } } }),
+      ev({ kind: 'tool_call', tool: { id: 't3', name: 'Grep', input: { pattern: 'rateLimit' } } }),
+      ev({ kind: 'assistant_text', text: '我看過 `login.ts` 了。' }),
+      ev({ kind: 'question', ref: 'q1' }),
+      ev({ kind: 'decision', ref: 'd1' }),
+      ev({ kind: 'spec', ref: '1' }),
+      ev({ channel: 'branch:b1', kind: 'assistant_text', text: '分岔裡的回覆' })
+    ]
+    const onOpenStage = vi.fn()
+    render(<Timeline task={task} channel="main" events={events} onOpenStage={onOpenStage} />)
+    expect(screen.getByText('登入 API 要加上失敗次數限制')).toBeInTheDocument()
+    expect(screen.queryByText('分岔裡的回覆')).not.toBeInTheDocument()
+    const tools = screen.getByRole('button', { name: /讀取 2 次 · 搜尋內容 1 次/ })
+    expect(tools).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(tools)
+    expect(screen.getByText('讀取 src/auth/login.ts')).toBeInTheDocument()
+    expect(screen.getByText('計數要以什麼為單位？')).toBeInTheDocument()
+    expect(screen.getByText('帳號 + IP 組合')).toBeInTheDocument()
+    expect(screen.getByText('分岔「計數存放位置」的結論')).toBeInTheDocument()
+    expect(screen.getByText('原因：多台機器要共享狀態')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /規格草稿 v1/ }))
+    expect(onOpenStage).toHaveBeenCalledWith('spec')
+  })
+
+  test('開放中的問題顯示成卡片', () => {
+    const open = { ...q, status: 'open' as const, answer: undefined }
+    render(
+      <Timeline
+        task={{ ...task, questions: [open] }}
+        channel="main"
+        events={[ev({ kind: 'question', ref: 'q1' })]}
+      />
+    )
+    expect(screen.getByRole('button', { name: '確認答案' })).toBeInTheDocument()
+  })
+
+  test('從 Claude 的訊息分岔', async () => {
+    const onBranchFrom = vi.fn()
+    render(
+      <Timeline
+        task={task}
+        channel="main"
+        events={[ev({ kind: 'assistant_text', text: '有幾件事要先確認。' })]}
+        onBranchFrom={onBranchFrom}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: '從這則訊息分岔' }))
+    expect(onBranchFrom).toHaveBeenCalledWith('有幾件事要先確認。')
+  })
+
+  test('使用者訊息若是協定訊息，顯示可讀文字', () => {
+    render(
+      <Timeline
+        task={task}
+        channel="main"
+        events={[ev({ kind: 'user_text', text: msg.branchOpen('通知', '') })]}
+      />
+    )
+    expect(screen.getByText('開始討論：通知')).toBeInTheDocument()
+    expect(screen.queryByText(/Harness 規則/)).not.toBeInTheDocument()
+  })
+})
+
+describe('RunStatus', () => {
+  test('中斷時可繼續', async () => {
+    const onResume = vi.fn()
+    render(<RunStatus task={makeTask({ runState: 'interrupted' })} onResume={onResume} />)
+    expect(screen.getByRole('alert')).toHaveTextContent('上一次執行被中斷了。')
+    await userEvent.click(screen.getByRole('button', { name: '繼續' }))
+    expect(onResume).toHaveBeenCalled()
+  })
+
+  test('執行中顯示處理中', () => {
+    render(<RunStatus task={makeTask({ runState: 'running' })} onResume={() => {}} />)
+    expect(screen.getByText('Claude 正在處理…')).toBeInTheDocument()
   })
 })
 ```
 
 **Step 2: 確認失敗**
 
-**Step 3: QuestionCard.tsx（對照 `StyleB.dc.html` 的「目前問題」section）**
+**Step 3: lib/timeline.ts 與 stage.ts 的 isBusy**
+
+元件檔只匯出元件（react-refresh 規則），工具摘要、訊息文字與 `useTimeline` 放在 `lib/timeline.ts`。時間軸上的使用者訊息多半是主程序寫入的顯示文字；若遇到協定訊息（`[branch_open] …` 等）就轉成可讀文字，絕不顯示 `BRANCH_RULES` 之類給 Claude 的指示。
+
+```ts
+// src/renderer/src/lib/timeline.ts
+import { parseTagged } from '@shared/protocol'
+import type { TimelineEvent } from '@shared/types'
+import { useStore } from '../store'
+
+const TOOL_LABEL: Record<string, string> = {
+  Read: '讀取',
+  Glob: '搜尋檔名',
+  Grep: '搜尋內容',
+  Edit: '編輯',
+  Write: '寫入',
+  MultiEdit: '編輯',
+  NotebookEdit: '編輯',
+  Bash: '指令',
+  WebFetch: '讀取網頁',
+  WebSearch: '搜尋網路',
+  Agent: '子代理',
+  Task: '子代理',
+  TodoWrite: '待辦'
+}
+
+export type ToolCall = NonNullable<TimelineEvent['tool']>
+
+export const toolLabel = (name: string) => TOOL_LABEL[name] ?? name
+
+/** 工具呼叫的一行摘要，例如「讀取 src/auth/login.ts」 */
+export function toolSummary(tool: ToolCall): string {
+  const i = tool.input ?? {}
+  const target = i.file_path ?? i.path ?? i.pattern ?? i.command ?? i.url ?? i.query ?? ''
+  return `${toolLabel(tool.name)}${target ? ` ${String(target)}` : ''}`
+}
+
+/**
+ * 時間軸上使用者訊息的顯示文字。主程序多半已寫入給人看的版本，
+ * 但舊資料或使用者直接送出的協定訊息（`[tag ...] 內容`）在這裡轉成可讀文字，
+ * 不把分岔規則之類給 Claude 的指示顯示出來。不認得的標籤照原文顯示。
+ */
+export function userTextDisplay(text: string): string {
+  const t = parseTagged(text)
+  if (!t) return text
+  switch (t.tag) {
+    case 'answer':
+      return `回答：${t.body}`
+    case 'counter_question':
+      return `反問：${t.body}`
+    case 'branch_open': {
+      const title = /^主題：(.*)$/m.exec(t.body)?.[1]?.trim()
+      return title ? `開始討論：${title}` : '開始分岔討論'
+    }
+    case 'conclude':
+      return '請 Claude 整理這個分岔的結論'
+    case 'branch_conclusion':
+      return `帶回分岔結論\n${t.body}`
+    case 'spec_feedback':
+      return `要求修改規格：${t.body}`
+    case 'spec_approved':
+      return '核准規格，開始實作'
+    case 'report_feedback':
+      return `報告回饋：\n${t.body}`
+    case 'resume':
+      return '繼續執行'
+    default:
+      return text
+  }
+}
+
+const EMPTY: TimelineEvent[] = []
+
+/** 任務的時間軸（還沒載入時是空陣列） */
+export function useTimeline(taskId: string): TimelineEvent[] {
+  return useStore((s) => s.timelines[taskId]) ?? EMPTY
+}
+```
+
+```ts
+// src/renderer/src/lib/stage.ts（附加）
+/** 主線在這些狀態下不能作答、反問或分岔（主程序也會拒絕） */
+export function isBusy(t: Task): boolean {
+  return (
+    t.runState === 'running' || t.runState === 'waiting_permission' || t.runState === 'finalizing'
+  )
+}
+```
+
+**Step 4: QuestionCard.tsx（對照 `StyleB.dc.html` 的「目前問題」section）**
+
+選擇存成「使用者點的選項」，畫面上的值在 render 時推導：Claude 用同一個 question_id 更新卡片後，若原選項不見了就回到建議選項。
 
 ```tsx
-import { type FormEvent, useState } from 'react'
+// src/renderer/src/components/QuestionCard.tsx
+import { type FormEvent, useId, useState } from 'react'
 import type { Question, Task } from '@shared/types'
 import { call } from '../api'
+import { isBusy } from '../lib/stage'
 import { useStore } from '../store'
-import { Avatar, Button, cx, inputClass, Spinner, textareaClass } from './ui'
+import { Button, cx, Icons, inputClass, Spinner, textareaClass } from './ui'
 
 const OTHER = '__other'
 
-export function QuestionCard({ task, question: q, readOnly }: { task: Task; question: Question; readOnly?: boolean }) {
+const optionClass = (on: boolean) =>
+  cx(
+    'flex cursor-pointer gap-2.5 rounded-[14px] p-3.5 has-[:disabled]:cursor-default',
+    on ? 'bg-brand-tint shadow-[0_0_0_2px_var(--color-brand)]' : 'bg-fill-2'
+  )
+
+export function QuestionCard({
+  task,
+  question: q,
+  readOnly
+}: {
+  task: Task
+  question: Question
+  readOnly?: boolean
+}) {
   const act = useStore((s) => s.act)
   const setActiveBranch = useStore((s) => s.setActiveBranch)
-  const [selected, setSelected] = useState<string>(q.recommendedOptionId ?? q.options[0]?.id ?? OTHER)
+  const titleId = useId()
+  // 使用者點選的選項；Claude 更新卡片後選項可能不見了，此時回到預設（render 時推導）
+  const [picked, setPicked] = useState<string>()
   const [freeText, setFreeText] = useState('')
   const [counter, setCounter] = useState('')
-  const busy = task.runState === 'running' || task.runState === 'waiting_permission' || task.runState === 'finalizing'
+
+  const ids = q.options.map((o) => o.id)
+  const valid = (id?: string): id is string =>
+    !!id && (ids.includes(id) || (id === OTHER && q.allowFreeText))
+  const fallback = valid(q.recommendedOptionId)
+    ? q.recommendedOptionId
+    : (ids[0] ?? (q.allowFreeText ? OTHER : undefined))
+  const selected = valid(picked) ? picked : fallback
+
+  const busy = isBusy(task)
   const disabled = readOnly || busy || q.status !== 'open'
   const waitingCounter = busy && q.followups.at(-1)?.role === 'user'
+  const counted = q.followups.filter((f) => f.role === 'user').length
+  const index = task.questions.findIndex((x) => x.id === q.id) + 1
 
-  const confirm = () => act(() => call('tasks:answer', task.id, q.id, {
-    optionId: selected === OTHER ? undefined : selected,
-    text: freeText.trim() || undefined
-  }))
+  const confirm = () =>
+    act(() =>
+      call('tasks:answer', task.id, q.id, {
+        optionId: selected === OTHER ? undefined : selected,
+        text: freeText.trim() || undefined
+      })
+    )
   const ask = (e: FormEvent) => {
     e.preventDefault()
-    if (!counter.trim()) return
     const text = counter.trim()
+    if (!text || busy) return
     setCounter('')
     void act(() => call('tasks:counter', task.id, q.id, text))
   }
   const upgrade = async () => {
-    const b = await act(() => call('branch:open', task.id, { title: q.text.slice(0, 30), fromQuestionId: q.id }))
+    const b = await act(() =>
+      call('branch:open', task.id, { title: q.text.slice(0, 30), fromQuestionId: q.id })
+    )
     if (b) setActiveBranch(task.id, b.id)
   }
 
   return (
-    <section aria-label={`問題：${q.text}`} className="ml-10 flex flex-col gap-3.5 rounded-[18px] bg-surface p-5 shadow-focus">
+    <section
+      aria-labelledby={titleId}
+      className="ml-10 flex flex-col gap-3.5 rounded-[18px] bg-surface p-5 shadow-focus"
+    >
       <div className="flex flex-col gap-0.5">
-        <span className="text-xs font-medium text-brand">問題 {task.questions.indexOf(q) + 1}</span>
-        <span className="text-[17px] font-bold">{q.text}</span>
+        {index > 0 && <span className="text-xs font-medium text-brand">問題 {index}</span>}
+        <span id={titleId} className="text-[17px] font-bold">
+          {q.text}
+        </span>
         {q.context && <span className="text-[13px] text-muted">{q.context}</span>}
       </div>
 
-      <div role="radiogroup" className="grid grid-cols-2 gap-2.5">
-        {q.options.map((o) => (
-          <label key={o.id} className={cx('flex cursor-pointer gap-2.5 rounded-[14px] p-3.5', selected === o.id ? 'bg-brand-tint shadow-[0_0_0_2px_var(--color-brand)]' : 'bg-fill-2')}>
-            <input type="radio" name={`q-${q.id}`} checked={selected === o.id} onChange={() => setSelected(o.id)} disabled={disabled} className="mt-1.5 accent-brand" />
-            <span className="flex flex-col gap-1">
-              <span className="font-medium">{o.label}</span>
-              {(o.description || o.id === q.recommendedOptionId) && (
-                <span className="text-xs text-brand-muted">
-                  {o.id === q.recommendedOptionId && <span className="mr-1 font-medium">建議</span>}
-                  {o.description}
-                </span>
-              )}
-            </span>
-          </label>
-        ))}
+      <div role="radiogroup" aria-labelledby={titleId} className="grid grid-cols-2 gap-2.5">
+        {q.options.map((o) => {
+          const recommended = o.id === q.recommendedOptionId
+          return (
+            <label key={o.id} className={optionClass(selected === o.id)}>
+              <input
+                type="radio"
+                name={`q-${q.id}`}
+                checked={selected === o.id}
+                onChange={() => setPicked(o.id)}
+                disabled={disabled}
+                className="mt-[5px] flex-none accent-brand"
+              />
+              <span className="flex flex-col gap-1">
+                <span className="font-medium">{o.label}</span>
+                {(o.description || recommended) && (
+                  <span className={cx('text-xs', recommended ? 'text-brand-muted' : 'text-muted')}>
+                    {recommended && <span className="font-medium">建議</span>}
+                    {recommended && o.description && ' · '}
+                    {o.description}
+                  </span>
+                )}
+              </span>
+            </label>
+          )
+        })}
         {q.allowFreeText && (
-          <label className={cx('flex cursor-pointer gap-2.5 rounded-[14px] p-3.5', selected === OTHER ? 'bg-brand-tint shadow-[0_0_0_2px_var(--color-brand)]' : 'bg-fill-2')}>
-            <input type="radio" name={`q-${q.id}`} checked={selected === OTHER} onChange={() => setSelected(OTHER)} disabled={disabled} className="mt-1.5 accent-brand" />
+          <label className={optionClass(selected === OTHER)}>
+            <input
+              type="radio"
+              name={`q-${q.id}`}
+              checked={selected === OTHER}
+              onChange={() => setPicked(OTHER)}
+              disabled={disabled}
+              className="mt-[5px] flex-none accent-brand"
+            />
             <span className="text-muted">其他，自己描述…</span>
           </label>
         )}
       </div>
 
       {(selected === OTHER || freeText) && (
-        <label className="flex flex-col gap-1.5">
+        <label className="flex flex-col">
           <span className="sr-only">自己描述</span>
-          <textarea aria-label="自己描述" rows={2} value={freeText} onChange={(e) => setFreeText(e.target.value)} disabled={disabled}
-            placeholder={selected === OTHER ? '描述你的答案' : '補充說明（選填）'} className={textareaClass} />
+          <textarea
+            rows={2}
+            value={freeText}
+            onChange={(e) => setFreeText(e.target.value)}
+            disabled={disabled}
+            placeholder={selected === OTHER ? '描述你的答案' : '補充說明（選填）'}
+            className={textareaClass}
+          />
         </label>
       )}
 
       {q.followups.length > 0 && (
         <div className="flex flex-col gap-2.5 rounded-[14px] bg-fill-2 px-3.5 py-3 text-[13px]">
-          <span className="text-xs font-medium text-muted">你反問了 {q.followups.filter((f) => f.role === 'user').length} 次</span>
+          <span className="text-xs font-medium text-muted">你反問了 {counted} 次</span>
           {q.followups.map((f, i) => (
             <div key={i} className="flex gap-2">
-              {f.role === 'user' ? <span className="flex-none text-muted">你</span> : <Avatar />}
-              <span className="whitespace-pre-wrap">{f.text}</span>
+              {f.role === 'user' ? (
+                <span className="flex-none text-muted">你</span>
+              ) : (
+                <span className="flex-none font-medium text-brand">
+                  <span aria-hidden>C</span>
+                  <span className="sr-only">Claude</span>
+                </span>
+              )}
+              <span className="min-w-0 whitespace-pre-wrap">{f.text}</span>
             </div>
           ))}
-          {waitingCounter && <span className="flex items-center gap-2 text-muted"><Spinner />Claude 正在回答…</span>}
+          {waitingCounter && (
+            <span className="flex items-center gap-2 text-muted">
+              <Spinner />
+              Claude 正在回答…
+            </span>
+          )}
         </div>
       )}
 
@@ -10491,85 +10913,121 @@ export function QuestionCard({ task, question: q, readOnly }: { task: Task; ques
         <form onSubmit={ask} className="flex flex-wrap items-center gap-2.5">
           <label className="flex min-w-[220px] flex-1">
             <span className="sr-only">反問</span>
-            <input aria-label="反問" value={counter} onChange={(e) => setCounter(e.target.value)} disabled={busy}
-              placeholder="還有疑問？在這裡反問…" className={cx(inputClass, 'flex-1')} />
+            <input
+              value={counter}
+              onChange={(e) => setCounter(e.target.value)}
+              disabled={busy}
+              placeholder="還有疑問？在這裡反問…"
+              className={cx(inputClass, 'flex-1')}
+            />
           </label>
-          <Button disabled={busy} onClick={() => void upgrade()}>升級成分岔</Button>
-          <Button variant="primary" disabled={disabled || (selected === OTHER && !freeText.trim())} onClick={() => void confirm()}>確認答案</Button>
+          <Button className="h-[42px] px-3.5" disabled={busy} onClick={() => void upgrade()}>
+            升級成分岔
+          </Button>
+          <Button
+            variant="primary"
+            className="h-[42px] px-5"
+            disabled={disabled || !selected || (selected === OTHER && !freeText.trim())}
+            onClick={() => void confirm()}
+          >
+            確認答案
+          </Button>
         </form>
       )}
     </section>
   )
 }
 
-export function AnsweredQuestionRow({ question: q, onOpen }: { question: Question; onOpen?: () => void }) {
-  const label = q.answer?.optionId ? q.options.find((o) => o.id === q.answer?.optionId)?.label : undefined
+/** 已回答的問題：時間軸上收成一列 */
+export function AnsweredQuestionRow({ question: q }: { question: Question }) {
+  const label = q.answer?.optionId
+    ? q.options.find((o) => o.id === q.answer?.optionId)?.label
+    : undefined
   return (
-    <button type="button" onClick={onOpen} className="ml-10 flex items-center gap-2.5 rounded-xl bg-fill-2 px-4 py-2.5 text-left text-[13px]">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-brand)" strokeWidth="2.5" strokeLinecap="round" aria-hidden><path d="M5 12l5 5L20 7" /></svg>
+    <div className="ml-10 flex items-center gap-2.5 rounded-xl bg-fill-2 px-4 py-2.5 text-[13px]">
+      <Icons.Check className="flex-none text-brand" strokeWidth={2.5} aria-hidden />
       <span className="text-muted">{q.text}</span>
-      <span className="ml-auto font-medium">{[label, q.answer?.text].filter(Boolean).join('；')}</span>
-    </button>
+      <span className="ml-auto text-right font-medium">
+        {[label, q.answer?.text].filter(Boolean).join('；')}
+      </span>
+    </div>
   )
 }
 ```
 
-**Step 4: Timeline.tsx**
+**Step 5: Timeline.tsx**
 
 時間軸只顯示指定 channel 的事件；連續的工具呼叫合併成一列摘要。
 
 ```tsx
+// src/renderer/src/components/Timeline.tsx
 import { useState } from 'react'
-import { parseTagged } from '@shared/protocol'
 import type { Channel, Task, TimelineEvent } from '@shared/types'
-import { useStore } from '../store'
+import { type ToolCall, toolLabel, toolSummary, userTextDisplay } from '../lib/timeline'
 import { Markdown } from './Markdown'
 import { AnsweredQuestionRow, QuestionCard } from './QuestionCard'
 import { Avatar, Icons, Spinner } from './ui'
 
-const TOOL_LABEL: Record<string, string> = { Read: '讀取', Glob: '搜尋檔名', Grep: '搜尋內容', Edit: '編輯', Write: '寫入', MultiEdit: '編輯', Bash: '指令', WebFetch: '讀取網頁', WebSearch: '搜尋網路', Agent: '子代理', Task: '子代理', TodoWrite: '待辦' }
+type ToolEvent = TimelineEvent & { tool: ToolCall }
+type Item = { kind: 'event'; e: TimelineEvent } | { kind: 'tools'; events: ToolEvent[] }
 
-export function toolSummary(tool: NonNullable<TimelineEvent['tool']>): string {
-  const i = tool.input ?? {}
-  const target = (i.file_path ?? i.path ?? i.pattern ?? i.command ?? i.url ?? i.query ?? '') as string
-  return `${TOOL_LABEL[tool.name] ?? tool.name}${target ? ` ${String(target)}` : ''}`
-}
-
-type Item = { kind: 'event'; e: TimelineEvent } | { kind: 'tools'; events: TimelineEvent[] }
-
+/** 連續的工具呼叫合併成一組 */
 function group(events: TimelineEvent[]): Item[] {
   const out: Item[] = []
   for (const e of events) {
     const last = out.at(-1)
-    if (e.kind === 'tool_call') {
-      if (last?.kind === 'tools') last.events.push(e)
-      else out.push({ kind: 'tools', events: [e] })
+    if (e.kind === 'tool_call' && e.tool) {
+      const te = e as ToolEvent
+      if (last?.kind === 'tools') last.events.push(te)
+      else out.push({ kind: 'tools', events: [te] })
     } else out.push({ kind: 'event', e })
   }
   return out
 }
 
-function ToolGroup({ events }: { events: TimelineEvent[] }) {
+function ToolGroup({ events }: { events: ToolEvent[] }) {
   const [open, setOpen] = useState(false)
   const counts = new Map<string, number>()
-  for (const e of events) { const l = TOOL_LABEL[e.tool!.name] ?? e.tool!.name; counts.set(l, (counts.get(l) ?? 0) + 1) }
+  for (const e of events) {
+    const l = toolLabel(e.tool.name)
+    counts.set(l, (counts.get(l) ?? 0) + 1)
+  }
   return (
-    <div className="ml-10 flex flex-col gap-1 text-xs text-muted">
-      <button type="button" onClick={() => setOpen(!open)} className="self-start hover:text-ink">
+    <div className="ml-10 flex flex-col gap-1 text-xs text-muted-2">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+        className="cursor-pointer self-start hover:text-ink"
+      >
         {[...counts].map(([l, n]) => `${l} ${n} 次`).join(' · ')} {open ? '▴' : '▾'}
       </button>
-      {open && events.map((e) => <code key={e.id} className="self-start">{toolSummary(e.tool!)}</code>)}
+      {open &&
+        events.map((e) => (
+          <code key={e.id} className="self-start break-all">
+            {toolSummary(e.tool)}
+          </code>
+        ))}
     </div>
   )
 }
 
 function UserBubble({ text }: { text: string }) {
-  const tagged = parseTagged(text)
-  const shown = tagged ? tagged.body.split('\n')[0] : text
-  return <div className="max-w-[78%] self-end whitespace-pre-wrap rounded-[18px_18px_6px_18px] bg-fill px-4 py-3">{shown}</div>
+  return (
+    <div className="max-w-[78%] self-end rounded-[18px_18px_6px_18px] bg-fill px-4 py-3 whitespace-pre-wrap">
+      {userTextDisplay(text)}
+    </div>
+  )
 }
 
-export function Timeline({ task, channel, events, readOnly, onBranchFrom, onOpenStage }: {
+export function Timeline({
+  task,
+  channel,
+  events,
+  readOnly,
+  onBranchFrom,
+  onOpenStage
+}: {
   task: Task
   channel: Channel
   events: TimelineEvent[]
@@ -10577,56 +11035,116 @@ export function Timeline({ task, channel, events, readOnly, onBranchFrom, onOpen
   onBranchFrom?: (text: string) => void
   onOpenStage?: (stage: 'spec' | 'report') => void
 }) {
-  const decisions = task.decisions
   const items = group(events.filter((e) => e.channel === channel))
   return (
     <div className="flex flex-col gap-5">
-      {items.map((it, idx) => {
+      {items.map((it) => {
         if (it.kind === 'tools') return <ToolGroup key={it.events[0].id} events={it.events} />
         const e = it.e
         switch (e.kind) {
-          case 'user_text': return <UserBubble key={e.id} text={e.text ?? ''} />
-          case 'assistant_text': return (
-            <div key={e.id} className="group flex gap-3">
-              <Avatar />
-              <div className="min-w-0 flex-1"><Markdown text={e.text ?? ''} /></div>
-              {onBranchFrom && !readOnly && (
-                <button type="button" aria-label="從這則訊息分岔" onClick={() => onBranchFrom(e.text ?? '')}
-                  className="invisible h-7 flex-none rounded-lg px-2 text-xs text-muted group-hover:visible hover:bg-fill"><Icons.Branch width={14} height={14} /></button>
-              )}
-            </div>
-          )
+          case 'user_text':
+            return <UserBubble key={e.id} text={e.text ?? ''} />
+          case 'assistant_text':
+            return (
+              <div key={e.id} className="group flex gap-3">
+                <Avatar />
+                <div className="min-w-0 flex-1">
+                  <Markdown text={e.text ?? ''} />
+                </div>
+                {onBranchFrom && !readOnly && (
+                  <button
+                    type="button"
+                    aria-label="從這則訊息分岔"
+                    title="從這則訊息分岔"
+                    onClick={() => onBranchFrom(e.text ?? '')}
+                    className="flex h-7 flex-none cursor-pointer items-center rounded-lg px-2 text-muted opacity-0 group-hover:opacity-100 hover:bg-fill focus-visible:opacity-100"
+                  >
+                    <Icons.Branch width={14} height={14} />
+                  </button>
+                )}
+              </div>
+            )
           case 'question': {
             const q = task.questions.find((x) => x.id === e.ref)
             if (!q) return null
-            return q.status === 'open' ? <QuestionCard key={e.id} task={task} question={q} readOnly={readOnly} /> : <AnsweredQuestionRow key={e.id} question={q} />
+            return q.status === 'open' ? (
+              <QuestionCard key={e.id} task={task} question={q} readOnly={readOnly} />
+            ) : (
+              <AnsweredQuestionRow key={e.id} question={q} />
+            )
           }
           case 'decision': {
-            const d = decisions.find((x) => x.id === e.ref)
+            const d = task.decisions.find((x) => x.id === e.ref)
             if (!d) return null
-            const b = task.branches.find((x) => x.id === d.source.ref)
+            const b =
+              d.source.type === 'branch'
+                ? task.branches.find((x) => x.id === d.source.ref)
+                : undefined
             return (
-              <div key={e.id} className="ml-10 flex flex-col gap-1.5 rounded-[14px] bg-decision px-4 py-3.5">
-                <span className="flex items-center gap-1.5 text-xs font-medium text-decision-ink"><Icons.Branch width={14} height={14} />分岔「{b?.title ?? d.source.ref}」的結論</span>
+              <div
+                key={e.id}
+                className="ml-10 flex flex-col gap-1.5 rounded-[14px] bg-decision px-4 py-3.5"
+              >
+                <span className="flex items-center gap-1.5 text-xs font-medium text-decision-ink">
+                  <Icons.Branch width={14} height={14} />
+                  {d.source.type === 'branch'
+                    ? `分岔「${b?.title ?? d.source.ref}」的結論`
+                    : '決策'}
+                </span>
                 <span>{d.text}</span>
-                {d.rationale && <span className="text-[13px] text-decision-body">原因：{d.rationale}</span>}
-                {!!d.deferred?.length && <span className="text-[13px] text-decision-body">延後：{d.deferred.join('；')}</span>}
+                {d.rationale && (
+                  <span className="text-[13px] text-decision-body">原因：{d.rationale}</span>
+                )}
+                {!!d.deferred?.length && (
+                  <span className="text-[13px] text-decision-body">
+                    延後：{d.deferred.join('；')}
+                  </span>
+                )}
               </div>
             )
           }
-          case 'spec': return (
-            <button key={e.id} type="button" onClick={() => onOpenStage?.('spec')} className="ml-10 self-start rounded-xl bg-brand-tint px-4 py-2.5 text-[13px] text-brand-ink">
-              規格草稿 v{e.ref} 已產生 → 查看
-            </button>
-          )
-          case 'report': return (
-            <button key={e.id} type="button" onClick={() => onOpenStage?.('report')} className="ml-10 self-start rounded-xl bg-blue-50 px-4 py-2.5 text-[13px] text-review">
-              變更報告 v{e.ref} 已產生 → 查看
-            </button>
-          )
-          case 'tool_result': return <div key={e.id} className="ml-10 text-xs text-danger">工具錯誤：{e.text}</div>
-          case 'system': return <div key={e.id} className="self-center rounded-full bg-fill px-3 py-1 text-xs text-muted">{e.text}</div>
-          default: return <span key={idx} />
+          case 'spec':
+            return (
+              <button
+                key={e.id}
+                type="button"
+                onClick={() => onOpenStage?.('spec')}
+                className="ml-10 cursor-pointer self-start rounded-xl bg-brand-tint px-4 py-2.5 text-[13px] text-brand-ink hover:bg-brand-soft"
+              >
+                規格草稿 v{e.ref} 已產生 → 查看
+              </button>
+            )
+          case 'report':
+            return (
+              <button
+                key={e.id}
+                type="button"
+                onClick={() => onOpenStage?.('report')}
+                className="ml-10 cursor-pointer self-start rounded-xl bg-review-soft px-4 py-2.5 text-[13px] text-review"
+              >
+                變更報告 v{e.ref} 已產生 → 查看
+              </button>
+            )
+          case 'tool_result':
+            return (
+              <div
+                key={e.id}
+                className="ml-10 line-clamp-4 text-xs break-all whitespace-pre-wrap text-danger"
+              >
+                工具錯誤：{e.text}
+              </div>
+            )
+          case 'system':
+            return (
+              <div
+                key={e.id}
+                className="self-center rounded-full bg-fill px-3 py-1 text-xs text-muted"
+              >
+                {e.text}
+              </div>
+            )
+          default:
+            return null
         }
       })}
     </div>
@@ -10634,30 +11152,48 @@ export function Timeline({ task, channel, events, readOnly, onBranchFrom, onOpen
 }
 
 export function RunStatus({ task, onResume }: { task: Task; onResume: () => void }) {
-  if (task.runState === 'running') return <div className="ml-10 flex items-center gap-2 text-[13px] text-muted"><Spinner />Claude 正在處理…</div>
-  if (task.runState === 'finalizing') return <div className="ml-10 flex items-center gap-2 text-[13px] text-muted"><Spinner />正在整理 diff 並執行驗證指令…</div>
-  if (task.runState === 'interrupted' || task.runState === 'error' || task.error) {
+  if (task.runState === 'running')
     return (
-      <div role="alert" className="flex items-center gap-3 rounded-xl bg-red-50 px-3.5 py-3 text-[13px] text-danger">
-        <span className="flex-1">{task.runState === 'interrupted' ? '上一次執行被中斷了。' : task.error ?? '發生錯誤'}</span>
-        {(task.runState === 'interrupted' || task.runState === 'error') && <button type="button" onClick={onResume} className="font-medium underline">繼續</button>}
+      <div className="ml-10 flex items-center gap-2 text-[13px] text-muted">
+        <Spinner />
+        Claude 正在處理…
+      </div>
+    )
+  if (task.runState === 'finalizing')
+    return (
+      <div className="ml-10 flex items-center gap-2 text-[13px] text-muted">
+        <Spinner />
+        正在整理 diff 並執行驗證指令…
+      </div>
+    )
+  if (task.runState === 'interrupted' || task.runState === 'error' || task.error) {
+    const canResume = task.runState === 'interrupted' || task.runState === 'error'
+    return (
+      <div
+        role="alert"
+        className="flex items-center gap-3 rounded-xl bg-danger-soft px-3.5 py-3 text-[13px] text-danger"
+      >
+        <span className="flex-1">
+          {task.runState === 'interrupted' ? '上一次執行被中斷了。' : (task.error ?? '發生錯誤')}
+        </span>
+        {canResume && (
+          <button type="button" onClick={onResume} className="cursor-pointer font-medium underline">
+            繼續
+          </button>
+        )}
       </div>
     )
   }
   return null
 }
-
-export function useTimeline(taskId: string) {
-  return useStore((s) => s.timelines[taskId]) ?? []
-}
 ```
 
-**Step 5: 確認通過** — `npx vitest run tests/renderer/QuestionCard.test.tsx` → 5 passed
+**Step 6: 確認通過** — `npx vitest run tests/renderer/QuestionCard.test.tsx tests/renderer/Timeline.test.tsx` → 19 passed
 
-**Step 6: Commit**
+**Step 7: Commit**
 
 ```bash
-git add src/renderer/src/components tests/renderer/QuestionCard.test.tsx
+git add src/renderer/src/components src/renderer/src/lib tests/renderer/QuestionCard.test.tsx tests/renderer/Timeline.test.tsx docs/plans
 git commit -m "feat(ui): add question card with counter-questions and timeline
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -11187,7 +11723,8 @@ import { Composer } from '../components/Composer'
 import { Markdown } from '../components/Markdown'
 import { PermissionDialog } from '../components/PermissionDialog'
 import { QuestionCard } from '../components/QuestionCard'
-import { RunStatus, toolSummary, useTimeline } from '../components/Timeline'
+import { RunStatus } from '../components/Timeline'
+import { toolSummary, useTimeline } from '../lib/timeline'
 import { Avatar, cx, Icons, Pill } from '../components/ui'
 import { useStore } from '../store'
 

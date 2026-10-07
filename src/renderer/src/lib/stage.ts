@@ -68,3 +68,10 @@ export function taskStatusLabel(t: Task): { text: string; tone: Tone } {
       return { text: '已丟棄', tone: 'muted' }
   }
 }
+
+/** 主線在這些狀態下不能作答、反問或分岔（主程序也會拒絕） */
+export function isBusy(t: Task): boolean {
+  return (
+    t.runState === 'running' || t.runState === 'waiting_permission' || t.runState === 'finalizing'
+  )
+}
