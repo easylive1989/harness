@@ -2699,6 +2699,14 @@ describe('verifyRunner', () => {
     expect(r.outputTail).toContain('逾時')
   })
 
+  test('逾時會終止整個 process group，不等子程序結束', async () => {
+    const started = Date.now()
+    const r = await runShell(tmpdir(), 'sleep 5; echo done', 200)
+    expect(Date.now() - started).toBeLessThan(2000)
+    expect(r.outputTail).toContain('逾時')
+    expect(r.outputTail).not.toContain('done')
+  })
+
   test('未核准的指令不執行', async () => {
     const r = await runVerification(tmpdir(), ['echo a', 'echo b'], (c) => c === 'echo a')
     expect(r[0].exitCode).toBe(0)
@@ -2720,14 +2728,21 @@ import type { VerificationResult } from '@shared/types'
 export function runShell(cwd: string, command: string, timeoutMs = 10 * 60_000): Promise<VerificationResult> {
   const started = Date.now()
   return new Promise((resolve) => {
-    const child = spawn(process.env.SHELL || '/bin/zsh', ['-lc', command], { cwd, env: process.env })
+    // detached：子程序自成 process group，逾時才能連同孫程序一起終止
+    const child = spawn(process.env.SHELL || '/bin/zsh', ['-lc', command], { cwd, env: process.env, detached: true })
     let out = ''
     const onData = (b: Buffer) => { out = (out + b.toString()).slice(-8000) }
     child.stdout.on('data', onData)
     child.stderr.on('data', onData)
     const timer = setTimeout(() => {
       out += '\n[Harness] 執行逾時，已終止'
-      child.kill('SIGTERM')
+      // 只殺 shell 的話，孫程序會繼續佔住 stdout，close 要等它自己結束才會觸發
+      try {
+        if (child.pid) process.kill(-child.pid, 'SIGTERM')
+        else child.kill('SIGTERM')
+      } catch {
+        child.kill('SIGTERM')
+      }
     }, timeoutMs)
     child.on('close', (code) => {
       clearTimeout(timer)
