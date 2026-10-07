@@ -464,7 +464,10 @@ export class TaskManager {
     await this.update(taskId, (x) => {
       if (branchId) {
         const b = x.branches.find((bb) => bb.id === branchId)
-        if (b) b.running = true
+        if (b) {
+          b.running = true
+          b.error = undefined
+        }
       } else {
         x.runState = 'running'
         x.error = undefined
@@ -493,12 +496,23 @@ export class TaskManager {
           }
         }
         if (err) {
-          t.error = errorMessage(err)
+          this.setRunError(t, channel, errorMessage(err))
           if (current && !branchId && t.runState !== 'finalizing') t.runState = 'error'
         }
         this.syncPermission(t)
       })
     }).catch(logError('收尾失敗'))
+  }
+
+  /** 執行錯誤記在所屬的 channel：分岔的錯誤顯示在分岔面板，不打斷主線 */
+  private setRunError(t: Task, channel: Channel, message: string) {
+    const branchId = branchIdOf(channel)
+    if (!branchId) {
+      t.error = message
+      return
+    }
+    const b = t.branches.find((x) => x.id === branchId)
+    if (b) b.error = message
   }
 
   private async onRunnerEvent(taskId: string, channel: Channel, e: RunnerEvent) {
@@ -551,7 +565,7 @@ export class TaskManager {
         // 使用者停止造成的結束（interrupted）不算錯誤
         if (!e.ok && !e.interrupted) {
           await this.update(taskId, (t) => {
-            t.error = e.error || 'Claude 執行失敗'
+            this.setRunError(t, channel, e.error || 'Claude 執行失敗')
           })
         }
         return

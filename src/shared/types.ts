@@ -86,6 +86,8 @@ export interface Branch {
   status: 'open' | 'concluding' | 'concluded'
   running: boolean
   conclusion?: BranchConclusion
+  /** 這個分岔最近一次執行的錯誤（主線的錯誤記在 Task.error） */
+  error?: string
   createdAt: string
 }
 

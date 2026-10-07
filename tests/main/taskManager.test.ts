@@ -954,11 +954,15 @@ describe('TaskManager：審查補強', () => {
 
   test('插話前再檢查一次：排隊期間開始收尾就拒絕', async () => {
     const { tm, claude, id } = await toImplementing()
+    const started = deferred()
     claude.script = async () => {
+      started.resolve()
       await new Promise(() => undefined) // 一直執行，直到被停止
     }
     await tm.send(id, 'main', '開始')
-    await until(() => tm.get(id).runState === 'running')
+    // 等 script 真的開始跑（這段執行正在進行中），不靠輪詢與時間
+    await started.promise
+    expect(tm.get(id).runState).toBe('running')
     // 白箱：佔住主線的 turn lock，讓下一則訊息排隊
     const internals = tm as unknown as {
       chainOn: (
@@ -1083,5 +1087,50 @@ describe('TaskManager：關閉 app', () => {
     const id = await create()
     await tm.shutdown(100)
     expect(tm.get(id).runState).toBe('idle')
+  })
+})
+
+describe('TaskManager：分岔的錯誤', () => {
+  test('分岔執行丟出錯誤記在分岔上，不影響主線；再送訊息就清除', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => {
+      throw new Error('CLI crashed')
+    }
+    const b = await tm.openBranch(id, { title: '討論' })
+    await tm.whenIdle(id)
+    expect(tm.get(id).branches[0]).toMatchObject({ running: false, error: 'CLI crashed' })
+    expect(tm.get(id).error).toBeUndefined()
+    expect(tm.get(id).runState).toBe('idle')
+
+    claude.script = async () => [assistantText('好')]
+    await tm.send(id, `branch:${b.id}`, '再試一次')
+    await tm.whenIdle(id)
+    expect(tm.get(id).branches[0].error).toBeUndefined()
+    expect(tm.get(id).error).toBeUndefined()
+  })
+
+  test('分岔的 turn_end 失敗記在分岔上', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => [{ type: 'result', subtype: 'error_during_execution' }]
+    await tm.openBranch(id, { title: '討論' })
+    await tm.whenIdle(id)
+    expect(tm.get(id).branches[0].error).toBe('執行時發生錯誤')
+    expect(tm.get(id).error).toBeUndefined()
+    expect(tm.get(id).runState).toBe('idle')
+  })
+
+  test('主線的錯誤仍記在任務上', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => [{ type: 'result', subtype: 'error_during_execution' }]
+    await tm.send(id, 'main', '失敗')
+    await tm.whenIdle(id)
+    expect(tm.get(id).error).toBe('執行時發生錯誤')
+    claude.script = async () => []
+    await tm.send(id, 'main', '再一次')
+    await tm.whenIdle(id)
+    expect(tm.get(id).error).toBeUndefined()
   })
 })

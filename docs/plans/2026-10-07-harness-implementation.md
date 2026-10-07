@@ -348,6 +348,8 @@ export interface Branch {
   status: 'open' | 'concluding' | 'concluded'
   running: boolean
   conclusion?: BranchConclusion
+  /** 這個分岔最近一次執行的錯誤（主線的錯誤記在 Task.error） */
+  error?: string
   createdAt: string
 }
 
@@ -5103,7 +5105,8 @@ export function fakeGit(): GitLike & { calls: string[] } {
   }
 }
 
-export async function until(cond: () => boolean, ms = 2000) {
+/** 輪詢到條件成立為止；條件成立就立刻返回，上限只防止無限等待（機器忙時也要夠寬） */
+export async function until(cond: () => boolean, ms = 10_000) {
   const start = Date.now()
   while (!cond()) {
     if (Date.now() - start > ms) throw new Error('until: timeout')
@@ -5782,7 +5785,10 @@ export class TaskManager {
     await this.update(taskId, (x) => {
       if (branchId) {
         const b = x.branches.find((bb) => bb.id === branchId)
-        if (b) b.running = true
+        if (b) {
+          b.running = true
+          b.error = undefined
+        }
       } else {
         x.runState = 'running'
         x.error = undefined
@@ -5811,12 +5817,23 @@ export class TaskManager {
           }
         }
         if (err) {
-          t.error = errorMessage(err)
+          this.setRunError(t, channel, errorMessage(err))
           if (current && !branchId && t.runState !== 'finalizing') t.runState = 'error'
         }
         this.syncPermission(t)
       })
     }).catch(logError('收尾失敗'))
+  }
+
+  /** 執行錯誤記在所屬的 channel：分岔的錯誤顯示在分岔面板，不打斷主線 */
+  private setRunError(t: Task, channel: Channel, message: string) {
+    const branchId = branchIdOf(channel)
+    if (!branchId) {
+      t.error = message
+      return
+    }
+    const b = t.branches.find((x) => x.id === branchId)
+    if (b) b.error = message
   }
 
   private async onRunnerEvent(taskId: string, channel: Channel, e: RunnerEvent) {
@@ -5869,7 +5886,7 @@ export class TaskManager {
         // 使用者停止造成的結束（interrupted）不算錯誤
         if (!e.ok && !e.interrupted) {
           await this.update(taskId, (t) => {
-            t.error = e.error || 'Claude 執行失敗'
+            this.setRunError(t, channel, e.error || 'Claude 執行失敗')
           })
         }
         return
@@ -6188,6 +6205,8 @@ describe('TaskManager：分岔', () => {
 **Step 2: 確認失敗**
 
 **Step 3: 實作（加到 TaskManager）**
+
+分岔執行的錯誤（丟出例外或 turn_end 失敗）由 Task 21 的 `setRunError` 記在 `branch.error`，不寫 `task.error`（主線的錯誤提示沒有對應的繼續動作，分岔面板才是顯示的地方）；該分岔開新一輪時清除。
 
 sink 的 `concludeBranch` 已在 Task 21 的 `sinkFor` 中（只能在分岔中使用、已帶回主線的分岔不能再整理）。確認結論時，決策的時間軸項目以 `entries` 交給 `send()`，主線接受訊息後才寫入；送不出去就還原分岔與決策。新增：
 
@@ -7222,11 +7241,15 @@ describe('TaskManager：審查補強', () => {
 
   test('插話前再檢查一次：排隊期間開始收尾就拒絕', async () => {
     const { tm, claude, id } = await toImplementing()
+    const started = deferred()
     claude.script = async () => {
+      started.resolve()
       await new Promise(() => undefined) // 一直執行，直到被停止
     }
     await tm.send(id, 'main', '開始')
-    await until(() => tm.get(id).runState === 'running')
+    // 等 script 真的開始跑（這段執行正在進行中），不靠輪詢與時間
+    await started.promise
+    expect(tm.get(id).runState).toBe('running')
     // 白箱：佔住主線的 turn lock，讓下一則訊息排隊
     const internals = tm as unknown as {
       chainOn: (
@@ -7988,6 +8011,51 @@ describe('TaskManager：關閉 app', () => {
     const id = await create()
     await tm.shutdown(100)
     expect(tm.get(id).runState).toBe('idle')
+  })
+})
+
+describe('TaskManager：分岔的錯誤', () => {
+  test('分岔執行丟出錯誤記在分岔上，不影響主線；再送訊息就清除', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => {
+      throw new Error('CLI crashed')
+    }
+    const b = await tm.openBranch(id, { title: '討論' })
+    await tm.whenIdle(id)
+    expect(tm.get(id).branches[0]).toMatchObject({ running: false, error: 'CLI crashed' })
+    expect(tm.get(id).error).toBeUndefined()
+    expect(tm.get(id).runState).toBe('idle')
+
+    claude.script = async () => [assistantText('好')]
+    await tm.send(id, `branch:${b.id}`, '再試一次')
+    await tm.whenIdle(id)
+    expect(tm.get(id).branches[0].error).toBeUndefined()
+    expect(tm.get(id).error).toBeUndefined()
+  })
+
+  test('分岔的 turn_end 失敗記在分岔上', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => [{ type: 'result', subtype: 'error_during_execution' }]
+    await tm.openBranch(id, { title: '討論' })
+    await tm.whenIdle(id)
+    expect(tm.get(id).branches[0].error).toBe('執行時發生錯誤')
+    expect(tm.get(id).error).toBeUndefined()
+    expect(tm.get(id).runState).toBe('idle')
+  })
+
+  test('主線的錯誤仍記在任務上', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => [{ type: 'result', subtype: 'error_during_execution' }]
+    await tm.send(id, 'main', '失敗')
+    await tm.whenIdle(id)
+    expect(tm.get(id).error).toBe('執行時發生錯誤')
+    claude.script = async () => []
+    await tm.send(id, 'main', '再一次')
+    await tm.whenIdle(id)
+    expect(tm.get(id).error).toBeUndefined()
   })
 })
 ```

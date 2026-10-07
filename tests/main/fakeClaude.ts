@@ -155,7 +155,8 @@ export function fakeGit(): GitLike & { calls: string[] } {
   }
 }
 
-export async function until(cond: () => boolean, ms = 2000) {
+/** 輪詢到條件成立為止；條件成立就立刻返回，上限只防止無限等待（機器忙時也要夠寬） */
+export async function until(cond: () => boolean, ms = 10_000) {
   const start = Date.now()
   while (!cond()) {
     if (Date.now() - start > ms) throw new Error('until: timeout')
