@@ -4783,45 +4783,87 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Step 1: 測試替身**
 
+FakeClaude 接上真正的 `AgentRun`：它送出的 result 不帶 `user_message_uuid`，所以 AgentRun 在每個 result 之後就關閉輸入（插話的訊息不會被讀取，這是預期的）。`interrupt()` 會讓 script 提早結束並照常送 result；`abortController` 被 abort 時丟出錯誤（模擬程序被終止）。`createToolServer` 記下每次的工具清單，測試可檢查分岔只拿到 `conclude_branch`。
+
 ```ts
 // tests/main/fakeClaude.ts
 import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { QueryFn } from '../../src/main/agent/agentRun'
 import type { GitLike } from '../../src/main/git/gitService'
-import type { ToolSink } from '../../src/main/tools/harnessTools'
+import type { HarnessToolName, ToolSink } from '../../src/main/tools/harnessTools'
 
-export interface ScriptCtx { call: number; prompt: string; options: Options; sink: ToolSink }
+export interface ScriptCtx {
+  call: number
+  prompt: string
+  options: Options
+  sink: ToolSink
+}
 export type Script = (ctx: ScriptCtx) => Promise<unknown[] | void>
 
-export const assistantText = (text: string) => ({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'text', text }] } })
+export const assistantText = (text: string) => ({
+  type: 'assistant',
+  parent_tool_use_id: null,
+  message: { content: [{ type: 'text', text }] }
+})
 
-/** 假的 Claude：每次 query() 讀第一則訊息、送 init、執行 script（可呼叫 sink），最後送 result */
+/**
+ * 假的 Claude：每次 query() 讀第一則訊息、送 init、執行 script（可呼叫 sink），最後送 result。
+ * result 不帶 user_message_uuid，AgentRun 會在每個 result 之後關閉輸入（插話的訊息不會被讀取）。
+ * interrupt() 或 abort 會讓 script 提早結束：interrupt 照常送 result，abort 則丟出錯誤。
+ */
 export class FakeClaude {
-  calls: { prompt: string; options: Options }[] = []
+  calls: { prompt: string; options: Options; tools: HarnessToolName[] }[] = []
   script: Script = async () => []
   private lastSink?: ToolSink
+  private lastTools: HarnessToolName[] = []
 
-  createToolServer = (sink: ToolSink) => {
+  createToolServer = (sink: ToolSink, tools: HarnessToolName[]) => {
     this.lastSink = sink
+    this.lastTools = tools
     return { type: 'sdk', name: 'harness' } as never
   }
 
   queryFn: QueryFn = ({ prompt, options }) => {
     const sink = this.lastSink!
+    const tools = this.lastTools
     const call = this.calls.length
-    const self = this
+    const signal = options.abortController?.signal
+    let interrupt!: () => void
+    const interrupted = new Promise<'interrupted'>((r) => {
+      interrupt = () => r('interrupted')
+    })
+    const aborted = new Promise<'aborted'>((r) => {
+      if (signal?.aborted) r('aborted')
+      signal?.addEventListener('abort', () => r('aborted'), { once: true })
+    })
+    const record = (c: FakeClaude['calls'][number]) => this.calls.push(c)
+    const run = (ctx: ScriptCtx) => this.script(ctx)
     const gen = (async function* () {
       const it = prompt[Symbol.asyncIterator]()
       const first = await it.next()
       const text = String((first.value as SDKUserMessage).message.content)
-      self.calls.push({ prompt: text, options })
+      record({ prompt: text, options, tools })
       const sessionId = options.forkSession ? `fork-${call}` : (options.resume ?? `sess-${call}`)
       yield { type: 'system', subtype: 'init', session_id: sessionId } as unknown as SDKMessage
-      for (const msg of (await self.script({ call, prompt: text, options, sink })) ?? []) yield msg as SDKMessage
-      await new Promise((r) => setTimeout(r, 40))
+      const outcome = await Promise.race([
+        run({ call, prompt: text, options, sink }),
+        interrupted,
+        aborted
+      ])
+      if (outcome === 'aborted') throw new Error('aborted')
+      if (outcome !== 'interrupted') {
+        for (const m of outcome ?? []) yield m as SDKMessage
+        // 讓 script 裡用 setTimeout 延後的工具呼叫落在同一輪內
+        await Promise.race([new Promise((r) => setTimeout(r, 40)), interrupted, aborted])
+      }
+      if (signal?.aborted) throw new Error('aborted')
       yield { type: 'result', subtype: 'success', is_error: false } as unknown as SDKMessage
     })()
-    return Object.assign(gen, { interrupt: async () => undefined })
+    return Object.assign(gen, {
+      interrupt: async () => {
+        interrupt()
+      }
+    })
   }
 }
 
@@ -4833,14 +4875,28 @@ export function fakeGit(): GitLike & { calls: string[] } {
     repoRoot: async (d) => d,
     branches: async () => ['main'],
     currentBranch: async () => 'main',
-    createWorktree: async (_repo, wt, branch, base) => { calls.push(`worktree ${wt} ${branch} ${base}`) },
+    createWorktree: async (_repo, wt, branch, base) => {
+      calls.push(`worktree ${wt} ${branch} ${base}`)
+    },
     commitAll: async () => 'abc123',
     diff: async () => 'diff --git a/a.ts b/a.ts\n',
-    diffStats: async () => ({ files: 1, additions: 2, deletions: 0, perFile: [{ path: 'a.ts', additions: 2, deletions: 0 }] }),
+    diffStats: async () => ({
+      files: 1,
+      additions: 2,
+      deletions: 0,
+      perFile: [{ path: 'a.ts', additions: 2, deletions: 0 }]
+    }),
     workingStats: async () => ({ files: 0, additions: 0, deletions: 0, perFile: [] }),
-    merge: async (_repo, branch, base) => { calls.push(`merge ${branch} ${base}`) },
-    removeWorktree: async (_repo, wt, branch) => { calls.push(`remove ${wt} ${branch}`) },
-    pushAndOpenPr: async () => 'https://github.com/me/shop-api/pull/1'
+    merge: async (_repo, branch, base) => {
+      calls.push(`merge ${branch} ${base}`)
+    },
+    removeWorktree: async (_repo, wt, branch) => {
+      calls.push(`remove ${wt} ${branch}`)
+    },
+    pushAndOpenPr: async (_wt, branch, base, title) => {
+      calls.push(`pr ${branch} ${base} ${title}`)
+      return 'https://github.com/me/shop-api/pull/1'
+    }
   }
 }
 
@@ -4855,73 +4911,125 @@ export async function until(cond: () => boolean, ms = 2000) {
 
 **Step 2: 寫失敗測試（本 Task 的部分）**
 
+> 檔頭的 `PermissionResult`、`until`、`sampleReport` import 在 Task 23、24 才用到，本 Task 先不加（否則 lint 會報未使用）。
+
 ```ts
 // tests/main/taskManager.test.ts
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
+import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AppEvent } from '@shared/ipc'
 import { Repository } from '../../src/main/store/repository'
 import { Store } from '../../src/main/store/store'
-import { TaskManager } from '../../src/main/tasks/taskManager'
-import { assistantText, FakeClaude, fakeGit } from './fakeClaude'
+import { TaskManager, type TaskManagerDeps } from '../../src/main/tasks/taskManager'
+import { sampleReport } from '../fixtures/report'
+import { assistantText, FakeClaude, fakeGit, until } from './fakeClaude'
 
-export async function setup() {
+async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'harness-tm-'))
   const repo = new Repository(new Store(root), '/home/me')
   await repo.saveRepos([{ id: 'r1', name: 'shop-api', path: '/repos/shop-api', addedAt: 'x' }])
   const claude = new FakeClaude()
   const git = fakeGit()
   const events: AppEvent[] = []
-  const verify = vi.fn(async (_cwd: string, commands: string[]) =>
-    commands.map((command) => ({ command, exitCode: 0, durationMs: 1, outputTail: 'ok' })))
+  const verify = vi.fn<TaskManagerDeps['verify']>(async (_cwd, commands) =>
+    commands.map((command) => ({ command, exitCode: 0, durationMs: 1, outputTail: 'ok' }))
+  )
   let n = 0
   const tm = new TaskManager({
-    repo, git, queryFn: claude.queryFn, createToolServer: claude.createToolServer,
-    getClaudePath: () => '/bin/claude', emit: (e) => events.push(e), verify,
-    newId: () => `id${++n}`, now: () => '2026-10-07T10:00:00.000Z'
+    repo,
+    git,
+    queryFn: claude.queryFn,
+    createToolServer: claude.createToolServer,
+    getClaudePath: () => '/bin/claude',
+    emit: (e) => events.push(e),
+    verify,
+    newId: () => `id${++n}`,
+    now: () => '2026-10-07T10:00:00.000Z'
   })
   await tm.init()
   const create = async () => {
-    const t = await tm.createTask({ repoId: 'r1', request: '加上登入失敗鎖定', baseBranch: 'main', model: 'claude-opus-5-5' })
+    const t = await tm.createTask({
+      repoId: 'r1',
+      request: '加上登入失敗鎖定',
+      baseBranch: 'main',
+      model: 'claude-opus-5-5'
+    })
     await tm.whenIdle(t.id)
     return t.id
   }
   return { tm, claude, git, events, verify, repo, create }
 }
 
-const askQ1 = { question_id: 'q1', question: '計數單位？', options: [{ id: 'acct', label: '帳號' }, { id: 'acct_ip', label: '帳號 + IP' }], allow_free_text: true }
+const askQ1 = {
+  question_id: 'q1',
+  question: '計數單位？',
+  options: [
+    { id: 'acct', label: '帳號' },
+    { id: 'acct_ip', label: '帳號 + IP' }
+  ],
+  allow_free_text: true
+}
 
 describe('TaskManager：建立任務與釐清', () => {
   test('建立 worktree、送出需求、記下 session', async () => {
-    const { tm, claude, git, create } = await setup()
+    const { tm, claude, git, events, create } = await setup()
     const id = await create()
     const t = tm.get(id)
-    expect(git.calls[0]).toBe(`worktree /home/me/.harness/worktrees/shop-api/20261007-${id} harness/20261007-${id} main`)
+    expect(git.calls[0]).toBe(
+      `worktree /home/me/.harness/worktrees/shop-api/20261007-${id} harness/20261007-${id} main`
+    )
     expect(claude.calls[0].prompt).toBe('加上登入失敗鎖定')
-    expect(claude.calls[0].options).toMatchObject({ cwd: t.worktreePath, model: 'claude-opus-5-5', settingSources: ['project'], pathToClaudeCodeExecutable: '/bin/claude' })
+    expect(claude.calls[0].options).toMatchObject({
+      cwd: t.worktreePath,
+      model: 'claude-opus-5-5',
+      settingSources: ['project'],
+      pathToClaudeCodeExecutable: '/bin/claude'
+    })
     expect(claude.calls[0].options.resume).toBeUndefined()
+    // canUseTool 與 PreToolUse hook 都要接上（hook 擋住專案 allow 規則的繞過）
+    expect(claude.calls[0].options.canUseTool).toBeTypeOf('function')
+    expect(claude.calls[0].options.hooks?.PreToolUse?.[0].hooks).toHaveLength(1)
+    expect(claude.calls[0].tools).toEqual([
+      'ask_user',
+      'propose_spec',
+      'update_plan',
+      'submit_report'
+    ])
     expect(t).toMatchObject({ status: 'clarifying', runState: 'idle', mainSessionId: 'sess-0' })
+    expect(events.some((e) => e.type === 'task' && e.task.runState === 'running')).toBe(true)
   })
 
   test('ask_user 建立問題卡片；回答後以 resume 送出 [answer]', async () => {
     const { tm, claude, create } = await setup()
-    claude.script = async ({ call, sink }) => { if (call === 0) await sink.askUser(askQ1) }
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser(askQ1)
+    }
     const id = await create()
-    expect(tm.get(id).questions[0]).toMatchObject({ id: 'q1', status: 'open', options: askQ1.options })
+    expect(tm.get(id).questions[0]).toMatchObject({
+      id: 'q1',
+      status: 'open',
+      options: askQ1.options
+    })
     expect((await tm.timeline(id)).map((e) => e.kind)).toEqual(['user_text', 'question'])
 
     await tm.answerQuestion(id, 'q1', { optionId: 'acct_ip' })
     await tm.whenIdle(id)
-    expect(tm.get(id).questions[0]).toMatchObject({ status: 'answered', answer: { optionId: 'acct_ip' } })
+    expect(tm.get(id).questions[0]).toMatchObject({
+      status: 'answered',
+      answer: { optionId: 'acct_ip' }
+    })
     expect(claude.calls[1].prompt).toBe('[answer question_id=q1 option=acct_ip] 帳號 + IP')
     expect(claude.calls[1].options.resume).toBe('sess-0')
   })
 
   test('反問：回答文字進入卡片，Claude 以同一 question_id 更新卡片', async () => {
     const { tm, claude, create } = await setup()
-    claude.script = async ({ call, sink }) => { if (call === 0) await sink.askUser(askQ1) }
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser(askQ1)
+    }
     const id = await create()
     // 第二輪：先輸出文字，稍後（同一輪內）再以同一 question_id 更新卡片
     claude.script = async ({ call, sink }) => {
@@ -4947,16 +5055,50 @@ describe('TaskManager：建立任務與釐清', () => {
     claude.script = async () => [assistantText('好的')]
     await tm.send(id, 'main', '補充：只針對 /login')
     await tm.whenIdle(id)
-    expect((await tm.timeline(id)).slice(-2).map((e) => [e.kind, e.text])).toEqual([['user_text', '補充：只針對 /login'], ['assistant_text', '好的']])
+    expect((await tm.timeline(id)).slice(-2).map((e) => [e.kind, e.text])).toEqual([
+      ['user_text', '補充：只針對 /login'],
+      ['assistant_text', '好的']
+    ])
+  })
+
+  test('同時送出兩則訊息不會開兩段執行', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => [assistantText('收到')]
+    await Promise.all([
+      tm.send(id, 'main', '第一則', { silent: true }),
+      tm.send(id, 'main', '第二則', { silent: true })
+    ])
+    await tm.whenIdle(id)
+    // 第二則插話進第一段執行（FakeClaude 不讀插話），所以只多一次 query
+    expect(claude.calls).toHaveLength(2)
+    expect(tm.get(id).runState).toBe('idle')
+  })
+
+  test('執行失敗時記錄錯誤', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async () => {
+      throw new Error('CLI crashed')
+    }
+    const id = await create()
+    expect(tm.get(id)).toMatchObject({ runState: 'error', error: 'CLI crashed' })
   })
 })
 ```
 
 > 註：反問測試用 `setTimeout` 讓 askUser 晚於文字事件發生，模擬真實的「先文字、後工具」順序；FakeClaude 在送出 result 前會等 40ms，確保延遲的 askUser 落在同一輪內。
+> 「同時送出兩則訊息」用 `silent` 送出（不先寫時間軸），才會真的在 `startTurn` 的 await 期間競爭；沒有 turn lock 時會開出兩段執行。
 
 **Step 3: 確認失敗** — `npx vitest run tests/main/taskManager.test.ts` → FAIL
 
 **Step 4: 實作 TaskManager（本 Task 先實作下列成員，後續 Task 再補）**
+
+重點（與真實模組對齊後的規則）：
+- 同一個 channel 永遠只有一段執行：`send()` 在 per-channel 的 turn lock 內做「插話或開新一輪」的決定（`prev?.send(text)` 成功就插話；否則先等 `prev.done` 再 `startTurn`），兩個同時的 `send()` 不會各開一段。
+- `onRunDone` 只有在該 run 仍是目前的 run 時才重設執行狀態；`turn_end` 的 `interrupted`（使用者停止）不記錯誤。
+- runner 事件與工具回呼都排進 per-task 的 `enqueue` 鏈依序處理；task.json 寫入（`update`）與時間軸寫入（`addTimeline`）各自有 per-task 的寫入鏈，磁碟順序＝推送順序。
+- `canUseTool` 與 `options.hooks.PreToolUse` 用同一個 `gateCtx`。
+- 不 import `electron`（要能在 vitest 的 node 專案測試）。
 
 ```ts
 // src/main/tasks/taskManager.ts
@@ -4967,12 +5109,21 @@ import type { AppEvent, CreateTaskInput } from '@shared/ipc'
 import { msg } from '@shared/protocol'
 import type { ReportInput } from '@shared/report'
 import type {
-  Branch, BranchConclusion, Channel, FeedbackItem, PermissionDecision, Report, Task, TimelineEvent, VerificationResult
+  Branch,
+  BranchConclusion,
+  Channel,
+  FeedbackItem,
+  PermissionDecision,
+  PermissionRequest,
+  Report,
+  Task,
+  TimelineEvent,
+  VerificationResult
 } from '@shared/types'
 import { AgentRun, type QueryFn, type RunnerEvent } from '../agent/agentRun'
 import { MAIN_SYSTEM_APPEND } from '../agent/prompts'
 import type { GitLike } from '../git/gitService'
-import { matchesPattern } from '../permissions/commandPattern'
+import { hasShellOperators, matchesPattern } from '../permissions/commandPattern'
 import {
   type ApprovalRequest,
   createPermissionGate,
@@ -4993,24 +5144,47 @@ export interface TaskManagerDeps {
   createToolServer: (sink: ToolSink, tools: HarnessToolName[]) => McpServer
   getClaudePath: () => string | undefined
   emit: (e: AppEvent) => void
-  verify: (cwd: string, commands: string[], isAllowed: (c: string) => boolean) => Promise<VerificationResult[]>
+  verify: (
+    cwd: string,
+    commands: string[],
+    isAllowed: (c: string) => boolean
+  ) => Promise<VerificationResult[]>
   now?: () => string
   newId?: () => string
 }
 
+interface PermissionWaiter {
+  taskId: string
+  channel: Channel
+  request: PermissionRequest
+  resolve: (d: PermissionDecision) => void
+}
+
 const MAIN_TOOLS: HarnessToolName[] = ['ask_user', 'propose_spec', 'update_plan', 'submit_report']
 const runKey = (taskId: string, channel: Channel) => `${taskId}|${channel}`
-const branchIdOf = (channel: Channel) => (channel.startsWith('branch:') ? channel.slice('branch:'.length) : undefined)
+const branchIdOf = (channel: Channel) =>
+  channel.startsWith('branch:') ? channel.slice('branch:'.length) : undefined
 const errorMessage = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
 export class TaskManager {
   private tasks = new Map<string, Task>()
+  /** 每個 channel（taskId|channel）最多一段執行 */
   private runs = new Map<string, AgentRun>()
-  private permissionWaiters = new Map<string, { taskId: string; resolve: (d: PermissionDecision) => void }>()
+  /** 串起每個任務的 runner 事件與工具回呼，依發生順序處理 */
   private chains = new Map<string, Promise<unknown>>()
+  /** 每個任務的 task.json 寫入依序進行 */
   private saves = new Map<string, Promise<void>>()
+  /** 每個任務的時間軸寫入依序進行（磁碟順序＝推送順序） */
+  private timelineWrites = new Map<string, Promise<void>>()
+  /** 每個 channel 的「決定插話或開新一輪」依序進行，避免同時開出兩段執行 */
+  private turnLocks = new Map<string, Promise<unknown>>()
+  /** 等待使用者核准的請求，依提出順序；UI 一次顯示最早的一個 */
+  private permissionWaiters = new Map<string, PermissionWaiter>()
+  /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
   private finalizing = new Map<string, Promise<void>>()
+  /** 正在開 PR／合併／丟棄的任務 */
+  private finishing = new Set<string>()
   private readonly now: () => string
   private readonly newId: () => string
 
@@ -5023,10 +5197,17 @@ export class TaskManager {
 
   async init() {
     for (const t of await this.d.repo.listTasks()) {
-      if (t.runState === 'running' || t.runState === 'waiting_permission' || t.runState === 'finalizing') {
-        t.runState = 'interrupted'
+      // 上次關閉 app 時還在執行的任務：程序已不在，標為中斷，使用者可「繼續」
+      const busy =
+        t.runState === 'running' ||
+        t.runState === 'waiting_permission' ||
+        t.runState === 'finalizing'
+      if (busy || t.pendingPermission || t.branches.some((b) => b.running)) {
+        if (busy) t.runState = 'interrupted'
         t.pendingPermission = undefined
-        t.branches.forEach((b) => { b.running = false })
+        t.branches.forEach((b) => {
+          b.running = false
+        })
         await this.d.repo.saveTask(t)
       }
       this.tasks.set(t.id, t)
@@ -5034,7 +5215,9 @@ export class TaskManager {
   }
 
   list(): Task[] {
-    return [...this.tasks.values()].map((t) => structuredClone(t)).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    return [...this.tasks.values()]
+      .map((t) => structuredClone(t))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   }
 
   get(taskId: string): Task {
@@ -5043,30 +5226,62 @@ export class TaskManager {
     return t
   }
 
-  timeline(taskId: string) { return this.d.repo.readTimeline(taskId) }
+  timeline(taskId: string) {
+    return this.d.repo.readTimeline(taskId)
+  }
 
   /** 等這個任務的所有執行、事件與報告整理結束（測試用，也用於關閉 app 前） */
   async whenIdle(taskId: string) {
-    for (let i = 0; i < 50; i++) {
-      const runs = [...this.runs.entries()].filter(([k]) => k.startsWith(`${taskId}|`)).map(([, r]) => r.done.catch(() => undefined))
+    for (let i = 0; i < 100; i++) {
+      const runs = this.runsOf(taskId).map(([, r]) => r.done.catch(() => undefined))
       await Promise.all([...runs, this.finalizing.get(taskId)])
+      await Promise.all(
+        [...this.turnLocks.entries()].filter(([k]) => k.startsWith(`${taskId}|`)).map(([, p]) => p)
+      )
       await this.chains.get(taskId)
       await this.saves.get(taskId)
+      await this.timelineWrites.get(taskId)
       await new Promise((r) => setTimeout(r, 0))
-      const busy = [...this.runs.keys()].some((k) => k.startsWith(`${taskId}|`)) || this.finalizing.has(taskId)
-      if (!busy) return
+      if (this.runsOf(taskId).length === 0 && !this.finalizing.has(taskId)) return
     }
+    throw new Error(`whenIdle: 任務 ${taskId} 一直沒有停下來`)
   }
 
   // ───────── 內部工具 ─────────
 
+  /** 取得還沒結束（未完成、未丟棄）的任務 */
+  private openTask(taskId: string): Task {
+    const t = this.get(taskId)
+    if (t.status === 'done' || t.status === 'discarded') throw new Error('任務已結束')
+    return t
+  }
+
+  private runsOf(taskId: string) {
+    return [...this.runs.entries()].filter(([k]) => k.startsWith(`${taskId}|`))
+  }
+
   private enqueue<T>(taskId: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.chains.get(taskId) ?? Promise.resolve()
     const next = prev.then(fn)
-    this.chains.set(taskId, next.catch(() => undefined))
+    this.chains.set(
+      taskId,
+      next.catch(() => undefined)
+    )
     return next
   }
 
+  private withTurnLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.turnLocks.get(key) ?? Promise.resolve()
+    const next = prev.then(fn)
+    const tail = next.catch(() => undefined)
+    this.turnLocks.set(key, tail)
+    void tail.then(() => {
+      if (this.turnLocks.get(key) === tail) this.turnLocks.delete(key)
+    })
+    return next
+  }
+
+  /** 同步修改記憶體中的任務、推送事件，並依序寫入磁碟 */
   private async update(taskId: string, fn: (t: Task) => void): Promise<Task> {
     const t = this.get(taskId)
     fn(t)
@@ -5074,16 +5289,32 @@ export class TaskManager {
     const snapshot = structuredClone(t)
     const prev = this.saves.get(taskId) ?? Promise.resolve()
     const save = prev.then(() => this.d.repo.saveTask(snapshot))
-    this.saves.set(taskId, save.catch(() => undefined))
+    this.saves.set(
+      taskId,
+      save.catch(() => undefined)
+    )
     this.d.emit({ type: 'task', task: snapshot })
     await save
     return snapshot
   }
 
-  private async addTimeline(taskId: string, e: Omit<TimelineEvent, 'id' | 'ts'>) {
+  /** 不等待寫入的 update（用在同步回呼裡），寫入失敗只記錄 */
+  private persist(taskId: string, fn: (t: Task) => void) {
+    this.update(taskId, fn).catch((e: unknown) => console.error('[TaskManager] 儲存任務失敗', e))
+  }
+
+  private addTimeline(taskId: string, e: Omit<TimelineEvent, 'id' | 'ts'>): Promise<void> {
     const event: TimelineEvent = { id: this.newId(), ts: this.now(), ...e }
-    await this.d.repo.appendTimeline(taskId, event)
-    this.d.emit({ type: 'timeline', taskId, event })
+    const prev = this.timelineWrites.get(taskId) ?? Promise.resolve()
+    const write = prev.then(async () => {
+      await this.d.repo.appendTimeline(taskId, event)
+      this.d.emit({ type: 'timeline', taskId, event })
+    })
+    this.timelineWrites.set(
+      taskId,
+      write.catch(() => undefined)
+    )
+    return write
   }
 
   // ───────── 建立任務與對話 ─────────
@@ -5101,54 +5332,84 @@ export class TaskManager {
     await this.d.git.createWorktree(repo.path, worktreePath, branch, input.baseBranch)
     const now = this.now()
     const task: Task = {
-      id, repoId: repo.id, title: request.split('\n')[0].slice(0, 40), request,
-      baseBranch: input.baseBranch, branch, worktreePath, model: input.model,
-      status: 'clarifying', runState: 'idle',
-      questions: [], decisions: [], specs: [], plan: [], branches: [],
-      allowedCommands: [], approvedCommands: [], reportVersions: [],
-      createdAt: now, updatedAt: now
+      id,
+      repoId: repo.id,
+      title: request.split('\n')[0].slice(0, 40),
+      request,
+      baseBranch: input.baseBranch,
+      branch,
+      worktreePath,
+      model: input.model,
+      status: 'clarifying',
+      runState: 'idle',
+      questions: [],
+      decisions: [],
+      specs: [],
+      plan: [],
+      branches: [],
+      allowedCommands: [],
+      approvedCommands: [],
+      reportVersions: [],
+      createdAt: now,
+      updatedAt: now
     }
     this.tasks.set(id, task)
-    await this.d.repo.saveTask(task)
-    this.d.emit({ type: 'task', task: structuredClone(task) })
+    await this.update(id, () => undefined)
     await this.send(id, 'main', request)
     return structuredClone(this.get(id))
   }
 
-  async send(taskId: string, channel: Channel, text: string, opts: { display?: string; silent?: boolean } = {}) {
-    const t = this.get(taskId)
-    if (t.status === 'done' || t.status === 'discarded') throw new Error('任務已結束')
-    if (!opts.silent) await this.addTimeline(taskId, { channel, kind: 'user_text', text: opts.display ?? text })
+  /**
+   * 送出使用者訊息：該 channel 有進行中的執行就插話進去，否則以 resume 開新一輪。
+   * silent 不寫入時間軸（例如回答卡片、反問，UI 另有呈現）；display 是時間軸上顯示的文字。
+   */
+  async send(
+    taskId: string,
+    channel: Channel,
+    text: string,
+    opts: { display?: string; silent?: boolean } = {}
+  ) {
+    this.openTask(taskId)
+    if (channel === 'main' && this.finalizing.has(taskId))
+      throw new Error('正在整理報告，請稍候再送出')
+    if (!opts.silent)
+      await this.addTimeline(taskId, { channel, kind: 'user_text', text: opts.display ?? text })
     const key = runKey(taskId, channel)
-    const prev = this.runs.get(key)
-    if (prev?.send(text)) return
-    // 上一段執行已關閉輸入但程序還沒結束：等它結束，同一個 channel 永遠只有一個 run
-    if (prev) await prev.done.catch(() => undefined)
-    await this.startTurn(taskId, channel, text)
+    await this.withTurnLock(key, async () => {
+      const prev = this.runs.get(key)
+      if (prev?.send(text)) return
+      // 上一段執行已關閉輸入但程序還沒結束：等它結束，同一個 channel 永遠只有一個 run
+      if (prev) await prev.done.catch(() => undefined)
+      await this.startTurn(taskId, channel, text)
+    })
   }
 
   private async startTurn(taskId: string, channel: Channel, prompt: string) {
-    const t = this.get(taskId)
+    // 等上一段執行結束的期間任務可能已被丟棄或正在收尾：不要再開新的執行
+    const t = this.openTask(taskId)
+    if (this.finishing.has(taskId)) throw new Error('任務正在收尾，請稍候')
     const settings = await this.d.repo.getSettings()
     const branchId = branchIdOf(channel)
     const branch = branchId ? t.branches.find((b) => b.id === branchId) : undefined
     if (branchId && !branch) throw new Error(`找不到分岔 ${branchId}`)
-    const resume = branch ? branch.sessionId ?? t.mainSessionId : t.mainSessionId
+    const resume = branch ? (branch.sessionId ?? t.mainSessionId) : t.mainSessionId
     if (branch && !resume) throw new Error('主線尚未建立 session，無法分岔')
 
     const gateCtx: GateContext = {
       getPhase: () => (branch ? 'branch' : phaseOf(this.get(taskId).status)),
       worktreePath: t.worktreePath,
-      getAllowedPatterns: () => [...settings.alwaysAllowedCommands, ...this.get(taskId).allowedCommands],
-      requestApproval: (req, signal) => this.requestApproval(taskId, req, signal),
+      getAllowedPatterns: () => [
+        ...settings.alwaysAllowedCommands,
+        ...this.get(taskId).allowedCommands
+      ],
+      requestApproval: (req, signal) => this.requestApproval(taskId, channel, req, signal),
       onApproved: (command, pattern) => {
-        void this.update(taskId, (x) => {
+        this.persist(taskId, (x) => {
           if (command && !x.approvedCommands.includes(command)) x.approvedCommands.push(command)
           if (pattern && !x.allowedCommands.includes(pattern)) x.allowedCommands.push(pattern)
         })
       }
     }
-    const canUseTool = createPermissionGate(gateCtx)
 
     const options: Options = {
       cwd: t.worktreePath,
@@ -5157,8 +5418,13 @@ export class TaskManager {
       forkSession: branch && !branch.sessionId ? true : undefined,
       settingSources: settings.loadProjectSettings ? ['project'] : [],
       systemPrompt: { type: 'preset', preset: 'claude_code', append: MAIN_SYSTEM_APPEND },
-      mcpServers: { harness: this.d.createToolServer(this.sinkFor(taskId, channel), branch ? ['conclude_branch'] : MAIN_TOOLS) },
-      canUseTool,
+      mcpServers: {
+        harness: this.d.createToolServer(
+          this.sinkFor(taskId, channel),
+          branch ? ['conclude_branch'] : MAIN_TOOLS
+        )
+      },
+      canUseTool: createPermissionGate(gateCtx),
       // 專案設定的 allow 規則會在 canUseTool 之前生效；硬性規則放在 PreToolUse hook 才不會被繞過
       hooks: { PreToolUse: [{ hooks: [createPreToolUseHook(gateCtx)] }] },
       pathToClaudeCodeExecutable: this.d.getClaudePath()
@@ -5168,6 +5434,11 @@ export class TaskManager {
       void this.enqueue(taskId, () => this.onRunnerEvent(taskId, channel, e))
     })
     this.runs.set(runKey(taskId, channel), run)
+    // 先掛上收尾，update 的寫入失敗也不會漏掉
+    run.done.then(
+      () => this.onRunDone(taskId, channel, run),
+      (err: unknown) => this.onRunDone(taskId, channel, run, err)
+    )
     await this.update(taskId, (x) => {
       if (branchId) {
         const b = x.branches.find((bb) => bb.id === branchId)
@@ -5177,10 +5448,6 @@ export class TaskManager {
         x.error = undefined
       }
     })
-    run.done.then(
-      () => this.onRunDone(taskId, channel, run),
-      (err: unknown) => this.onRunDone(taskId, channel, run, err)
-    )
   }
 
   private onRunDone(taskId: string, channel: Channel, run: AgentRun, err?: unknown) {
@@ -5202,10 +5469,10 @@ export class TaskManager {
         }
         if (err) {
           t.error = errorMessage(err)
-          if (current && !branchId) t.runState = 'error'
+          if (current && !branchId && t.runState !== 'finalizing') t.runState = 'error'
         }
       })
-    })
+    }).catch((e: unknown) => console.error('[TaskManager] 收尾失敗', e))
   }
 
   private async onRunnerEvent(taskId: string, channel: Channel, e: RunnerEvent) {
@@ -5237,15 +5504,30 @@ export class TaskManager {
       }
       case 'tool_call':
         if (!e.name.startsWith('mcp__harness__')) {
-          await this.addTimeline(taskId, { channel, kind: 'tool_call', tool: { id: e.id, name: e.name, input: e.input } })
+          await this.addTimeline(taskId, {
+            channel,
+            kind: 'tool_call',
+            tool: { id: e.id, name: e.name, input: e.input }
+          })
         }
         return
       case 'tool_result':
-        if (e.isError) await this.addTimeline(taskId, { channel, kind: 'tool_result', text: e.text.slice(0, 2000), tool: { id: e.id, name: '', isError: true } })
+        if (e.isError) {
+          await this.addTimeline(taskId, {
+            channel,
+            kind: 'tool_result',
+            text: e.text.slice(0, 2000),
+            tool: { id: e.id, name: '', isError: true }
+          })
+        }
         return
       case 'turn_end':
         // 使用者停止造成的結束（interrupted）不算錯誤
-        if (!e.ok && !e.interrupted) await this.update(taskId, (t) => { t.error = e.error || 'Claude 執行失敗' })
+        if (!e.ok && !e.interrupted) {
+          await this.update(taskId, (t) => {
+            t.error = e.error || 'Claude 執行失敗'
+          })
+        }
         return
       case 'notice':
         await this.addTimeline(taskId, { channel, kind: 'system', text: e.message })
@@ -5256,102 +5538,154 @@ export class TaskManager {
 
   private sinkFor(taskId: string, channel: Channel): ToolSink {
     return {
-      askUser: (a) => this.enqueue(taskId, async () => {
-        if (this.pendingCounter.get(taskId) === a.question_id) this.pendingCounter.delete(taskId)
-        let created = false
-        await this.update(taskId, (t) => {
-          const fields = {
-            text: a.question, options: a.options, recommendedOptionId: a.recommended_option_id,
-            allowFreeText: a.allow_free_text, context: a.context
-          }
-          const q = t.questions.find((x) => x.id === a.question_id)
-          if (q) Object.assign(q, fields, { status: 'open' as const })
-          else {
-            created = true
-            t.questions.push({ id: a.question_id, ...fields, status: 'open', followups: [], askedAt: this.now() })
-          }
-        })
-        if (created) await this.addTimeline(taskId, { channel, kind: 'question', ref: a.question_id })
-      }),
-      proposeSpec: (a) => this.enqueue(taskId, async () => {
-        let version = 0
-        await this.update(taskId, (t) => {
-          const next = transition(t.status, 'SPEC_PROPOSED')
-          version = t.specs.length + 1
-          t.specs.push({
-            version, title: a.title, summary: a.summary, inScope: a.in_scope, outOfScope: a.out_of_scope,
-            decisions: a.decisions, steps: a.steps, acceptance: a.acceptance, createdAt: this.now()
+      askUser: (a) =>
+        this.enqueue(taskId, async () => {
+          if (this.pendingCounter.get(taskId) === a.question_id) this.pendingCounter.delete(taskId)
+          let created = false
+          await this.update(taskId, (t) => {
+            const fields = {
+              text: a.question,
+              options: a.options,
+              recommendedOptionId: a.recommended_option_id,
+              allowFreeText: a.allow_free_text,
+              context: a.context
+            }
+            const q = t.questions.find((x) => x.id === a.question_id)
+            if (q) Object.assign(q, fields, { status: 'open' as const, answer: undefined })
+            else {
+              created = true
+              t.questions.push({
+                id: a.question_id,
+                ...fields,
+                status: 'open',
+                followups: [],
+                askedAt: this.now()
+              })
+            }
           })
-          t.title = a.title
-          t.status = next
+          if (created)
+            await this.addTimeline(taskId, { channel, kind: 'question', ref: a.question_id })
+        }),
+      proposeSpec: (a) =>
+        this.enqueue(taskId, async () => {
+          let version = 0
+          await this.update(taskId, (t) => {
+            const next = transition(t.status, 'SPEC_PROPOSED')
+            version = t.specs.length + 1
+            t.specs.push({
+              version,
+              title: a.title,
+              summary: a.summary,
+              inScope: a.in_scope,
+              outOfScope: a.out_of_scope,
+              decisions: a.decisions,
+              steps: a.steps,
+              acceptance: a.acceptance,
+              createdAt: this.now()
+            })
+            t.title = a.title
+            t.status = next
+          })
+          await this.addTimeline(taskId, { channel: 'main', kind: 'spec', ref: String(version) })
+        }),
+      updatePlan: (a) =>
+        this.enqueue(taskId, async () => {
+          await this.update(taskId, (t) => {
+            t.plan = a.steps
+          })
+        }),
+      concludeBranch: (a) =>
+        this.enqueue(taskId, async () => {
+          const branchId = branchIdOf(channel)
+          if (!branchId) throw new Error('conclude_branch 只能在分岔中使用')
+          await this.update(taskId, (t) => {
+            const b = t.branches.find((x) => x.id === branchId)
+            if (!b) throw new Error(`找不到分岔 ${branchId}`)
+            if (b.status === 'concluded') throw new Error('這個分岔已經帶回主線')
+            b.conclusion = { decision: a.decision, rationale: a.rationale, deferred: a.deferred }
+            b.status = 'concluding'
+          })
+        }),
+      submitReport: (input) =>
+        this.enqueue(taskId, async () => {
+          if (this.get(taskId).status !== 'implementing')
+            throw new Error('只有實作階段可以提交報告')
+          if (this.finalizing.has(taskId)) throw new Error('報告已提交，正在整理中')
+          const run = this.runs.get(runKey(taskId, 'main'))
+          await this.update(taskId, (t) => {
+            t.runState = 'finalizing'
+          })
+          const job = this.finalizeReport(taskId, input, run).finally(() =>
+            this.finalizing.delete(taskId)
+          )
+          this.finalizing.set(taskId, job)
         })
-        await this.addTimeline(taskId, { channel: 'main', kind: 'spec', ref: String(version) })
-      }),
-      updatePlan: (a) => this.enqueue(taskId, async () => {
-        await this.update(taskId, (t) => { t.plan = a.steps })
-      }),
-      concludeBranch: (a) => this.enqueue(taskId, async () => {
-        const branchId = branchIdOf(channel)
-        if (!branchId) throw new Error('conclude_branch 只能在分岔中使用')
-        await this.update(taskId, (t) => {
-          const b = t.branches.find((x) => x.id === branchId)
-          if (!b) throw new Error(`找不到分岔 ${branchId}`)
-          b.conclusion = { decision: a.decision, rationale: a.rationale, deferred: a.deferred }
-          b.status = 'concluding'
-        })
-      }),
-      submitReport: (input) => this.enqueue(taskId, async () => {
-        if (this.get(taskId).status !== 'implementing') throw new Error('只有實作階段可以提交報告')
-        const run = this.runs.get(runKey(taskId, 'main'))
-        await this.update(taskId, (t) => { t.runState = 'finalizing' })
-        const job = this.finalizeReport(taskId, input, run).finally(() => this.finalizing.delete(taskId))
-        this.finalizing.set(taskId, job)
-      })
     }
   }
 
   // ───────── 問題卡片 ─────────
 
-  async answerQuestion(taskId: string, questionId: string, answer: { optionId?: string; text?: string }) {
-    const q = this.get(taskId).questions.find((x) => x.id === questionId)
+  async answerQuestion(
+    taskId: string,
+    questionId: string,
+    answer: { optionId?: string; text?: string }
+  ) {
+    const q = this.openTask(taskId).questions.find((x) => x.id === questionId)
     if (!q) throw new Error(`找不到問題 ${questionId}`)
-    const label = answer.optionId ? q.options.find((o) => o.id === answer.optionId)?.label : undefined
+    const label = answer.optionId
+      ? q.options.find((o) => o.id === answer.optionId)?.label
+      : undefined
+    if (answer.optionId && !label) throw new Error(`找不到選項 ${answer.optionId}`)
+    const text = answer.text?.trim() || undefined
+    if (!label && !text) throw new Error('請選擇選項或輸入回答')
     await this.update(taskId, (t) => {
       const qq = t.questions.find((x) => x.id === questionId)!
       qq.status = 'answered'
-      qq.answer = answer
+      qq.answer = { optionId: answer.optionId, text }
     })
-    const body = [label, answer.text?.trim()].filter(Boolean).join('；')
+    const body = [label, text].filter(Boolean).join('；')
     await this.send(taskId, 'main', msg.answer(questionId, answer.optionId, body), { silent: true })
   }
 
   async counterQuestion(taskId: string, questionId: string, text: string) {
-    if (!this.get(taskId).questions.some((x) => x.id === questionId)) throw new Error(`找不到問題 ${questionId}`)
-    await this.update(taskId, (t) => { t.questions.find((x) => x.id === questionId)!.followups.push({ role: 'user', text }) })
+    const body = text.trim()
+    if (!body) throw new Error('請輸入反問內容')
+    if (!this.openTask(taskId).questions.some((x) => x.id === questionId))
+      throw new Error(`找不到問題 ${questionId}`)
+    await this.update(taskId, (t) => {
+      t.questions.find((x) => x.id === questionId)!.followups.push({ role: 'user', text: body })
+    })
     this.pendingCounter.set(taskId, questionId)
-    await this.send(taskId, 'main', msg.counterQuestion(questionId, text), { silent: true })
+    await this.send(taskId, 'main', msg.counterQuestion(questionId, body), { silent: true })
   }
 
-  // 以下成員在 Task 22–24 補上：openBranch、concludeBranch、confirmBranch、approveSpec、requestSpecChanges、
-  // requestApproval、resolvePermission、stop、resume、finalizeReport、submitReportFeedback、createPullRequest、
-  // merge、discard、changedFiles
+  // ───────── 暫時的 stub（Task 23、24 取代） ─────────
+
+  private requestApproval(
+    taskId: string,
+    channel: Channel,
+    req: ApprovalRequest,
+    signal: AbortSignal
+  ): Promise<PermissionDecision> {
+    void [taskId, channel, req, signal]
+    return Promise.resolve({ allow: false, message: '尚未實作' })
+  }
+
+  private async finalizeReport(taskId: string, input: ReportInput, run?: AgentRun) {
+    void [taskId, input, run]
+  }
+
+  // 以下成員在 Task 22–24 補上：openBranch、concludeBranch、confirmBranch、approveSpec、
+  // requestSpecChanges、syncPermission、requestApproval、resolvePermission、stop、resume、
+  // finalizeReport、getReport、submitReportFeedback、exclusive、createPullRequest、merge、discard、changedFiles
 }
 ```
 
-本 Task 為了能編譯，先加上暫時的 stub（Task 23、24 會取代）：
+本 Task 的檔頭 import 只保留用得到的（`FeedbackItem`、`Report`、`hasShellOperators`／`matchesPattern`、`prBody` 在 Task 24 才加入）。`finishing`、`permissionWaiters`、`PermissionWaiter`、`persist` 在本 Task 就先建立（核准與收尾的 Task 會用到）。
 
-```ts
-  private requestApproval(_taskId: string, _req: ApprovalRequest, _signal: AbortSignal): Promise<PermissionDecision> {
-    return Promise.resolve({ allow: false, message: '尚未實作' })
-  }
-  private async finalizeReport(_taskId: string, _input: ReportInput, _run?: AgentRun) {}
-```
+**Step 5: 確認通過**
 
-並暫時建立 `src/main/tasks/prBody.ts`：`export function prBody(): string { return '' }`（Task 24 取代）。未使用的 import 先註解掉以通過 lint/typecheck。
-
-**Step 5: 依測試檔下方註記，簡化反問測試並在 FakeClaude 加入 40ms 延遲。確認通過**
-
-Run: `npx vitest run tests/main/taskManager.test.ts` → 4 passed
+Run: `npx vitest run tests/main/taskManager.test.ts` → 6 passed；`npm run typecheck`、`npm run lint` 0 errors
 
 **Step 6: Commit**
 
@@ -5376,39 +5710,72 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 describe('TaskManager：分岔', () => {
   test('從主線 fork、續接分岔、整理結論並帶回主線', async () => {
     const { tm, claude, create } = await setup()
-    claude.script = async ({ call, sink }) => { if (call === 0) await sink.askUser(askQ1) }
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser(askQ1)
+    }
     const id = await create()
     await tm.counterQuestion(id, 'q1', '差在哪？')
     await tm.whenIdle(id)
 
     claude.script = async () => [assistantText('Redis 可以共享狀態')]
-    const b = await tm.openBranch(id, { title: '計數存放位置', fromQuestionId: 'q1', seed: 'Redis 和 in-memory 差在哪？' })
+    const b = await tm.openBranch(id, {
+      title: '計數存放位置',
+      fromQuestionId: 'q1',
+      seed: 'Redis 和 in-memory 差在哪？'
+    })
     await tm.whenIdle(id)
     const forkCall = claude.calls.at(-1)!
     expect(forkCall.options).toMatchObject({ resume: 'sess-0', forkSession: true })
+    expect(forkCall.tools).toEqual(['conclude_branch'])
     expect(forkCall.prompt).toContain('[branch_open]')
     expect(forkCall.prompt).toContain('來源問題：計數單位？')
     expect(forkCall.prompt).toContain('使用者：差在哪？')
-    expect(tm.get(id).branches[0]).toMatchObject({ id: b.id, sessionId: expect.stringMatching(/^fork-/), running: false })
+    expect(tm.get(id).branches[0]).toMatchObject({
+      id: b.id,
+      sessionId: expect.stringMatching(/^fork-/),
+      running: false
+    })
+    expect(tm.get(id).mainSessionId).toBe('sess-0')
     const tl = await tm.timeline(id)
-    expect(tl.filter((e) => e.channel === `branch:${b.id}`).map((e) => e.kind)).toEqual(['user_text', 'assistant_text'])
+    expect(tl.filter((e) => e.channel === `branch:${b.id}`).map((e) => e.kind)).toEqual([
+      'user_text',
+      'assistant_text'
+    ])
 
-    claude.script = async ({ sink }) => { await sink.concludeBranch({ decision: '用 Redis', rationale: '多台機器', deferred: [] }) }
+    claude.script = async ({ sink }) => {
+      await sink.concludeBranch({ decision: '用 Redis', rationale: '多台機器', deferred: [] })
+    }
     await tm.concludeBranch(id, b.id)
     await tm.whenIdle(id)
-    expect(claude.calls.at(-1)!.options).toMatchObject({ resume: tm.get(id).branches[0].sessionId })
+    expect(claude.calls.at(-1)!.options).toMatchObject({
+      resume: tm.get(id).branches[0].sessionId
+    })
     expect(claude.calls.at(-1)!.options.forkSession).toBeUndefined()
-    expect(tm.get(id).branches[0]).toMatchObject({ status: 'concluding', conclusion: { decision: '用 Redis' } })
+    expect(tm.get(id).branches[0]).toMatchObject({
+      status: 'concluding',
+      conclusion: { decision: '用 Redis' }
+    })
 
     claude.script = async () => []
     await tm.confirmBranch(id, b.id)
     await tm.whenIdle(id)
     const t = tm.get(id)
     expect(t.branches[0].status).toBe('concluded')
-    expect(t.decisions[0]).toMatchObject({ id: 'd1', text: '用 Redis', source: { type: 'branch', ref: b.id } })
-    expect(claude.calls.at(-1)!.prompt).toBe(`[branch_conclusion branch=${b.id}] 決策：用 Redis\n原因：多台機器`)
+    expect(t.decisions[0]).toMatchObject({
+      id: 'd1',
+      text: '用 Redis',
+      source: { type: 'branch', ref: b.id }
+    })
+    expect(claude.calls.at(-1)!.prompt).toBe(
+      `[branch_conclusion branch=${b.id}] 決策：用 Redis\n原因：多台機器`
+    )
     expect(claude.calls.at(-1)!.options.resume).toBe('sess-0')
-    expect((await tm.timeline(id)).at(-1)).toMatchObject({ channel: 'main', kind: 'decision', ref: 'd1' })
+    expect((await tm.timeline(id)).at(-1)).toMatchObject({
+      channel: 'main',
+      kind: 'decision',
+      ref: 'd1'
+    })
+    await expect(tm.confirmBranch(id, b.id)).rejects.toThrow('已經帶回主線')
   })
 
   test('主線還沒有 session 時不能分岔', async () => {
@@ -5418,6 +5785,22 @@ describe('TaskManager：分岔', () => {
     await tm.init()
     await expect(tm.openBranch('x', { title: 't' })).rejects.toThrow('回覆至少一次')
   })
+
+  test('主線不能呼叫 conclude_branch', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    let error: unknown
+    claude.script = async ({ sink }) => {
+      try {
+        await sink.concludeBranch({ decision: 'x', rationale: 'y', deferred: [] })
+      } catch (e) {
+        error = e
+      }
+    }
+    await tm.send(id, 'main', '結束')
+    await tm.whenIdle(id)
+    expect(String(error)).toContain('只能在分岔中使用')
+  })
 })
 ```
 
@@ -5425,34 +5808,63 @@ describe('TaskManager：分岔', () => {
 
 **Step 3: 實作（加到 TaskManager）**
 
+sink 的 `concludeBranch` 已在 Task 21 的 `sinkFor` 中（只能在分岔中使用、已帶回主線的分岔不能再整理）。新增：
+
 ```ts
   // ───────── 分岔 ─────────
 
-  async openBranch(taskId: string, input: { title: string; fromQuestionId?: string; seed?: string }): Promise<Branch> {
-    const t = this.get(taskId)
+  async openBranch(
+    taskId: string,
+    input: { title: string; fromQuestionId?: string; seed?: string }
+  ): Promise<Branch> {
+    const t = this.openTask(taskId)
     if (!t.mainSessionId) throw new Error('請等 Claude 在主線回覆至少一次後再分岔')
-    if (this.runs.get(runKey(taskId, 'main'))?.active) throw new Error('主線正在執行，請等它停下來再分岔')
-    const q = input.fromQuestionId ? t.questions.find((x) => x.id === input.fromQuestionId) : undefined
+    // 主線在執行中時 session 還在變動，fork 出來的內容不確定
+    if (this.runs.get(runKey(taskId, 'main'))?.active)
+      throw new Error('主線正在執行，請等它停下來再分岔')
+    const q = input.fromQuestionId
+      ? t.questions.find((x) => x.id === input.fromQuestionId)
+      : undefined
+    if (input.fromQuestionId && !q) throw new Error(`找不到問題 ${input.fromQuestionId}`)
     const seed = [
       input.seed?.trim(),
       q && `來源問題：${q.text}`,
-      q?.followups.length ? `之前的反問：\n${q.followups.map((f) => `${f.role === 'user' ? '使用者' : 'Claude'}：${f.text}`).join('\n')}` : undefined
-    ].filter(Boolean).join('\n')
-    const branch: Branch = { id: `b${t.branches.length + 1}`, title: input.title.trim() || '分岔討論', fromQuestionId: input.fromQuestionId, status: 'open', running: false, createdAt: this.now() }
-    await this.update(taskId, (x) => { x.branches.push(branch) })
-    await this.send(taskId, `branch:${branch.id}`, msg.branchOpen(branch.title, seed), { display: input.seed?.trim() || `開始討論：${branch.title}` })
+      q?.followups.length
+        ? `之前的反問：\n${q.followups.map((f) => `${f.role === 'user' ? '使用者' : 'Claude'}：${f.text}`).join('\n')}`
+        : undefined
+    ]
+      .filter(Boolean)
+      .join('\n')
+    const branch: Branch = {
+      id: `b${t.branches.length + 1}`,
+      title: input.title.trim() || '分岔討論',
+      fromQuestionId: input.fromQuestionId,
+      status: 'open',
+      running: false,
+      createdAt: this.now()
+    }
+    await this.update(taskId, (x) => {
+      x.branches.push(branch)
+    })
+    await this.send(taskId, `branch:${branch.id}`, msg.branchOpen(branch.title, seed), {
+      display: input.seed?.trim() || `開始討論：${branch.title}`
+    })
     return structuredClone(branch)
   }
 
   async concludeBranch(taskId: string, branchId: string) {
-    if (!this.get(taskId).branches.some((b) => b.id === branchId)) throw new Error(`找不到分岔 ${branchId}`)
+    const b = this.get(taskId).branches.find((x) => x.id === branchId)
+    if (!b) throw new Error(`找不到分岔 ${branchId}`)
+    if (b.status === 'concluded') throw new Error('這個分岔已經帶回主線')
     await this.send(taskId, `branch:${branchId}`, msg.conclude(), { silent: true })
   }
 
+  /** 使用者確認（可編輯過的）結論：記成決策並送回主線 */
   async confirmBranch(taskId: string, branchId: string, edited?: BranchConclusion) {
-    const t = this.get(taskId)
+    const t = this.openTask(taskId)
     const b = t.branches.find((x) => x.id === branchId)
     if (!b) throw new Error(`找不到分岔 ${branchId}`)
+    if (b.status === 'concluded') throw new Error('這個分岔已經帶回主線')
     const c = edited ?? b.conclusion
     if (!c) throw new Error('分岔還沒有結論')
     const decisionId = `d${t.decisions.length + 1}`
@@ -5460,7 +5872,13 @@ describe('TaskManager：分岔', () => {
       const bb = x.branches.find((y) => y.id === branchId)!
       bb.conclusion = c
       bb.status = 'concluded'
-      x.decisions.push({ id: decisionId, text: c.decision, rationale: c.rationale, deferred: c.deferred, source: { type: 'branch', ref: branchId } })
+      x.decisions.push({
+        id: decisionId,
+        text: c.decision,
+        rationale: c.rationale,
+        deferred: c.deferred,
+        source: { type: 'branch', ref: branchId }
+      })
     })
     await this.addTimeline(taskId, { channel: 'main', kind: 'decision', ref: decisionId })
     await this.send(taskId, 'main', msg.branchConclusion(branchId, c), { silent: true })
@@ -5488,42 +5906,59 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Step 1: 寫失敗測試**
 
-```ts
-import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'
-import { until } from './fakeClaude'
+檔頭加上 `import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'` 與 `until`（from `./fakeClaude`）。SDK 的 `canUseTool` 回傳 `PermissionResult | null`，變數型別要容許 `null`。
 
-const spec = { title: '帳號鎖定', summary: 's', in_scope: ['a'], out_of_scope: [], decisions: [], steps: ['實作'], acceptance: ['測試通過'] }
+```ts
+const spec = {
+  title: '帳號鎖定',
+  summary: 's',
+  in_scope: ['a'],
+  out_of_scope: [],
+  decisions: [],
+  steps: ['實作'],
+  acceptance: ['測試通過']
+}
+const signalOf = () => ({ signal: new AbortController().signal }) as never
 
 describe('TaskManager：規格與實作', () => {
   test('propose_spec → spec_review；要求修改回到 clarifying；核准進入 implementing', async () => {
     const { tm, claude, create } = await setup()
-    claude.script = async ({ call, sink }) => { if (call === 0) await sink.proposeSpec(spec) }
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
     const id = await create()
     expect(tm.get(id)).toMatchObject({ status: 'spec_review', title: '帳號鎖定' })
     expect(tm.get(id).specs[0].version).toBe(1)
 
-    claude.script = async ({ sink }) => { await sink.proposeSpec({ ...spec, summary: 's2' }) }
+    claude.script = async ({ sink }) => {
+      await sink.proposeSpec({ ...spec, summary: 's2' })
+    }
     await tm.requestSpecChanges(id, '上限改 10 次')
     await tm.whenIdle(id)
     expect(claude.calls.at(-1)!.prompt).toBe('[spec_feedback] 上限改 10 次')
     expect(tm.get(id)).toMatchObject({ status: 'spec_review' })
     expect(tm.get(id).specs).toHaveLength(2)
 
-    claude.script = async ({ sink }) => { await sink.updatePlan({ steps: [{ id: 's1', title: '寫程式', status: 'running' }] }) }
+    claude.script = async ({ sink }) => {
+      await sink.updatePlan({ steps: [{ id: 's1', title: '寫程式', status: 'running' }] })
+    }
     await tm.approveSpec(id)
     await tm.whenIdle(id)
     expect(claude.calls.at(-1)!.prompt).toContain('[spec_approved]')
     expect(tm.get(id).status).toBe('implementing')
     expect(tm.get(id).plan).toEqual([{ id: 's1', title: '寫程式', status: 'running' }])
+    await expect(tm.approveSpec(id)).rejects.toThrow()
   })
 
   test('shell 指令等待核准，核准並記住樣式', async () => {
     const { tm, claude, create } = await setup()
-    claude.script = async ({ call, sink }) => { if (call === 0) await sink.proposeSpec(spec) }
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
     const id = await create()
-    let result: PermissionResult | undefined
+    let result: PermissionResult | null | undefined
     claude.script = async ({ options }) => {
-      result = await options.canUseTool!('Bash', { command: 'npm test -- auth' }, { signal: new AbortController().signal } as never)
+      result = await options.canUseTool!('Bash', { command: 'npm test -- auth' }, signalOf())
     }
     await tm.approveSpec(id)
     await until(() => !!tm.get(id).pendingPermission)
@@ -5533,15 +5968,96 @@ describe('TaskManager：規格與實作', () => {
     await tm.resolvePermission(id, req.id, { allow: true, rememberPattern: 'npm test *' })
     await tm.whenIdle(id)
     expect(result?.behavior).toBe('allow')
-    expect(tm.get(id)).toMatchObject({ allowedCommands: ['npm test *'], approvedCommands: ['npm test -- auth'], runState: 'idle' })
+    expect(tm.get(id)).toMatchObject({
+      allowedCommands: ['npm test *'],
+      approvedCommands: ['npm test -- auth'],
+      runState: 'idle'
+    })
     expect(tm.get(id).pendingPermission).toBeUndefined()
+    await expect(tm.resolvePermission(id, req.id, { allow: true })).rejects.toThrow('失效')
+  })
+
+  test('同時有多個核准請求時依序顯示', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    const results: (PermissionResult | null)[] = []
+    claude.script = async ({ options }) => {
+      results.push(
+        ...(await Promise.all([
+          options.canUseTool!('Bash', { command: 'npm test' }, signalOf()),
+          options.canUseTool!('Bash', { command: 'npm run lint' }, signalOf())
+        ]))
+      )
+    }
+    await tm.approveSpec(id)
+    await until(() => !!tm.get(id).pendingPermission)
+    const first = tm.get(id).pendingPermission!
+    expect(first.input).toEqual({ command: 'npm test' })
+    await tm.resolvePermission(id, first.id, { allow: false, message: '不要跑' })
+    await until(
+      () => tm.get(id).pendingPermission?.id !== first.id && !!tm.get(id).pendingPermission
+    )
+    const second = tm.get(id).pendingPermission!
+    expect(second.input).toEqual({ command: 'npm run lint' })
+    expect(tm.get(id).runState).toBe('waiting_permission')
+    await tm.resolvePermission(id, second.id, { allow: true })
+    await tm.whenIdle(id)
+    expect(results.map((r) => r?.behavior)).toEqual(['deny', 'allow'])
+    expect(results[0]).toMatchObject({ message: '不要跑' })
+    expect(tm.get(id)).toMatchObject({ runState: 'idle', approvedCommands: ['npm run lint'] })
+  })
+
+  test('停止會拒絕等待中的核准並結束這一輪，不算錯誤', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    let result: PermissionResult | null | undefined
+    claude.script = async ({ options }) => {
+      result = await options.canUseTool!('Bash', { command: 'npm test' }, signalOf())
+      await new Promise(() => undefined) // 卡住，直到被停止
+    }
+    await tm.approveSpec(id)
+    await until(() => !!tm.get(id).pendingPermission)
+    await tm.stop(id, 'main')
+    await tm.whenIdle(id)
+    expect(result).toMatchObject({ behavior: 'deny', message: '使用者停止了執行' })
+    expect(tm.get(id).pendingPermission).toBeUndefined()
+    expect(tm.get(id).runState).toBe('idle')
+    expect(tm.get(id).error).toBeUndefined()
+  })
+
+  test('分岔的核准請求不影響主線的執行狀態', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    let result: PermissionResult | null | undefined
+    claude.script = async ({ options }) => {
+      result = await options.canUseTool!('WebFetch', { url: 'https://example.com' }, signalOf())
+    }
+    await tm.openBranch(id, { title: '查資料' })
+    await until(() => !!tm.get(id).pendingPermission)
+    expect(tm.get(id).runState).toBe('idle')
+    expect(tm.get(id).branches[0].running).toBe(true)
+    await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: true })
+    await tm.whenIdle(id)
+    expect(result?.behavior).toBe('allow')
+    expect(tm.get(id)).toMatchObject({ runState: 'idle', approvedCommands: [] })
+    expect(tm.get(id).branches[0].running).toBe(false)
   })
 
   test('執行中插話會送進同一輪', async () => {
     const { tm, claude, create } = await setup()
     const id = await create()
     let release!: () => void
-    claude.script = async () => { await new Promise<void>((r) => { release = r }) }
+    claude.script = async () => {
+      await new Promise<void>((r) => {
+        release = r
+      })
+    }
     await tm.send(id, 'main', '開始')
     await until(() => tm.get(id).runState === 'running' && !!release)
     const before = claude.calls.length
@@ -5549,7 +6065,9 @@ describe('TaskManager：規格與實作', () => {
     expect(claude.calls.length).toBe(before)
     release()
     await tm.whenIdle(id)
-    expect((await tm.timeline(id)).filter((e) => e.kind === 'user_text').map((e) => e.text)).toContain('順便改錯誤訊息')
+    expect(
+      (await tm.timeline(id)).filter((e) => e.kind === 'user_text').map((e) => e.text)
+    ).toContain('順便改錯誤訊息')
   })
 
   test('init 把執行中的任務標為中斷；resume 送出 [resume]', async () => {
@@ -5560,7 +6078,11 @@ describe('TaskManager：規格與實作', () => {
     expect(tm.get('x').runState).toBe('interrupted')
     await tm.resume('x')
     await tm.whenIdle('x')
-    expect(claude.calls.at(-1)).toMatchObject({ prompt: expect.stringContaining('[resume]'), options: { resume: 's9' } })
+    expect(claude.calls.at(-1)).toMatchObject({
+      prompt: expect.stringContaining('[resume]'),
+      options: { resume: 's9' }
+    })
+    expect(tm.get('x').runState).toBe('idle')
   })
 })
 ```
@@ -5569,43 +6091,79 @@ describe('TaskManager：規格與實作', () => {
 
 **Step 3: 實作（加到 TaskManager，並刪除 Task 21 的 requestApproval stub）**
 
+核准請求的規則：
+- 等待中的請求依提出順序放在 `permissionWaiters`，`pendingPermission` 永遠是最早的一個；解決一個後自動顯示下一個（同一輪可能平行要求多個核准）。
+- 只有主線的請求會把 `runState` 切成 `waiting_permission`；分岔（例如 WebFetch）的請求不影響主線狀態。
+- `signal` 已 abort 時立即拒絕；abort 時自動拒絕並移除 listener。
+- `stop(taskId, channel)` 只拒絕該 channel 的等待中請求，再 `interrupt()` 該 channel 的執行。
+- `resume` 在主線還沒有 session 時（第一輪就中斷）重新送出原始需求，而不是送 `[resume]`。
+
 ```ts
   // ───────── 規格 ─────────
 
   async approveSpec(taskId: string) {
-    await this.update(taskId, (t) => { t.status = transition(t.status, 'SPEC_APPROVED') })
+    await this.update(taskId, (t) => {
+      t.status = transition(t.status, 'SPEC_APPROVED')
+    })
     await this.send(taskId, 'main', msg.specApproved(), { display: '核准規格，開始實作' })
   }
 
   async requestSpecChanges(taskId: string, text: string) {
-    if (!text.trim()) throw new Error('請說明要修改的地方')
-    await this.update(taskId, (t) => { t.status = transition(t.status, 'SPEC_CHANGES_REQUESTED') })
-    await this.send(taskId, 'main', msg.specFeedback(text.trim()), { display: `要求修改規格：${text.trim()}` })
+    const body = text.trim()
+    if (!body) throw new Error('請說明要修改的地方')
+    await this.update(taskId, (t) => {
+      t.status = transition(t.status, 'SPEC_CHANGES_REQUESTED')
+    })
+    await this.send(taskId, 'main', msg.specFeedback(body), { display: `要求修改規格：${body}` })
   }
 
   // ───────── 指令核准 ─────────
 
-  private requestApproval(taskId: string, req: ApprovalRequest, signal: AbortSignal): Promise<PermissionDecision> {
+  /** 依等待中的請求更新卡片與主線狀態（分岔的請求不改變主線的 runState） */
+  private syncPermission(t: Task) {
+    const waiting = [...this.permissionWaiters.values()].filter((w) => w.taskId === t.id)
+    t.pendingPermission = waiting[0]?.request
+    if (waiting.some((w) => w.channel === 'main')) {
+      if (t.runState === 'running') t.runState = 'waiting_permission'
+    } else if (t.runState === 'waiting_permission') {
+      t.runState = 'running'
+    }
+  }
+
+  private requestApproval(
+    taskId: string,
+    channel: Channel,
+    req: ApprovalRequest,
+    signal: AbortSignal
+  ): Promise<PermissionDecision> {
     if (signal.aborted) return Promise.resolve({ allow: false, message: '已取消' })
     const id = this.newId()
     return new Promise((resolve) => {
       let settled = false
+      const onAbort = () => finish({ allow: false, message: '已取消' })
       const finish = (d: PermissionDecision) => {
         if (settled) return
         settled = true
+        signal.removeEventListener('abort', onAbort)
         this.permissionWaiters.delete(id)
-        void this.update(taskId, (t) => {
-          if (t.pendingPermission?.id === id) t.pendingPermission = undefined
-          if (t.runState === 'waiting_permission') t.runState = 'running'
-        })
+        this.persist(taskId, (t) => this.syncPermission(t))
         resolve(d)
       }
-      this.permissionWaiters.set(id, { taskId, resolve: finish })
-      signal.addEventListener('abort', () => finish({ allow: false, message: '已取消' }), { once: true })
-      void this.update(taskId, (t) => {
-        t.pendingPermission = { id, taskId, toolName: req.toolName, input: req.input, suggestedPattern: req.suggestedPattern, createdAt: this.now() }
-        t.runState = 'waiting_permission'
+      this.permissionWaiters.set(id, {
+        taskId,
+        channel,
+        request: {
+          id,
+          taskId,
+          toolName: req.toolName,
+          input: req.input,
+          suggestedPattern: req.suggestedPattern,
+          createdAt: this.now()
+        },
+        resolve: finish
       })
+      signal.addEventListener('abort', onAbort, { once: true })
+      this.persist(taskId, (t) => this.syncPermission(t))
     })
   }
 
@@ -5618,13 +6176,20 @@ describe('TaskManager：規格與實作', () => {
   // ───────── 停止與續接 ─────────
 
   async stop(taskId: string, channel: Channel) {
-    for (const [id, w] of this.permissionWaiters) {
-      if (w.taskId === taskId && channel === 'main') { w.resolve({ allow: false, message: '使用者停止了執行' }); this.permissionWaiters.delete(id) }
+    for (const w of [...this.permissionWaiters.values()]) {
+      if (w.taskId === taskId && w.channel === channel)
+        w.resolve({ allow: false, message: '使用者停止了執行' })
     }
     await this.runs.get(runKey(taskId, channel))?.interrupt()
   }
 
   async resume(taskId: string) {
+    const t = this.get(taskId)
+    // 第一輪還沒拿到 session 就中斷：沒有可續接的對話，重新送出需求
+    if (!t.mainSessionId) {
+      await this.send(taskId, 'main', t.request, { display: '繼續執行' })
+      return
+    }
     await this.send(taskId, 'main', msg.resume(), { display: '繼續執行' })
   }
 ```
@@ -5645,8 +6210,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 24：TaskManager（四）報告整理、回饋與收尾
 
 **Files:**
+- Create: `src/main/tasks/prBody.ts`
 - Modify: `src/main/tasks/taskManager.ts`
-- Modify: `src/main/tasks/prBody.ts`
 - Test: `tests/main/taskManager.test.ts`、`tests/main/prBody.test.ts`
 
 **Step 1: prBody 測試**
@@ -5659,9 +6224,17 @@ import { sampleReport } from '../fixtures/report'
 
 test('PR 內文包含摘要、決策、限制與驗證結果', () => {
   const body = prBody({
-    version: 1, taskId: 't', input: sampleReport, diff: '', createdAt: 'x',
+    version: 1,
+    taskId: 't',
+    input: sampleReport,
+    diff: '',
+    createdAt: 'x',
     stats: { files: 2, additions: 10, deletions: 1, perFile: [] },
-    verification: [{ command: 'npm test', exitCode: 0, durationMs: 10, outputTail: '' }, { command: 'npm run lint', exitCode: 1, durationMs: 5, outputTail: '' }]
+    verification: [
+      { command: 'npm test', exitCode: 0, durationMs: 10, outputTail: '' },
+      { command: 'npm run lint', exitCode: 1, durationMs: 5, outputTail: '' },
+      { command: 'npm run e2e', exitCode: null, durationMs: 0, outputTail: '', skipped: '未核准' }
+    ]
   })
   expect(body).toContain('## 摘要')
   expect(body).toContain('在 IP 限流之後加入 lockoutGuard。')
@@ -5669,6 +6242,8 @@ test('PR 內文包含摘要、決策、限制與驗證結果', () => {
   expect(body).toContain('- Redis 掛掉時放行：fail-open')
   expect(body).toContain('- ✅ `npm test`')
   expect(body).toContain('- ❌ `npm run lint`')
+  expect(body).toContain('- ⏭️ `npm run e2e`（未核准）')
+  expect(body).toContain('2 個檔案，+10 −1')
   expect(body).toContain('由 Harness 產生')
 })
 ```
@@ -5679,30 +6254,56 @@ test('PR 內文包含摘要、決策、限制與驗證結果', () => {
 // src/main/tasks/prBody.ts
 import type { Report } from '@shared/types'
 
+/** PR 內文：報告摘要、決策、限制、後續工作與驗證結果 */
 export function prBody(r: Report): string {
   const i = r.input
-  const lines = [
-    '## 摘要', i.overview.summary, '',
-    '## 決策', ...i.decisions.map((d) => `- **${d.title}**：${d.chosen}（原因：${d.rationale}）`), ''
-  ]
-  if (i.limitations.length) lines.push('## 限制與風險', ...i.limitations.map((l) => `- ${l.title}：${l.detail}`), '')
-  if (i.followups.length) lines.push('## 後續工作', ...i.followups.map((f) => `- ${f.title}${f.detail ? `：${f.detail}` : ''}`), '')
-  if (r.verification.length) {
-    lines.push('## 驗證', ...r.verification.map((v) => `- ${v.skipped ? '⏭️' : v.exitCode === 0 ? '✅' : '❌'} \`${v.command}\``), '')
+  const lines = ['## 摘要', i.overview.summary, '']
+  if (i.decisions.length) {
+    lines.push(
+      '## 決策',
+      ...i.decisions.map((d) => `- **${d.title}**：${d.chosen}（原因：${d.rationale}）`),
+      ''
+    )
   }
-  lines.push(`變更：${r.stats.files} 個檔案，+${r.stats.additions} −${r.stats.deletions}`, '', '— 由 Harness 產生（Claude Code）')
+  if (i.limitations.length)
+    lines.push('## 限制與風險', ...i.limitations.map((l) => `- ${l.title}：${l.detail}`), '')
+  if (i.followups.length) {
+    lines.push(
+      '## 後續工作',
+      ...i.followups.map((f) => `- ${f.title}${f.detail ? `：${f.detail}` : ''}`),
+      ''
+    )
+  }
+  if (r.verification.length) {
+    lines.push(
+      '## 驗證',
+      ...r.verification.map((v) =>
+        v.skipped
+          ? `- ⏭️ \`${v.command}\`（${v.skipped}）`
+          : `- ${v.exitCode === 0 ? '✅' : '❌'} \`${v.command}\``
+      ),
+      ''
+    )
+  }
+  lines.push(
+    `變更：${r.stats.files} 個檔案，+${r.stats.additions} −${r.stats.deletions}`,
+    '',
+    '— 由 Harness 產生（Claude Code）'
+  )
   return lines.join('\n')
 }
 ```
 
 **Step 3: TaskManager 測試**
 
-```ts
-import { sampleReport } from '../fixtures/report'
+檔頭加上 `import { sampleReport } from '../fixtures/report'`。
 
+```ts
 async function toImplementing() {
   const ctx = await setup()
-  ctx.claude.script = async ({ call, sink }) => { if (call === 0) await sink.proposeSpec(spec) }
+  ctx.claude.script = async ({ call, sink }) => {
+    if (call === 0) await sink.proposeSpec(spec)
+  }
   const id = await ctx.create()
   ctx.claude.script = async () => []
   await ctx.tm.approveSpec(id)
@@ -5714,23 +6315,62 @@ describe('TaskManager：報告與收尾', () => {
   test('submit_report → commit、diff、驗證、存報告、進入 reviewing', async () => {
     const { tm, claude, verify, repo, id } = await toImplementing()
     tm.get(id).approvedCommands.push('npm test') // get() 回傳內部物件，模擬實作中核准過 npm test
-    claude.script = async ({ sink }) => { await sink.submitReport(sampleReport) }
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
     await tm.send(id, 'main', '完成了嗎？')
     await tm.whenIdle(id)
     const t = tm.get(id)
     expect(t).toMatchObject({ status: 'reviewing', runState: 'idle', reportVersions: [1] })
     const r = await repo.getReport(id, 1)
     expect(r).toMatchObject({ version: 1, commit: 'abc123', stats: { files: 1 } })
+    expect(await tm.getReport(id, 1)).toEqual(r)
     expect(verify).toHaveBeenCalledWith(t.worktreePath, ['npm test'], expect.any(Function))
-    const isAllowed = verify.mock.calls[0][2] as (c: string) => boolean
+    const isAllowed = verify.mock.calls[0][2]
     expect(isAllowed('npm test')).toBe(true)
+    expect(isAllowed('git status')).toBe(true) // 全域允許清單
     expect(isAllowed('rm -rf /')).toBe(false)
+    expect(isAllowed('ls && rm -rf /')).toBe(false) // 串接的指令不套用樣式（ls * 在允許清單中）
     expect((await tm.timeline(id)).at(-1)).toMatchObject({ kind: 'report', ref: '1' })
+  })
+
+  test('同一輪重複提交報告會被拒絕', async () => {
+    const { tm, claude, id } = await toImplementing()
+    let error: unknown
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+      await Promise.resolve(sink.submitReport(sampleReport)).catch((e: unknown) => {
+        error = e
+      })
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    expect(String(error)).toContain('正在整理')
+    expect(tm.get(id).reportVersions).toEqual([1])
+  })
+
+  test('整理報告失敗時記錄錯誤', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    git.commitAll = async () => {
+      throw new Error('pre-commit hook failed')
+    }
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({
+      status: 'implementing',
+      runState: 'error',
+      error: '整理報告失敗：pre-commit hook failed'
+    })
   })
 
   test('回饋 → implementing，送出 [report_feedback]；再次提交產生 v2', async () => {
     const { tm, claude, id } = await toImplementing()
-    claude.script = async ({ sink }) => { await sink.submitReport(sampleReport) }
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
     await tm.send(id, 'main', '完成')
     await tm.whenIdle(id)
     await tm.submitReportFeedback(id, [{ anchor: 'diff:a.ts:3', label: 'a.ts:3', text: '改常數' }])
@@ -5742,20 +6382,48 @@ describe('TaskManager：報告與收尾', () => {
 
   test('開 PR 與合併都會結束任務', async () => {
     const { tm, claude, git, id } = await toImplementing()
-    claude.script = async ({ sink }) => { await sink.submitReport(sampleReport) }
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
     await tm.send(id, 'main', '完成')
     await tm.whenIdle(id)
     expect(await tm.createPullRequest(id)).toBe('https://github.com/me/shop-api/pull/1')
-    expect(tm.get(id)).toMatchObject({ status: 'done', prUrl: 'https://github.com/me/shop-api/pull/1' })
+    expect(git.calls.at(-1)).toBe(`pr ${tm.get(id).branch} main 帳號鎖定`)
+    expect(tm.get(id)).toMatchObject({
+      status: 'done',
+      prUrl: 'https://github.com/me/shop-api/pull/1'
+    })
     await expect(tm.merge(id)).rejects.toThrow()
     expect(git.calls.some((c) => c.startsWith('merge'))).toBe(false)
   })
 
-  test('丟棄會移除 worktree', async () => {
-    const { tm, git, id } = await toImplementing()
+  test('合併到 base branch', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    await tm.merge(id)
+    expect(git.calls.at(-1)).toBe(`merge ${tm.get(id).branch} main`)
+    expect(tm.get(id).status).toBe('done')
+  })
+
+  test('丟棄會停止執行並移除 worktree', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    claude.script = async () => {
+      await new Promise(() => undefined) // 卡住，直到被中止
+    }
+    await tm.send(id, 'main', '繼續')
+    await until(() => tm.get(id).runState === 'running')
     await tm.discard(id)
-    expect(tm.get(id).status).toBe('discarded')
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({ status: 'discarded', runState: 'idle' })
+    expect(tm.get(id).error).toBeUndefined()
     expect(git.calls.at(-1)).toBe(`remove ${tm.get(id).worktreePath} ${tm.get(id).branch}`)
+    await expect(tm.send(id, 'main', 'hi')).rejects.toThrow('任務已結束')
+    await tm.discard(id) // 再丟棄一次也不會出錯
+    expect(tm.get(id).status).toBe('discarded')
   })
 })
 ```
@@ -5764,42 +6432,86 @@ describe('TaskManager：報告與收尾', () => {
 
 **Step 5: 實作（加到 TaskManager，取代 finalizeReport stub）**
 
+檔頭加上 `FeedbackItem`、`Report`（`@shared/types`）、`hasShellOperators`、`matchesPattern`（`../permissions/commandPattern`）、`prBody`（`./prBody`）。
+
+規則：
+- 驗證指令的 `isAllowed` 與 gate 一致：完整核准過的指令可跑；含 shell 運算子（`&&`、`;`、`|`…）的指令不套用允許樣式（否則 `ls && rm -rf /` 會因 `ls *` 被自動執行）。
+- `finalizeReport` 先算 `transition` 再改狀態，失敗時 `runState = 'error'` 並記錄 `整理報告失敗：…`。
+- 整理報告期間拒絕主線的新訊息與重複的 `submit_report`；丟棄也要等整理完。
+- 開 PR／合併／丟棄以 `exclusive` 互斥（避免重複點擊推兩次）；開 PR／合併要求主線沒有在執行。
+- 丟棄直接 `abort()` 所有執行（不需要優雅停止）、拒絕等待中的核准，等執行結束後才移除 worktree；重複丟棄不會出錯。
+- `startTurn` 在任務已結束或正在收尾時拒絕開新的執行（`send` 等上一段執行結束的期間任務可能被丟棄）。
+
 ```ts
   // ───────── 報告 ─────────
 
+  /** 等提交報告的那段執行結束後：commit、算 diff、實跑驗證指令、存報告 */
   private async finalizeReport(taskId: string, input: ReportInput, run?: AgentRun) {
     try {
       await run?.done.catch(() => undefined)
       const t = this.get(taskId)
       const version = t.reportVersions.length + 1
-      const commit = (await this.d.git.commitAll(t.worktreePath, `${t.title}（Harness 報告 v${version}）`)) ?? undefined
-      const [diff, stats] = await Promise.all([this.d.git.diff(t.worktreePath, t.baseBranch), this.d.git.diffStats(t.worktreePath, t.baseBranch)])
+      const commit =
+        (await this.d.git.commitAll(t.worktreePath, `${t.title}（Harness 報告 v${version}）`)) ??
+        undefined
+      const [diff, stats] = await Promise.all([
+        this.d.git.diff(t.worktreePath, t.baseBranch),
+        this.d.git.diffStats(t.worktreePath, t.baseBranch)
+      ])
       const settings = await this.d.repo.getSettings()
-      const patterns = [...settings.alwaysAllowedCommands, ...t.allowedCommands]
+      // 只自動執行本任務核准過或在允許清單中的指令（串接的指令只認完整核准過的）
+      const isAllowed = (c: string) => {
+        const x = this.get(taskId)
+        if (x.approvedCommands.includes(c)) return true
+        if (hasShellOperators(c)) return false
+        return [...settings.alwaysAllowedCommands, ...x.allowedCommands].some((p) =>
+          matchesPattern(c, p)
+        )
+      }
       const verification = await this.d.verify(
         t.worktreePath,
         input.verification.map((v) => v.command),
-        (c) => t.approvedCommands.includes(c) || patterns.some((p) => matchesPattern(c, p))
+        isAllowed
       )
-      const report: Report = { version, taskId, input, diff, stats, verification, commit, createdAt: this.now() }
+      const report: Report = {
+        version,
+        taskId,
+        input,
+        diff,
+        stats,
+        verification,
+        commit,
+        createdAt: this.now()
+      }
       await this.d.repo.saveReport(report)
       await this.update(taskId, (x) => {
+        const next = transition(x.status, 'REPORT_SUBMITTED')
         x.reportVersions.push(version)
-        x.status = transition(x.status, 'REPORT_SUBMITTED')
+        x.status = next
         x.runState = 'idle'
       })
       await this.addTimeline(taskId, { channel: 'main', kind: 'report', ref: String(version) })
     } catch (e) {
-      await this.update(taskId, (x) => { x.runState = 'error'; x.error = `整理報告失敗：${errorMessage(e)}` })
+      await this.update(taskId, (x) => {
+        x.runState = 'error'
+        x.error = `整理報告失敗：${errorMessage(e)}`
+      }).catch((err: unknown) => console.error('[TaskManager] 儲存任務失敗', err))
     }
   }
 
-  getReport(taskId: string, version: number) { return this.d.repo.getReport(taskId, version) }
+  getReport(taskId: string, version: number) {
+    return this.d.repo.getReport(taskId, version)
+  }
 
   async submitReportFeedback(taskId: string, items: FeedbackItem[], overall?: string) {
-    if (!items.length && !overall?.trim()) throw new Error('請至少留一則回饋')
-    await this.update(taskId, (t) => { t.status = transition(t.status, 'REPORT_FEEDBACK') })
-    await this.send(taskId, 'main', msg.reportFeedback(items, overall?.trim()), { display: `送出 ${items.length} 則報告回饋${overall?.trim() ? '與整體意見' : ''}` })
+    const note = overall?.trim() || undefined
+    if (!items.length && !note) throw new Error('請至少留一則回饋')
+    await this.update(taskId, (t) => {
+      t.status = transition(t.status, 'REPORT_FEEDBACK')
+    })
+    await this.send(taskId, 'main', msg.reportFeedback(items, note), {
+      display: `送出 ${items.length} 則報告回饋${note ? '與整體意見' : ''}`
+    })
   }
 
   // ───────── 收尾 ─────────
@@ -5810,42 +6522,82 @@ describe('TaskManager：報告與收尾', () => {
     return repo
   }
 
-  async createPullRequest(taskId: string): Promise<string> {
-    const t = this.get(taskId)
-    if (t.status !== 'reviewing') throw new Error('只有待審閱的任務可以開 PR')
-    const report = await this.d.repo.getReport(taskId, t.reportVersions.at(-1)!)
-    const url = await this.d.git.pushAndOpenPr(t.worktreePath, t.branch, t.baseBranch, t.specs.at(-1)?.title ?? t.title, prBody(report))
-    await this.update(taskId, (x) => { x.prUrl = url; x.status = transition(x.status, 'FINISHED') })
-    return url
-  }
-
-  async merge(taskId: string) {
-    const t = this.get(taskId)
-    if (t.status !== 'reviewing') throw new Error('只有待審閱的任務可以合併')
-    await this.d.git.merge((await this.repoOf(t)).path, t.branch, t.baseBranch)
-    await this.update(taskId, (x) => { x.status = transition(x.status, 'FINISHED') })
-  }
-
-  async discard(taskId: string) {
-    const t = this.get(taskId)
-    for (const key of [...this.runs.keys()].filter((k) => k.startsWith(`${taskId}|`))) {
-      await this.stop(taskId, key.split('|')[1] as Channel)
+  /** 開 PR／合併／丟棄同一時間只做一個，避免重複點擊推兩次或邊合併邊刪 worktree */
+  private async exclusive<T>(taskId: string, fn: () => Promise<T>): Promise<T> {
+    if (this.finishing.has(taskId)) throw new Error('另一個收尾操作正在進行，請稍候')
+    this.finishing.add(taskId)
+    try {
+      return await fn()
+    } finally {
+      this.finishing.delete(taskId)
     }
-    await this.d.git.removeWorktree((await this.repoOf(t)).path, t.worktreePath, t.branch)
-    await this.update(taskId, (x) => {
-      if (x.status !== 'done') x.status = 'discarded'
-      x.runState = 'idle'
-      x.pendingPermission = undefined
+  }
+
+  private assertReviewable(t: Task, what: string) {
+    if (t.status !== 'reviewing') throw new Error(`只有待審閱的任務可以${what}`)
+    if (this.runs.get(runKey(t.id, 'main'))?.active)
+      throw new Error(`Claude 正在執行，請等它停下來再${what}`)
+  }
+
+  createPullRequest(taskId: string): Promise<string> {
+    return this.exclusive(taskId, async () => {
+      const t = this.get(taskId)
+      this.assertReviewable(t, '開 PR')
+      const report = await this.d.repo.getReport(taskId, t.reportVersions.at(-1)!)
+      const url = await this.d.git.pushAndOpenPr(
+        t.worktreePath,
+        t.branch,
+        t.baseBranch,
+        t.specs.at(-1)?.title ?? t.title,
+        prBody(report)
+      )
+      await this.update(taskId, (x) => {
+        x.prUrl = url
+        x.status = transition(x.status, 'FINISHED')
+      })
+      return url
     })
   }
 
-  async changedFiles(taskId: string) {
+  merge(taskId: string): Promise<void> {
+    return this.exclusive(taskId, async () => {
+      const t = this.get(taskId)
+      this.assertReviewable(t, '合併')
+      await this.d.git.merge((await this.repoOf(t)).path, t.branch, t.baseBranch)
+      await this.update(taskId, (x) => {
+        x.status = transition(x.status, 'FINISHED')
+      })
+    })
+  }
+
+  /** 中止所有執行、移除 worktree 與分支；已完成（開過 PR／合併）的任務只清掉 worktree */
+  discard(taskId: string): Promise<void> {
+    return this.exclusive(taskId, async () => {
+      const t = this.get(taskId)
+      if (this.finalizing.has(taskId)) throw new Error('正在整理報告，請稍候再丟棄')
+      for (const w of [...this.permissionWaiters.values()]) {
+        if (w.taskId === taskId) w.resolve({ allow: false, message: '任務已丟棄' })
+      }
+      const runs = this.runsOf(taskId).map(([, r]) => r)
+      runs.forEach((r) => r.abort())
+      await Promise.all(runs.map((r) => r.done.catch(() => undefined)))
+      await this.d.git.removeWorktree((await this.repoOf(t)).path, t.worktreePath, t.branch)
+      await this.update(taskId, (x) => {
+        if (x.status !== 'done' && x.status !== 'discarded')
+          x.status = transition(x.status, 'DISCARDED')
+        x.runState = 'idle'
+        x.pendingPermission = undefined
+      })
+    })
+  }
+
+  changedFiles(taskId: string) {
     const t = this.get(taskId)
     return this.d.git.workingStats(t.worktreePath, t.baseBranch)
   }
 ```
 
-**Step 6: 確認通過** — `npx vitest run tests/main` → 全部通過；`npm run typecheck` PASS
+**Step 6: 確認通過** — `npx vitest run tests/main` → 全部通過；`npm run typecheck` PASS；`npm test` 連跑 3 次沒有 flaky
 
 **Step 7: Commit**
 
