@@ -14,7 +14,13 @@ export const askUserShape = {
   question_id: id.describe('問題 ID（小寫英數），更新同一張卡片時沿用'),
   question: z.string().min(1).describe('一個具體的問題'),
   options: z
-    .array(z.object({ id, label: z.string().min(1), description: z.string().optional() }))
+    .array(
+      z.object({
+        id: id.describe('小寫英數、_ 或 -'),
+        label: z.string().min(1),
+        description: z.string().optional()
+      })
+    )
     .max(6)
     .describe('互斥的選項，附簡短說明與取捨'),
   recommended_option_id: z.string().optional(),
@@ -71,14 +77,31 @@ async function guard(fn: () => Promise<Result>): Promise<Result> {
   try {
     return await fn()
   } catch (e) {
-    return fail(`Harness 無法處理：${(e as Error).message}`)
+    console.error('[harness tools] handler failed', e)
+    return fail(`Harness 無法處理：${e instanceof Error ? e.message : String(e)}`)
   }
+}
+
+/** schema 表達不了的跨欄位規則；回傳錯誤說明，沒有問題時回傳 undefined */
+function askUserProblem(a: AskUserArgs): string | undefined {
+  const ids = a.options.map((o) => o.id)
+  const dup = ids.find((x, i) => ids.indexOf(x) !== i)
+  if (dup) return `選項 id 重複：${dup}`
+  if (a.recommended_option_id !== undefined && !ids.includes(a.recommended_option_id)) {
+    return `recommended_option_id「${a.recommended_option_id}」不在選項中`
+  }
+  if (ids.length === 0 && a.allow_free_text === false) {
+    return '沒有選項時必須允許自由作答（allow_free_text 不可為 false）'
+  }
+  return undefined
 }
 
 export function createToolHandlers(sink: ToolSink) {
   return {
     ask_user: (a: AskUserArgs) =>
       guard(async () => {
+        const problem = askUserProblem(a)
+        if (problem) return fail(`問題格式有誤，請修正後重新呼叫 ask_user：${problem}`)
         await sink.askUser(a)
         return ok(
           '問題已顯示給使用者。請立刻結束這一輪，不要再輸出其他內容，等待使用者以 [answer …] 或 [counter_question …] 回覆。'
