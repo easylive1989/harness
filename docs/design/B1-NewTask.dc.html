@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>新任務</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#eef0f3}
+a{color:#0f766e}a:hover{color:#115e59}
+</style>
+</helmet>
+<div style="min-height: 980px; background: #eef0f3; color: #1c2430; font-family: 'Noto Sans TC', sans-serif; font-size: 14px; line-height: 1.65; display: flex; flex-direction: column">
+
+  <div style="height: 44px; display: flex; align-items: center; gap: 12px; padding: 0 18px">
+    <div style="display: flex; gap: 8px">
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #ff5f57"></span>
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #febc2e"></span>
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #28c840"></span>
+    </div>
+    <div style="flex: 1; text-align: center; font-size: 12px; color: #5b6472">新任務</div>
+  </div>
+
+  <div style="flex: 1; display: flex; flex-wrap: wrap; gap: 12px; padding: 0 12px 12px; align-items: stretch">
+
+    <nav aria-label="Repo 與任務" style="flex: 1 1 236px; padding: 8px 6px; display: flex; flex-direction: column; gap: 18px">
+      <button style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 42px; border-radius: 12px; border: none; background: #0f766e; color: #ffffff; font: inherit; font-weight: 500; cursor: pointer; box-shadow: 0 0 0 3px #b9dcd7">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新任務
+      </button>
+      <div style="display: flex; flex-direction: column; gap: 4px">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-weight: 700; font-size: 13px">
+          <span style="width: 22px; height: 22px; border-radius: 6px; background: #d5ebe8; color: #0f766e; display: flex; align-items: center; justify-content: center; font-size: 11px">S</span>shop-api
+        </div>
+        <a href="StyleB.dc.html" style="display: flex; flex-direction: column; padding: 10px 12px; border-radius: 12px; color: #3a4350; text-decoration: none">
+          <span style="font-size: 13px">登入失敗鎖定</span>
+          <span style="font-size: 12px; color: #0f766e">釐清中 · 問題 3</span>
+        </a>
+        <a href="B4-Implement.dc.html" style="display: flex; flex-direction: column; padding: 10px 12px; border-radius: 12px; color: #3a4350; text-decoration: none">
+          <span style="font-size: 13px">匯出訂單 CSV</span>
+          <span style="font-size: 12px; color: #9a5b00">實作中 · 3/7</span>
+        </a>
+        <a href="B5-Report.dc.html" style="display: flex; flex-direction: column; padding: 10px 12px; border-radius: 12px; color: #3a4350; text-decoration: none">
+          <span style="font-size: 13px">修正時區顯示</span>
+          <span style="font-size: 12px; color: #2563eb">待審閱報告</span>
+        </a>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-size: 13px; color: #3a4350">
+        <span style="width: 22px; height: 22px; border-radius: 6px; background: #e3e6ec; color: #5b6472; display: flex; align-items: center; justify-content: center; font-size: 11px">W</span>web-dashboard<span style="margin-left: auto; font-size: 12px; color: #6b7480">2</span>
+      </div>
+      <a href="B6-Settings.dc.html" style="margin-top: auto; display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 12px; background: #e6e9ee; font-size: 12px; color: #3a4350; text-decoration: none">
+        <span style="width: 8px; height: 8px; border-radius: 50%; background: #16a34a"></span>Opus 5.5 · 訂閱方案<span style="margin-left: auto; color: #5b6472">設定</span>
+      </a>
+    </nav>
+
+    <main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; align-items: center; background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 56px 28px">
+      <div style="width: 100%; max-width: 680px; display: flex; flex-direction: column; gap: 28px">
+        <div style="display: flex; flex-direction: column; gap: 4px">
+          <h1 style="margin: 0; font-size: 26px; font-weight: 700">想改什麼？</h1>
+          <span style="color: #5b6472">選一個 repo，用一兩句話描述需求。Claude 會先讀程式碼，再用問題跟你釐清細節。</span>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 10px">
+          <span style="font-size: 13px; font-weight: 500">Repo</span>
+          <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px">
+            <label style="display: flex; gap: 12px; align-items: center; padding: 14px; border-radius: 14px; background: #ecf6f4; box-shadow: 0 0 0 2px #0f766e; cursor: pointer">
+              <input type="radio" name="repo" checked style="accent-color: #0f766e">
+              <span style="display: flex; flex-direction: column; min-width: 0"><span style="font-weight: 500">shop-api</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #3f5f5b">~/Github/shop-api · main</span></span>
+            </label>
+            <label style="display: flex; gap: 12px; align-items: center; padding: 14px; border-radius: 14px; background: #f6f8f9; cursor: pointer">
+              <input type="radio" name="repo" style="accent-color: #0f766e">
+              <span style="display: flex; flex-direction: column; min-width: 0"><span style="font-weight: 500">web-dashboard</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #5b6472">~/Github/web-dashboard · develop</span></span>
+            </label>
+          </div>
+          <button style="align-self: flex-start; display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 14px; border-radius: 12px; border: 1px dashed #b8c0cc; background: #ffffff; color: #3a4350; font: inherit; font-size: 13px; cursor: pointer">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>選擇其他資料夾…
+          </button>
+        </div>
+
+        <label style="display: flex; flex-direction: column; gap: 10px">
+          <span style="font-size: 13px; font-weight: 500">需求</span>
+          <textarea rows="5" placeholder="例如：登入 API 要加上失敗次數限制，連續失敗太多次就鎖帳號。" style="padding: 14px 16px; border-radius: 14px; border: 1px solid #dde1e7; background: #ffffff; color: #1c2430; font: inherit; line-height: 1.65; resize: vertical">登入 API 要加上失敗次數限制，連續失敗太多次就鎖帳號，避免暴力破解。</textarea>
+        </label>
+
+        <div style="display: flex; flex-wrap: wrap; gap: 16px">
+          <label style="flex: 1 1 200px; display: flex; flex-direction: column; gap: 8px">
+            <span style="font-size: 13px; font-weight: 500">從哪個分支開始</span>
+            <select style="height: 42px; padding: 0 12px; border-radius: 12px; border: 1px solid #dde1e7; background: #ffffff; color: #1c2430; font: inherit"><option>main</option><option>develop</option></select>
+          </label>
+          <label style="flex: 1 1 200px; display: flex; flex-direction: column; gap: 8px">
+            <span style="font-size: 13px; font-weight: 500">模型</span>
+            <select style="height: 42px; padding: 0 12px; border-radius: 12px; border: 1px solid #dde1e7; background: #ffffff; color: #1c2430; font: inherit"><option>Opus 5.5（預設）</option><option>Sonnet 5.5（省額度）</option></select>
+          </label>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 12px; background: #f6f8f9; font-size: 13px; color: #3a4350">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0f766e" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+          <span>釐清階段 Claude 只會讀檔案。規格經你核准後，才會在獨立的 worktree 裡改程式碼。</span>
+        </div>
+
+        <a href="StyleB.dc.html" style="align-self: flex-end; display: flex; align-items: center; gap: 8px; height: 46px; padding: 0 24px; border-radius: 12px; background: #0f766e; color: #ffffff; font-weight: 500; text-decoration: none">開始釐清
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </a>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":980}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>實作進度</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#eef0f3}
+a{color:#0f766e}a:hover{color:#115e59}
+code{font-family:'IBM Plex Mono',monospace;font-size:12px;background:#eef2f1;padding:1px 6px;border-radius:5px;color:#134e4a}
+</style>
+</helmet>
+<div style="min-height: 980px; background: #eef0f3; color: #1c2430; font-family: 'Noto Sans TC', sans-serif; font-size: 14px; line-height: 1.65; display: flex; flex-direction: column">
+
+  <div style="height: 44px; display: flex; align-items: center; gap: 12px; padding: 0 18px">
+    <div style="display: flex; gap: 8px">
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #ff5f57"></span>
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #febc2e"></span>
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #28c840"></span>
+    </div>
+    <div style="flex: 1; text-align: center; font-size: 12px; color: #5b6472">shop-api · 登入失敗鎖定</div>
+  </div>
+
+  <div style="flex: 1; display: flex; flex-wrap: wrap; gap: 12px; padding: 0 12px 12px; align-items: stretch">
+
+    <nav aria-label="Repo 與任務" style="flex: 1 1 236px; padding: 8px 6px; display: flex; flex-direction: column; gap: 18px">
+      <a href="B1-NewTask.dc.html" style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 42px; border-radius: 12px; background: #0f766e; color: #ffffff; font-weight: 500; text-decoration: none">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新任務
+      </a>
+      <div style="display: flex; flex-direction: column; gap: 4px">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-weight: 700; font-size: 13px">
+          <span style="width: 22px; height: 22px; border-radius: 6px; background: #d5ebe8; color: #0f766e; display: flex; align-items: center; justify-content: center; font-size: 11px">S</span>shop-api
+        </div>
+        <a href="#" style="display: flex; flex-direction: column; padding: 10px 12px; border-radius: 12px; background: #ffffff; box-shadow: 0 1px 2px rgba(16,24,40,0.06), 0 2px 8px rgba(16,24,40,0.05); color: #1c2430; text-decoration: none">
+          <span style="font-size: 13px; font-weight: 500">登入失敗鎖定</span>
+          <span style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #9a5b00">等你核准指令</span>
+        </a>
+        <a href="#" style="display: flex; flex-direction: column; padding: 10px 12px; border-radius: 12px; color: #3a4350; text-decoration: none">
+          <span style="font-size: 13px">匯出訂單 CSV</span>
+          <span style="font-size: 12px; color: #9a5b00">實作中 · 3/7</span>
+        </a>
+        <a href="B5-Report.dc.html" style="display: flex; flex-direction: column; padding: 10px 12px; border-radius: 12px; color: #3a4350; text-decoration: none">
+          <span style="font-size: 13px">修正時區顯示</span>
+          <span style="font-size: 12px; color: #2563eb">待審閱報告</span>
+        </a>
+      </div>
+      <a href="B6-Settings.dc.html" style="margin-top: auto; display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 12px; background: #e6e9ee; font-size: 12px; color: #3a4350; text-decoration: none">
+        <span style="width: 8px; height: 8px; border-radius: 50%; background: #16a34a"></span>Opus 5.5 · 訂閱方案<span style="margin-left: auto; color: #5b6472">設定</span>
+      </a>
+    </nav>
+
+    <main style="position: relative; flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06)">
+      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 18px 28px">
+        <div style="display: flex; flex-direction: column">
+          <span style="font-size: 18px; font-weight: 700">登入失敗鎖定</span>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #5b6472">harness/login-lockout · 6 分 42 秒</span>
+        </div>
+        <div aria-label="任務階段" style="margin-left: auto; display: flex; align-items: center; gap: 4px; padding: 4px; border-radius: 999px; background: #f1f3f6; font-size: 12px">
+          <span style="padding: 4px 12px; color: #0f766e">✓ 釐清</span>
+          <a href="B3-Spec.dc.html" style="padding: 4px 12px; color: #0f766e; text-decoration: none">✓ 規格</a>
+          <span style="padding: 4px 12px; border-radius: 999px; background: #ffffff; color: #0f766e; font-weight: 500; box-shadow: 0 1px 2px rgba(16,24,40,0.08)">3 實作</span>
+          <span style="padding: 4px 12px; color: #6b7480">4 報告</span>
+        </div>
+      </div>
+
+      <div style="flex: 1; padding: 8px 28px 24px; max-width: 800px; width: 100%; box-sizing: border-box; margin: 0 auto; display: flex; flex-direction: column; gap: 10px">
+        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 6px">
+          <span style="font-size: 13px; color: #5b6472">進度</span>
+          <span style="flex: 1; height: 6px; border-radius: 3px; background: #eef0f3; display: flex"><span style="width: 50%; background: #0f766e; border-radius: 3px"></span></span>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px">2 / 5</span>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-radius: 14px; background: #f6f8f9">
+          <span style="flex: none; width: 24px; height: 24px; border-radius: 50%; background: #0f766e; color: #ffffff; display: flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg></span>
+          <span style="flex: 1">新增 lockout 模組：Redis 計數、判斷、重設</span>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #5b6472">+68</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-radius: 14px; background: #f6f8f9">
+          <span style="flex: none; width: 24px; height: 24px; border-radius: 50%; background: #0f766e; color: #ffffff; display: flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg></span>
+          <span style="flex: 1">在 login.ts 掛上 lockoutGuard</span>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #5b6472">+21 −4</span>
+        </div>
+
+        <section aria-label="進行中的步驟" style="border-radius: 16px; box-shadow: 0 0 0 1px #cfe3e0, 0 6px 24px rgba(15,118,110,0.08); overflow: hidden">
+          <div style="display: flex; align-items: center; gap: 12px; padding: 14px 16px">
+            <span style="flex: none; width: 24px; height: 24px; border-radius: 50%; box-shadow: inset 0 0 0 2px #0f766e; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #0f766e; font-weight: 700">3</span>
+            <span style="flex: 1; font-weight: 500">統一錯誤回應為 429</span>
+            <span style="font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #fdf6e7; color: #8a5300">等待核准</span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 2px; padding: 0 16px 14px 52px; font-size: 13px">
+            <div style="display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 8px; background: #f6f8f9"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #5b6472; width: 44px">讀取</span><code>src/http/errors.ts</code></div>
+            <div style="display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 8px; background: #f6f8f9"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #5b6472; width: 44px">編輯</span><code>src/http/errors.ts</code><span style="margin-left: auto; font-family: 'IBM Plex Mono', monospace; font-size: 11px"><span style="color: #15803d">+9</span> <span style="color: #b42318">−2</span></span></div>
+            <div style="display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 8px; background: #f6f8f9"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #5b6472; width: 44px">編輯</span><code>src/auth/login.ts</code><span style="margin-left: auto; font-family: 'IBM Plex Mono', monospace; font-size: 11px"><span style="color: #15803d">+3</span> <span style="color: #b42318">−3</span></span></div>
+            <div style="display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 8px; background: #fdf6e7"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #8a5300; width: 44px">指令</span><code>npm test -- auth</code><span style="margin-left: auto; font-size: 12px; color: #8a5300">等待核准</span></div>
+          </div>
+        </section>
+
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-radius: 14px; color: #5b6472">
+          <span style="flex: none; width: 24px; height: 24px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px #c3c9d2; display: flex; align-items: center; justify-content: center; font-size: 12px">4</span>
+          <span>通知信模板與 24 小時節流</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-radius: 14px; color: #5b6472">
+          <span style="flex: none; width: 24px; height: 24px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px #c3c9d2; display: flex; align-items: center; justify-content: center; font-size: 12px">5</span>
+          <span>單元測試與整合測試，跑完整測試套件</span>
+        </div>
+
+        <div style="align-self: flex-end; max-width: 78%; background: #f1f3f6; padding: 10px 14px; border-radius: 18px 18px 6px 18px; font-size: 13px">
+          <span style="display: block; font-size: 11px; color: #5b6472">你插話 · 步驟 2 進行時</span>錯誤訊息的文字放進 i18n 檔，不要寫死在程式裡。
+        </div>
+        <div style="display: flex; gap: 10px; font-size: 13px">
+          <span style="flex: none; width: 24px; height: 24px; border-radius: 50%; background: #d5ebe8; color: #0f766e; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700">C</span>
+          <span>收到，429 的訊息會放進 <code>locales/zh-TW/errors.json</code>，在步驟 3 一起處理。</span>
+        </div>
+      </div>
+
+      <div style="padding: 0 28px 22px">
+        <div style="max-width: 800px; margin: 0 auto; display: flex; gap: 8px; align-items: center; padding: 8px 8px 8px 18px; border-radius: 999px; background: #f1f3f6">
+          <label style="flex: 1; display: flex"><span style="position: absolute; width: 1px; height: 1px; overflow: hidden">插話</span><input type="text" placeholder="插話給 Claude…" style="flex: 1; height: 32px; border: none; background: transparent; color: #1c2430; font: inherit"></label>
+          <button style="height: 40px; padding: 0 16px; border-radius: 999px; border: none; background: #ffffff; color: #b42318; font: inherit; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 6px">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>停止
+          </button>
+          <button aria-label="送出" style="width: 40px; height: 40px; border-radius: 50%; border: none; background: #0f766e; color: #ffffff; cursor: pointer; display: flex; align-items: center; justify-content: center">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div style="position: absolute; inset: 0; border-radius: 16px; background: rgba(28,36,48,0.28); display: flex; align-items: center; justify-content: center; padding: 24px">
+        <div role="dialog" aria-label="指令核准" style="width: 100%; max-width: 480px; background: #ffffff; border-radius: 20px; box-shadow: 0 20px 60px rgba(16,24,40,0.25); padding: 24px; display: flex; flex-direction: column; gap: 16px">
+          <div style="display: flex; flex-direction: column; gap: 4px">
+            <span style="font-size: 12px; color: #8a5300; font-weight: 500">需要你的核准</span>
+            <span style="font-size: 18px; font-weight: 700">Claude 想執行這個指令</span>
+          </div>
+          <div style="border-radius: 12px; background: #1c2430; color: #e7ecef; padding: 14px 16px; font-family: 'IBM Plex Mono', monospace; font-size: 13px; display: flex; flex-direction: column; gap: 6px">
+            <span>$ npm test -- auth</span>
+            <span style="font-size: 11px; color: #a9b3bf">cwd: ~/.harness/worktrees/shop-api/login-lockout</span>
+          </div>
+          <span style="font-size: 13px; color: #3a4350">原因：確認改完錯誤回應後，auth 相關的既有測試仍然通過。</span>
+          <label style="display: flex; align-items: center; gap: 10px; font-size: 13px; cursor: pointer">
+            <input type="checkbox" style="accent-color: #0f766e; width: 16px; height: 16px">本任務內都允許 <code>npm test *</code>
+          </label>
+          <div style="display: flex; gap: 10px; justify-content: flex-end">
+            <button style="height: 44px; padding: 0 18px; border-radius: 12px; border: none; background: #f1f3f6; color: #3a4350; font: inherit; font-size: 13px; cursor: pointer">拒絕並說明</button>
+            <button style="height: 44px; padding: 0 22px; border-radius: 12px; border: none; background: #0f766e; color: #ffffff; font: inherit; font-size: 13px; font-weight: 500; cursor: pointer">允許</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <aside aria-label="變更檔案" style="flex: 1 1 320px; display: flex; flex-direction: column; gap: 14px; background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 18px 20px">
+      <div style="display: flex; align-items: baseline; justify-content: space-between">
+        <span style="font-size: 15px; font-weight: 700">變更檔案</span>
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px"><span style="color: #15803d">+101</span> <span style="color: #b42318">−9</span></span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 4px; font-size: 13px">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 10px; background: #f6f8f9"><span style="font-size: 11px; padding: 0 6px; border-radius: 4px; background: #dcfce7; color: #166534">新增</span><code style="background: none; padding: 0">src/auth/lockout.ts</code></div>
+        <div style="display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 10px; background: #f6f8f9"><span style="font-size: 11px; padding: 0 6px; border-radius: 4px; background: #e0ecff; color: #1e40af">修改</span><code style="background: none; padding: 0">src/auth/login.ts</code></div>
+        <div style="display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 10px; background: #f6f8f9"><span style="font-size: 11px; padding: 0 6px; border-radius: 4px; background: #e0ecff; color: #1e40af">修改</span><code style="background: none; padding: 0">src/http/errors.ts</code></div>
+      </div>
+      <div style="height: 1px; background: #eef0f3"></div>
+      <div style="display: flex; flex-direction: column; gap: 8px; font-size: 13px">
+        <span style="font-weight: 700">本任務已允許的指令</span>
+        <span style="display: flex; align-items: center; gap: 8px"><code>git status</code><code>git diff *</code></span>
+      </div>
+      <div style="height: 1px; background: #eef0f3"></div>
+      <div style="display: flex; flex-direction: column; gap: 6px; font-size: 13px">
+        <span style="font-weight: 700">Worktree</span>
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #3a4350; word-break: break-all">~/.harness/worktrees/shop-api/login-lockout</span>
+        <button style="align-self: flex-start; height: 36px; padding: 0 12px; border-radius: 10px; border: none; background: #f1f3f6; color: #3a4350; font: inherit; font-size: 12px; cursor: pointer">在 Finder 開啟</button>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":980}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

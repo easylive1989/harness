@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>變更報告</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#eef0f3}
+a{color:#0f766e}a:hover{color:#115e59}
+code{font-family:'IBM Plex Mono',monospace;font-size:12px;background:#eef2f1;padding:1px 6px;border-radius:5px;color:#134e4a}
+</style>
+</helmet>
+<div style="min-height: 2300px; background: #eef0f3; color: #1c2430; font-family: 'Noto Sans TC', sans-serif; font-size: 14px; line-height: 1.65; display: flex; flex-direction: column">
+
+  <div style="height: 44px; display: flex; align-items: center; gap: 12px; padding: 0 18px">
+    <div style="display: flex; gap: 8px">
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #ff5f57"></span>
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #febc2e"></span>
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #28c840"></span>
+    </div>
+    <div style="flex: 1; text-align: center; font-size: 12px; color: #5b6472">shop-api · 登入失敗鎖定 · 報告</div>
+  </div>
+
+  <div style="flex: 1; display: flex; flex-wrap: wrap; gap: 12px; padding: 0 12px 12px; align-items: flex-start">
+
+    <nav aria-label="Repo 與任務" style="flex: 1 1 236px; padding: 8px 6px; display: flex; flex-direction: column; gap: 18px">
+      <a href="B1-NewTask.dc.html" style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 42px; border-radius: 12px; background: #0f766e; color: #ffffff; font-weight: 500; text-decoration: none">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新任務
+      </a>
+      <div style="display: flex; flex-direction: column; gap: 4px">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-weight: 700; font-size: 13px">
+          <span style="width: 22px; height: 22px; border-radius: 6px; background: #d5ebe8; color: #0f766e; display: flex; align-items: center; justify-content: center; font-size: 11px">S</span>shop-api
+        </div>
+        <a href="#" style="display: flex; flex-direction: column; padding: 10px 12px; border-radius: 12px; background: #ffffff; box-shadow: 0 1px 2px rgba(16,24,40,0.06), 0 2px 8px rgba(16,24,40,0.05); color: #1c2430; text-decoration: none">
+          <span style="font-size: 13px; font-weight: 500">登入失敗鎖定</span>
+          <span style="font-size: 12px; color: #2563eb">待審閱報告 · v1</span>
+        </a>
+        <a href="B4-Implement.dc.html" style="display: flex; flex-direction: column; padding: 10px 12px; border-radius: 12px; color: #3a4350; text-decoration: none">
+          <span style="font-size: 13px">匯出訂單 CSV</span>
+          <span style="font-size: 12px; color: #9a5b00">實作中 · 3/7</span>
+        </a>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 2px; padding: 0 10px; font-size: 13px">
+        <span style="font-size: 12px; color: #6b7480; margin-bottom: 4px">報告目錄</span>
+        <a href="#overview" style="padding: 4px 0; color: #0f766e; text-decoration: none; font-weight: 500">概觀</a>
+        <a href="#arch" style="padding: 4px 0; color: #3a4350; text-decoration: none">架構前後對照</a>
+        <a href="#decisions" style="padding: 4px 0; color: #3a4350; text-decoration: none">決策與原因</a>
+        <a href="#state" style="padding: 4px 0; color: #3a4350; text-decoration: none">鎖定狀態機</a>
+        <a href="#limits" style="padding: 4px 0; color: #3a4350; text-decoration: none">限制與後續</a>
+        <a href="#diff" style="padding: 4px 0; color: #3a4350; text-decoration: none">程式碼變更</a>
+        <a href="#tests" style="padding: 4px 0; color: #3a4350; text-decoration: none">測試結果</a>
+      </div>
+    </nav>
+
+    <main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 12px">
+
+      <div style="background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 18px 28px; display: flex; flex-wrap: wrap; align-items: center; gap: 16px">
+        <span style="font-size: 18px; font-weight: 700">登入失敗鎖定</span>
+        <div aria-label="任務階段" style="display: flex; align-items: center; gap: 4px; padding: 4px; border-radius: 999px; background: #f1f3f6; font-size: 12px">
+          <span style="padding: 4px 12px; color: #0f766e">✓ 釐清</span>
+          <a href="B3-Spec.dc.html" style="padding: 4px 12px; color: #0f766e; text-decoration: none">✓ 規格</a>
+          <a href="B4-Implement.dc.html" style="padding: 4px 12px; color: #0f766e; text-decoration: none">✓ 實作</a>
+          <span style="padding: 4px 12px; border-radius: 999px; background: #ffffff; color: #0f766e; font-weight: 500; box-shadow: 0 1px 2px rgba(16,24,40,0.08)">4 報告</span>
+        </div>
+        <div style="margin-left: auto; display: flex; gap: 8px; align-items: center">
+          <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #5b6472">版本
+            <select style="height: 34px; padding: 0 10px; border-radius: 10px; border: 1px solid #dde1e7; background: #ffffff; color: #1c2430; font: inherit; font-size: 12px"><option>v1 · 10/07 14:20</option></select>
+          </label>
+          <button style="height: 34px; padding: 0 12px; border-radius: 10px; border: none; background: #f1f3f6; color: #3a4350; font: inherit; font-size: 12px; cursor: pointer">匯出 HTML</button>
+        </div>
+      </div>
+
+      <section id="overview" style="background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 28px; display: flex; flex-direction: column; gap: 18px">
+        <div style="display: flex; flex-direction: column; gap: 6px">
+          <span style="font-size: 12px; color: #0f766e; font-weight: 500">概觀</span>
+          <h1 style="margin: 0; font-size: 26px; font-weight: 700">登入流程多了一道以帳號 + IP 計數的鎖定關卡</h1>
+          <span style="color: #3a4350; max-width: 720px">在既有的 IP 限流之後、密碼驗證之前，加了 lockoutGuard。同一帳號從同一 IP 連續失敗 5 次就鎖 15 分鐘，狀態存在 Redis，所以多台機器共用。鎖定時寄一封通知信，24 小時內最多寄一次。</span>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px">
+          <div style="padding: 14px 16px; border-radius: 14px; background: #f6f8f9; display: flex; flex-direction: column"><span style="font-size: 12px; color: #5b6472">變更檔案</span><span style="font-size: 24px; font-weight: 700">6</span></div>
+          <div style="padding: 14px 16px; border-radius: 14px; background: #f6f8f9; display: flex; flex-direction: column"><span style="font-size: 12px; color: #5b6472">行數</span><span style="font-size: 24px; font-weight: 700"><span style="color: #15803d">+184</span> <span style="color: #b42318; font-size: 18px">−21</span></span></div>
+          <div style="padding: 14px 16px; border-radius: 14px; background: #ecf6f4; display: flex; flex-direction: column"><span style="font-size: 12px; color: #3f5f5b">測試</span><span style="font-size: 24px; font-weight: 700; color: #0f5f58">48 / 48 通過</span></div>
+          <div style="padding: 14px 16px; border-radius: 14px; background: #fdf6e7; display: flex; flex-direction: column"><span style="font-size: 12px; color: #8a5300">決策</span><span style="font-size: 24px; font-weight: 700">4</span></div>
+        </div>
+      </section>
+
+      <section id="arch" style="background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 28px; display: flex; flex-direction: column; gap: 18px">
+        <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px">
+          <span style="font-size: 18px; font-weight: 700">架構前後對照</span>
+          <span style="display: flex; gap: 12px; font-size: 12px; color: #3a4350; margin-left: auto">
+            <span style="display: flex; align-items: center; gap: 6px"><span style="width: 12px; height: 12px; border-radius: 4px; background: #0f766e"></span>新增</span>
+            <span style="display: flex; align-items: center; gap: 6px"><span style="width: 12px; height: 12px; border-radius: 4px; background: #ffffff; box-shadow: inset 0 0 0 2px #2563eb"></span>修改</span>
+            <span style="display: flex; align-items: center; gap: 6px"><span style="width: 12px; height: 12px; border-radius: 4px; background: #eef0f3"></span>未變</span>
+          </span>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px">
+          <div style="border-radius: 16px; background: #f6f8f9; padding: 20px; display: flex; flex-direction: column; align-items: center; gap: 6px">
+            <span style="align-self: flex-start; font-size: 13px; font-weight: 700; color: #5b6472; margin-bottom: 8px">之前</span>
+            <span style="width: 200px; text-align: center; padding: 10px; border-radius: 12px; background: #ffffff; font-size: 13px">Client</span>
+            <span style="color: #8a93a0">↓</span>
+            <span style="width: 200px; text-align: center; padding: 10px; border-radius: 12px; background: #ffffff; font-size: 13px">rateLimit（IP）</span>
+            <span style="color: #8a93a0">↓</span>
+            <span style="width: 200px; text-align: center; padding: 10px; border-radius: 12px; background: #ffffff; font-size: 13px"><code>login.ts</code></span>
+            <span style="color: #8a93a0">↓</span>
+            <span style="width: 200px; text-align: center; padding: 10px; border-radius: 12px; background: #ffffff; font-size: 13px">authService</span>
+            <span style="color: #8a93a0">↓</span>
+            <span style="width: 200px; text-align: center; padding: 10px; border-radius: 12px; background: #ffffff; font-size: 13px">Postgres</span>
+          </div>
+          <div style="border-radius: 16px; background: #f6f8f9; padding: 20px; display: flex; flex-direction: column; align-items: center; gap: 6px">
+            <span style="align-self: flex-start; font-size: 13px; font-weight: 700; color: #0f766e; margin-bottom: 8px">之後</span>
+            <span style="width: 200px; text-align: center; padding: 10px; border-radius: 12px; background: #ffffff; font-size: 13px">Client</span>
+            <span style="color: #8a93a0">↓</span>
+            <span style="width: 200px; text-align: center; padding: 10px; border-radius: 12px; background: #ffffff; font-size: 13px">rateLimit（IP）</span>
+            <span style="color: #8a93a0">↓</span>
+            <div style="display: flex; align-items: center; gap: 8px">
+              <span style="width: 200px; text-align: center; padding: 10px; border-radius: 12px; background: #0f766e; color: #ffffff; font-size: 13px; font-weight: 500">lockoutGuard</span>
+              <span style="color: #8a93a0">⇄</span>
+              <span style="padding: 10px 12px; border-radius: 12px; background: #ffffff; font-size: 13px">Redis</span>
+            </div>
+            <span style="color: #8a93a0">↓</span>
+            <div style="display: flex; align-items: center; gap: 8px">
+              <span style="width: 200px; text-align: center; padding: 10px; border-radius: 12px; background: #ffffff; box-shadow: inset 0 0 0 2px #2563eb; font-size: 13px"><code>login.ts</code></span>
+              <span style="color: #8a93a0">→</span>
+              <span style="padding: 10px 12px; border-radius: 12px; background: #0f766e; color: #ffffff; font-size: 13px">mailer 通知</span>
+            </div>
+            <span style="color: #8a93a0">↓</span>
+            <span style="width: 200px; text-align: center; padding: 10px; border-radius: 12px; background: #ffffff; font-size: 13px">authService</span>
+            <span style="color: #8a93a0">↓</span>
+            <span style="width: 200px; text-align: center; padding: 10px; border-radius: 12px; background: #ffffff; font-size: 13px">Postgres</span>
+          </div>
+        </div>
+        <span style="font-size: 13px; color: #5b6472">點任一方塊可跳到對應的程式碼變更。</span>
+      </section>
+
+      <section id="decisions" style="background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 28px; display: flex; flex-direction: column; gap: 14px">
+        <span style="font-size: 18px; font-weight: 700">決策與原因</span>
+        <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
+          <div style="border-radius: 14px; box-shadow: 0 0 0 1px #e5e8ed; padding: 16px; display: flex; flex-direction: column; gap: 8px">
+            <div style="display: flex; align-items: center; gap: 8px"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #5b6472">D2</span><span style="font-weight: 700">計數存在 Redis</span><span style="margin-left: auto; font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #fdf6e7; color: #8a5300">來自分岔</span></div>
+            <div style="font-size: 13px"><span style="color: #0f766e; font-weight: 500">選擇</span>　既有 Redis，TTL 15 分鐘</div>
+            <div style="font-size: 13px; color: #5b6472"><span style="font-weight: 500">捨棄</span>　in-memory Map：重啟會歸零，多台機器不共享</div>
+            <div style="font-size: 13px; color: #3a4350; padding: 10px 12px; border-radius: 10px; background: #f6f8f9">API 有 3 台機器在負載平衡後面；專案已有 <code>redisClient</code>，不需要新增依賴。</div>
+          </div>
+          <div style="border-radius: 14px; box-shadow: 0 0 0 1px #e5e8ed; padding: 16px; display: flex; flex-direction: column; gap: 8px">
+            <div style="display: flex; align-items: center; gap: 8px"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #5b6472">D3</span><span style="font-weight: 700">鎖定期間一律回 429</span><a href="StyleB.dc.html" style="margin-left: auto; font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #f1f3f6; color: #3a4350; text-decoration: none">問題 3</a></div>
+            <div style="font-size: 13px"><span style="color: #0f766e; font-weight: 500">選擇</span>　鎖 15 分鐘，期滿自動解除</div>
+            <div style="font-size: 13px; color: #5b6472"><span style="font-weight: 500">捨棄</span>　email 重設才解鎖；改要求驗證碼</div>
+            <div style="font-size: 13px; color: #3a4350; padding: 10px 12px; border-radius: 10px; background: #f6f8f9">統一回應不洩漏帳號是否存在（來自你的反問）；自動解除不需要客服介入。</div>
+          </div>
+          <div style="border-radius: 14px; box-shadow: 0 0 0 1px #e5e8ed; padding: 16px; display: flex; flex-direction: column; gap: 8px">
+            <div style="display: flex; align-items: center; gap: 8px"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #5b6472">D1</span><span style="font-weight: 700">以帳號 + IP 計數</span><a href="StyleB.dc.html" style="margin-left: auto; font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #f1f3f6; color: #3a4350; text-decoration: none">問題 1</a></div>
+            <div style="font-size: 13px; color: #3a4350; padding: 10px 12px; border-radius: 10px; background: #f6f8f9">只用帳號計數的話，攻擊者能故意鎖住別人的帳號；只用 IP 計數則已經由 rateLimit 處理。</div>
+          </div>
+          <div style="border-radius: 14px; box-shadow: 0 0 0 1px #e5e8ed; padding: 16px; display: flex; flex-direction: column; gap: 8px">
+            <div style="display: flex; align-items: center; gap: 8px"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #5b6472">D4</span><span style="font-weight: 700">通知信 24 小時一封</span><span style="margin-left: auto; font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #fdf6e7; color: #8a5300">來自分岔</span></div>
+            <div style="font-size: 13px; color: #3a4350; padding: 10px 12px; border-radius: 10px; background: #f6f8f9">避免有人故意輸錯，讓對方一直收到信。</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="state" style="background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 28px; display: flex; flex-direction: column; gap: 16px">
+        <div style="display: flex; align-items: center; gap: 10px">
+          <span style="font-size: 18px; font-weight: 700">鎖定狀態機</span>
+          <span style="font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #eef0f3; color: #3a4350">Claude 自訂視覺化</span>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; padding: 24px; border-radius: 16px; background: #f6f8f9">
+          <span style="padding: 14px 20px; border-radius: 999px; background: #ffffff; box-shadow: 0 0 0 2px #0f766e; font-weight: 500">正常</span>
+          <span style="display: flex; flex-direction: column; align-items: center; font-size: 11px; color: #5b6472">登入失敗<span style="font-size: 18px; color: #8a93a0">→</span></span>
+          <span style="padding: 14px 20px; border-radius: 999px; background: #ffffff; box-shadow: 0 0 0 2px #c27c0e; font-weight: 500">計數中 <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px">1–4</span></span>
+          <span style="display: flex; flex-direction: column; align-items: center; font-size: 11px; color: #5b6472">第 5 次失敗<span style="font-size: 18px; color: #8a93a0">→</span></span>
+          <span style="padding: 14px 20px; border-radius: 999px; background: #1c2430; color: #ffffff; font-weight: 500">鎖定 15 分</span>
+          <span style="display: flex; flex-direction: column; align-items: center; font-size: 11px; color: #5b6472">TTL 到期<span style="font-size: 18px; color: #8a93a0">→</span></span>
+          <span style="padding: 14px 20px; border-radius: 999px; background: #ffffff; box-shadow: 0 0 0 2px #0f766e; font-weight: 500">正常</span>
+        </div>
+        <span style="font-size: 13px; color: #5b6472">「計數中」時登入成功會直接回到「正常」並清除計數；「鎖定」期間任何請求都回 429，不檢查密碼。</span>
+      </section>
+
+      <section id="limits" style="background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 28px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px">
+        <div style="display: flex; flex-direction: column; gap: 10px">
+          <span style="font-size: 18px; font-weight: 700">限制與風險</span>
+          <div style="padding: 12px 14px; border-radius: 12px; background: #fdf6e7; font-size: 13px"><span style="font-weight: 500">Redis 掛掉時放行</span><br><span style="color: #5c4a2a">選擇 fail-open，避免 Redis 故障導致所有人無法登入；代價是故障期間沒有鎖定保護。</span></div>
+          <div style="padding: 12px 14px; border-radius: 12px; background: #f6f8f9; font-size: 13px"><span style="font-weight: 500">共用 IP 的誤傷</span><br><span style="color: #5b6472">公司 NAT 後的多人共用 IP，但因為以帳號 + IP 計數，影響僅限同一帳號。</span></div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 10px">
+          <span style="font-size: 18px; font-weight: 700">後續工作</span>
+          <div style="padding: 12px 14px; border-radius: 12px; background: #f6f8f9; font-size: 13px">信中的「不是我」重設連結（分岔中決定延後）</div>
+          <div style="padding: 12px 14px; border-radius: 12px; background: #f6f8f9; font-size: 13px">後台手動解鎖介面</div>
+          <div style="padding: 12px 14px; border-radius: 12px; background: #f6f8f9; font-size: 13px">鎖定事件的監控指標</div>
+        </div>
+      </section>
+
+      <section id="diff" style="background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 28px; display: flex; flex-direction: column; gap: 14px">
+        <div style="display: flex; align-items: baseline; gap: 12px">
+          <span style="font-size: 18px; font-weight: 700">程式碼變更</span>
+          <span style="font-size: 12px; color: #5b6472">每段變更都附上「為什麼改」；選取任一行可以留下回饋</span>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px">
+          <span style="padding: 6px 12px; border-radius: 999px; background: #1c2430; color: #ffffff; font-family: 'IBM Plex Mono', monospace">auth/lockout.ts +68</span>
+          <span style="padding: 6px 12px; border-radius: 999px; background: #f1f3f6; font-family: 'IBM Plex Mono', monospace">auth/login.ts +21 −4</span>
+          <span style="padding: 6px 12px; border-radius: 999px; background: #f1f3f6; font-family: 'IBM Plex Mono', monospace">http/errors.ts +9 −2</span>
+          <span style="padding: 6px 12px; border-radius: 999px; background: #f1f3f6; font-family: 'IBM Plex Mono', monospace">mail/lockout.tsx +34</span>
+          <span style="padding: 6px 12px; border-radius: 999px; background: #f1f3f6; font-family: 'IBM Plex Mono', monospace">+2 測試檔</span>
+        </div>
+        <div style="padding: 12px 14px; border-radius: 12px; background: #ecf6f4; font-size: 13px; color: #134e4a"><span style="font-weight: 700">為什麼：</span>把計數邏輯獨立成模組，login.ts 只負責呼叫；TTL 用 Redis 原生的 EXPIRE，不需要排程清理。</div>
+        <div style="border-radius: 12px; background: #1c2430; color: #e7ecef; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; line-height: 1.8; overflow-x: auto">
+          <div style="display: grid; grid-template-columns: 44px minmax(0, 1fr); background: rgba(34,197,94,0.14)"><span style="text-align: right; padding-right: 12px; color: #7d8794">12</span><span style="white-space: pre">+ const MAX_ATTEMPTS = 5;</span></div>
+          <div style="display: grid; grid-template-columns: 44px minmax(0, 1fr); background: rgba(250,204,21,0.22); box-shadow: inset 3px 0 0 #facc15"><span style="text-align: right; padding-right: 12px; color: #7d8794">13</span><span style="white-space: pre">+ const LOCK_TTL_SECONDS = 15 * 60;</span></div>
+          <div style="display: grid; grid-template-columns: 44px minmax(0, 1fr); background: rgba(34,197,94,0.14)"><span style="text-align: right; padding-right: 12px; color: #7d8794">14</span><span style="white-space: pre">+</span></div>
+          <div style="display: grid; grid-template-columns: 44px minmax(0, 1fr); background: rgba(34,197,94,0.14)"><span style="text-align: right; padding-right: 12px; color: #7d8794">15</span><span style="white-space: pre">+ export async function registerFailure(userId: string, ip: string) {</span></div>
+          <div style="display: grid; grid-template-columns: 44px minmax(0, 1fr); background: rgba(34,197,94,0.14)"><span style="text-align: right; padding-right: 12px; color: #7d8794">16</span><span style="white-space: pre">+   const key = `lockout:${userId}:${ip}`;</span></div>
+          <div style="display: grid; grid-template-columns: 44px minmax(0, 1fr); background: rgba(34,197,94,0.14)"><span style="text-align: right; padding-right: 12px; color: #7d8794">17</span><span style="white-space: pre">+   const count = await redis.incr(key);</span></div>
+          <div style="display: grid; grid-template-columns: 44px minmax(0, 1fr); background: rgba(34,197,94,0.14)"><span style="text-align: right; padding-right: 12px; color: #7d8794">18</span><span style="white-space: pre">+   if (count === 1) await redis.expire(key, LOCK_TTL_SECONDS);</span></div>
+          <div style="display: grid; grid-template-columns: 44px minmax(0, 1fr); background: rgba(34,197,94,0.14)"><span style="text-align: right; padding-right: 12px; color: #7d8794">19</span><span style="white-space: pre">+   return count &gt;= MAX_ATTEMPTS;</span></div>
+          <div style="display: grid; grid-template-columns: 44px minmax(0, 1fr); background: rgba(34,197,94,0.14)"><span style="text-align: right; padding-right: 12px; color: #7d8794">20</span><span style="white-space: pre">+ }</span></div>
+        </div>
+        <div style="margin-left: 44px; display: flex; gap: 10px; padding: 12px 14px; border-radius: 12px; background: #fef9c3; font-size: 13px">
+          <span style="flex: none; width: 24px; height: 24px; border-radius: 50%; background: #1c2430; color: #ffffff; display: flex; align-items: center; justify-content: center; font-size: 11px">你</span>
+          <span style="flex: 1"><span style="font-size: 12px; color: #713f12">回饋 · 第 13 行</span><br>TTL 和上限次數改成可以從環境變數設定，預設值維持不變。</span>
+        </div>
+      </section>
+
+      <section id="tests" style="background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 28px; display: flex; flex-direction: column; gap: 12px">
+        <span style="font-size: 18px; font-weight: 700">測試結果</span>
+        <span style="font-size: 12px; color: #5b6472">由 app 在 worktree 中實際執行，不是 Claude 的自述。</span>
+        <div style="display: flex; flex-direction: column; gap: 6px; font-size: 13px">
+          <div style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 12px; background: #ecf6f4"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0f766e" stroke-width="2.5" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg><code style="background: none; padding: 0">npm test</code><span style="margin-left: auto; color: #0f5f58">48 通過 · 6 個新增 · 3.2 秒</span></div>
+          <div style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 12px; background: #ecf6f4"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0f766e" stroke-width="2.5" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg><code style="background: none; padding: 0">npm run typecheck</code><span style="margin-left: auto; color: #0f5f58">無錯誤</span></div>
+          <div style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 12px; background: #ecf6f4"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0f766e" stroke-width="2.5" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg><code style="background: none; padding: 0">npm run lint</code><span style="margin-left: auto; color: #0f5f58">無警告</span></div>
+        </div>
+      </section>
+    </main>
+
+    <aside aria-label="回饋與收尾" style="position: sticky; top: 12px; flex: 1 1 300px; display: flex; flex-direction: column; gap: 14px; background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 18px 20px">
+      <div style="display: flex; align-items: baseline; justify-content: space-between">
+        <span style="font-size: 15px; font-weight: 700">回饋</span>
+        <span style="font-size: 12px; color: #5b6472">2 則待送出</span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px; font-size: 13px">
+        <a href="#diff" style="padding: 12px; border-radius: 12px; background: #fef9c3; color: #1c2430; text-decoration: none; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 12px; color: #713f12">程式碼 · lockout.ts:13</span>TTL 和上限次數改成可以從環境變數設定。</a>
+        <a href="#limits" style="padding: 12px; border-radius: 12px; background: #fef9c3; color: #1c2430; text-decoration: none; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 12px; color: #713f12">限制 · Redis 掛掉時放行</span>放行時要寫一筆 warning log。</a>
+      </div>
+      <label style="display: flex; flex-direction: column; gap: 6px; font-size: 13px"><span style="font-weight: 500">整體意見（選填）</span><textarea rows="3" placeholder="其他想調整的地方…" style="padding: 10px 12px; border-radius: 12px; border: 1px solid #dde1e7; color: #1c2430; font: inherit; font-size: 13px; resize: vertical"></textarea></label>
+      <button style="height: 44px; border-radius: 12px; border: none; background: #0f766e; color: #ffffff; font: inherit; font-size: 13px; font-weight: 500; cursor: pointer">送出回饋，產生 v2</button>
+      <div style="height: 1px; background: #eef0f3"></div>
+      <span style="font-size: 15px; font-weight: 700">滿意了？</span>
+      <button style="height: 44px; border-radius: 12px; border: none; background: #1c2430; color: #ffffff; font: inherit; font-size: 13px; font-weight: 500; cursor: pointer">開 Pull Request</button>
+      <button style="height: 44px; border-radius: 12px; border: none; background: #f1f3f6; color: #1c2430; font: inherit; font-size: 13px; cursor: pointer">合併到 main</button>
+      <button style="height: 40px; border-radius: 12px; border: none; background: transparent; color: #b42318; font: inherit; font-size: 13px; cursor: pointer">丟棄 worktree</button>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":2300}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

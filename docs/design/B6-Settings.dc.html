@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>設定</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#eef0f3}
+a{color:#0f766e}a:hover{color:#115e59}
+code{font-family:'IBM Plex Mono',monospace;font-size:12px;background:#eef2f1;padding:1px 6px;border-radius:5px;color:#134e4a}
+</style>
+</helmet>
+<div style="min-height: 980px; background: #eef0f3; color: #1c2430; font-family: 'Noto Sans TC', sans-serif; font-size: 14px; line-height: 1.65; display: flex; flex-direction: column">
+
+  <div style="height: 44px; display: flex; align-items: center; gap: 12px; padding: 0 18px">
+    <div style="display: flex; gap: 8px">
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #ff5f57"></span>
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #febc2e"></span>
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #28c840"></span>
+    </div>
+    <div style="flex: 1; text-align: center; font-size: 12px; color: #5b6472">設定</div>
+  </div>
+
+  <div style="flex: 1; display: flex; flex-wrap: wrap; gap: 12px; padding: 0 12px 12px; align-items: stretch">
+
+    <nav aria-label="設定分類" style="flex: 1 1 236px; padding: 8px 6px; display: flex; flex-direction: column; gap: 4px">
+      <a href="B1-NewTask.dc.html" style="display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 10px; color: #3a4350; font-size: 13px; text-decoration: none; margin-bottom: 12px">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>返回
+      </a>
+      <a href="#account" style="padding: 10px 12px; border-radius: 12px; background: #ffffff; box-shadow: 0 1px 2px rgba(16,24,40,0.06), 0 2px 8px rgba(16,24,40,0.05); color: #1c2430; font-size: 13px; font-weight: 500; text-decoration: none">Claude 帳號</a>
+      <a href="#model" style="padding: 10px 12px; border-radius: 12px; color: #3a4350; font-size: 13px; text-decoration: none">模型</a>
+      <a href="#perm" style="padding: 10px 12px; border-radius: 12px; color: #3a4350; font-size: 13px; text-decoration: none">權限</a>
+      <a href="#workspace" style="padding: 10px 12px; border-radius: 12px; color: #3a4350; font-size: 13px; text-decoration: none">Worktree 與專案設定</a>
+    </nav>
+
+    <main style="flex: 999 1 560px; min-width: 0; background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(16,24,40,0.06); padding: 36px 28px">
+      <div style="max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 32px">
+        <h1 style="margin: 0; font-size: 24px; font-weight: 700">設定</h1>
+
+        <section id="account" style="display: flex; flex-direction: column; gap: 12px">
+          <span style="font-size: 15px; font-weight: 700">Claude 帳號</span>
+          <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 16px; border-radius: 14px; background: #ecf6f4">
+            <span style="width: 10px; height: 10px; border-radius: 50%; background: #16a34a"></span>
+            <span style="display: flex; flex-direction: column; flex: 1 1 240px"><span style="font-weight: 500">已透過 Claude Code 登入 · 訂閱方案</span><span style="font-size: 12px; color: #3f5f5b">使用本機 Claude Code 的登入憑證，不需要 API key</span></span>
+            <button style="height: 38px; padding: 0 14px; border-radius: 10px; border: none; background: #ffffff; color: #1c2430; font: inherit; font-size: 13px; cursor: pointer">重新檢查</button>
+          </div>
+          <div style="display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 8px 16px; font-size: 13px; padding: 0 4px">
+            <span style="color: #5b6472">Claude Code</span><span><code>/usr/local/bin/claude</code></span>
+            <span style="color: #5b6472">版本</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px">[偵測到的版本]</span>
+          </div>
+          <span style="font-size: 12px; color: #5b6472">尚未登入時，會請你在終端機執行 <code>claude</code> 完成登入。</span>
+        </section>
+
+        <section id="model" style="display: flex; flex-direction: column; gap: 12px">
+          <span style="font-size: 15px; font-weight: 700">模型</span>
+          <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px">
+            <label style="display: flex; gap: 10px; padding: 14px; border-radius: 14px; background: #ecf6f4; box-shadow: 0 0 0 2px #0f766e; cursor: pointer">
+              <input type="radio" name="model" checked style="accent-color: #0f766e; margin-top: 5px">
+              <span style="display: flex; flex-direction: column"><span style="font-weight: 500">Opus 5.5</span><span style="font-size: 12px; color: #3f5f5b">預設，品質最好</span></span>
+            </label>
+            <label style="display: flex; gap: 10px; padding: 14px; border-radius: 14px; background: #f6f8f9; cursor: pointer">
+              <input type="radio" name="model" style="accent-color: #0f766e; margin-top: 5px">
+              <span style="display: flex; flex-direction: column"><span style="font-weight: 500">Sonnet 5.5</span><span style="font-size: 12px; color: #5b6472">較快，省訂閱額度</span></span>
+            </label>
+          </div>
+          <span style="font-size: 12px; color: #5b6472">每個任務建立時也可以單獨選擇。</span>
+        </section>
+
+        <section id="perm" style="display: flex; flex-direction: column; gap: 12px">
+          <span style="font-size: 15px; font-weight: 700">實作階段權限</span>
+          <div style="display: flex; flex-direction: column; border-radius: 14px; box-shadow: 0 0 0 1px #e5e8ed">
+            <label style="display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid #eef0f3; cursor: pointer">
+              <span style="flex: 1; display: flex; flex-direction: column"><span style="font-weight: 500">worktree 內的檔案讀寫自動允許</span><span style="font-size: 12px; color: #5b6472">不會碰到 worktree 以外的檔案</span></span>
+              <input type="checkbox" checked style="accent-color: #0f766e; width: 18px; height: 18px">
+            </label>
+            <label style="display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid #eef0f3; cursor: pointer">
+              <span style="flex: 1; display: flex; flex-direction: column"><span style="font-weight: 500">shell 指令需要核准</span><span style="font-size: 12px; color: #5b6472">下面的指令永遠允許</span></span>
+              <input type="checkbox" checked style="accent-color: #0f766e; width: 18px; height: 18px">
+            </label>
+            <div style="padding: 14px 16px; display: flex; flex-direction: column; gap: 10px">
+              <span style="font-size: 13px; font-weight: 500">永遠允許的指令</span>
+              <div style="display: flex; flex-wrap: wrap; gap: 6px">
+                <span style="display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; border-radius: 999px; background: #f1f3f6; font-family: 'IBM Plex Mono', monospace; font-size: 12px">git status<button aria-label="移除 git status" style="width: 22px; height: 22px; border-radius: 50%; border: none; background: transparent; color: #5b6472; cursor: pointer">×</button></span>
+                <span style="display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; border-radius: 999px; background: #f1f3f6; font-family: 'IBM Plex Mono', monospace; font-size: 12px">git diff *<button aria-label="移除 git diff" style="width: 22px; height: 22px; border-radius: 50%; border: none; background: transparent; color: #5b6472; cursor: pointer">×</button></span>
+                <span style="display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; border-radius: 999px; background: #f1f3f6; font-family: 'IBM Plex Mono', monospace; font-size: 12px">ls *<button aria-label="移除 ls" style="width: 22px; height: 22px; border-radius: 50%; border: none; background: transparent; color: #5b6472; cursor: pointer">×</button></span>
+              </div>
+              <label style="display: flex; gap: 8px"><span style="position: absolute; width: 1px; height: 1px; overflow: hidden">新增指令</span><input type="text" placeholder="例如 npm test *" style="flex: 1; height: 38px; padding: 0 12px; border-radius: 10px; border: 1px solid #dde1e7; color: #1c2430; font-family: 'IBM Plex Mono', monospace; font-size: 12px"><button style="height: 38px; padding: 0 14px; border-radius: 10px; border: none; background: #f1f3f6; color: #1c2430; font: inherit; font-size: 13px; cursor: pointer">新增</button></label>
+            </div>
+          </div>
+        </section>
+
+        <section id="workspace" style="display: flex; flex-direction: column; gap: 12px">
+          <span style="font-size: 15px; font-weight: 700">Worktree 與專案設定</span>
+          <label style="display: flex; flex-direction: column; gap: 6px; font-size: 13px">
+            <span style="font-weight: 500">Worktree 存放位置</span>
+            <span style="display: flex; gap: 8px"><input type="text" value="~/.harness/worktrees" style="flex: 1; height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid #dde1e7; color: #1c2430; font-family: 'IBM Plex Mono', monospace; font-size: 12px"><button style="height: 40px; padding: 0 14px; border-radius: 10px; border: none; background: #f1f3f6; color: #1c2430; font: inherit; font-size: 13px; cursor: pointer">選擇…</button></span>
+          </label>
+          <label style="display: flex; flex-direction: column; gap: 6px; font-size: 13px">
+            <span style="font-weight: 500">分支名稱前綴</span>
+            <input type="text" value="harness/" style="height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid #dde1e7; color: #1c2430; font-family: 'IBM Plex Mono', monospace; font-size: 12px">
+          </label>
+          <label style="display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-radius: 14px; box-shadow: 0 0 0 1px #e5e8ed; cursor: pointer">
+            <span style="flex: 1; display: flex; flex-direction: column"><span style="font-weight: 500">載入 repo 的 CLAUDE.md 與 .claude 設定</span><span style="font-size: 12px; color: #5b6472">包含專案的 skills 與 MCP；不載入 ~/.claude 的 hooks 與 plugins</span></span>
+            <input type="checkbox" checked style="accent-color: #0f766e; width: 18px; height: 18px">
+          </label>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":980}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>
