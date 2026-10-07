@@ -216,11 +216,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   --shadow-dialog: 0 20px 60px rgba(16, 24, 40, 0.25);
 }
 
-html, body, #root { height: 100%; }
-body { margin: 0; background: var(--color-canvas); color: var(--color-ink); font-family: var(--font-sans); font-size: 14px; line-height: 1.65; -webkit-font-smoothing: antialiased; }
-code { font-family: var(--font-mono); font-size: 12px; background: #eef2f1; padding: 1px 6px; border-radius: 5px; color: #134e4a; }
-.drag { -webkit-app-region: drag; }
-.no-drag { -webkit-app-region: no-drag; }
+@layer base {
+  html, body, #root { height: 100%; }
+  body { margin: 0; background: var(--color-canvas); color: var(--color-ink); font-family: var(--font-sans); font-size: 14px; line-height: 1.65; -webkit-font-smoothing: antialiased; }
+  code { font-family: var(--font-mono); font-size: 12px; background: #eef2f1; padding: 1px 6px; border-radius: 5px; color: #134e4a; }
+}
+
+@utility drag { -webkit-app-region: drag; }
+@utility no-drag { -webkit-app-region: no-drag; }
 ```
 
 **Step 2: main.tsx 改 import**
@@ -3844,6 +3847,9 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\//.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
+  })
+  win.webContents.on('will-navigate', (e, url) => {
+    if (!(is.dev && process.env.ELECTRON_RENDERER_URL && url.startsWith(process.env.ELECTRON_RENDERER_URL))) e.preventDefault()
   })
   if (is.dev && process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL)
   else void win.loadFile(fileURLToPath(new URL('../renderer/index.html', import.meta.url)))
