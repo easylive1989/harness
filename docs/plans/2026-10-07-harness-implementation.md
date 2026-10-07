@@ -7264,17 +7264,169 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 25：主程序組裝：IPC、自訂區塊 protocol、preload
 
 **Files:**
+- Create: `src/main/ipcGuards.ts`（IPC 邊界的輸入檢查，純函式）
 - Create: `src/main/report/blockHtml.ts`
 - Create: `src/main/ipc.ts`
+- Modify: `src/main/tasks/taskManager.ts`（加 `shutdown()`）
 - Modify: `src/main/index.ts`
-- Modify: `src/preload/index.ts`、`src/preload/index.d.ts`
-- Test: `tests/main/blockHtml.test.ts`
+- Modify: `src/preload/index.ts`、`src/preload/index.d.ts`；移除 `@electron-toolkit/preload` 依賴
+- Test: `tests/main/ipcGuards.test.ts`、`tests/main/blockHtml.test.ts`、`tests/main/taskManager.test.ts`
 
-**Step 1: blockHtml 測試**
+設計重點：
+- renderer 傳進來的任務／repo id 在 IPC 邊界先檢查格式（`/^[A-Za-z0-9_-]{1,64}$/`），再交給會組出 Store 路徑的模組（Store 本身也擋路徑穿越）。報告版本必須是正整數，channel 只能是 `main` 或 `branch:<id>`，`settings:set` 只保留已知欄位。
+- Claude Code 未登入時 `tasks:create` 以偵測的錯誤訊息拒絕（快取狀態未登入時先重新偵測一次）。
+- `ipc.ts` 只做對應與檢查；可測的邏輯放 `ipcGuards.ts`／`blockHtml.ts`（tests/main 不 import electron）。
+- `harness-block://report/<taskId>/<version>/<blockId>`：先用 `parseBlockUrl` 檢查格式，不符就 404；回應帶 CSP header，HTML 內也有同樣的 CSP meta。
+- 關閉 app（`before-quit`）時呼叫 `TaskManager.shutdown()` 中止所有執行，有時間上限，不讓關閉卡住；收尾後用 `app.exit(0)`（由 SIGTERM 觸發、又被 preventDefault 擋下的關閉，在 macOS 上再 `app.quit()` 只會關掉視窗、程序不會結束）。
+
+**Step 1: ipcGuards 測試**
 
 ```ts
+// tests/main/ipcGuards.test.ts
+import { describe, expect, test, vi } from 'vitest'
+import type { ClaudeStatus } from '@shared/types'
+import {
+  assertChannel,
+  assertId,
+  assertVersion,
+  ensureClaudeReady,
+  isSafeId,
+  pickSettingsPatch
+} from '../../src/main/ipcGuards'
+
+describe('id 檢查', () => {
+  test.each(['ab12cd34', 'r1', 'A_b-9', 'x'.repeat(64)])('接受 %s', (id) => {
+    expect(isSafeId(id)).toBe(true)
+    expect(assertId(id, '任務')).toBe(id)
+  })
+
+  test.each(['', '../x', 'a/b', 'a.b', 'a b', 'x'.repeat(65), 1, null, undefined, {}])(
+    '拒絕 %s',
+    (id) => {
+      expect(isSafeId(id)).toBe(false)
+      expect(() => assertId(id, '任務')).toThrow('無效的任務 id')
+    }
+  )
+})
+
+test('報告版本必須是正整數', () => {
+  expect(assertVersion(3)).toBe(3)
+  for (const v of [0, -1, 1.5, '1', NaN, undefined])
+    expect(() => assertVersion(v)).toThrow('無效的報告版本')
+})
+
+test('channel 只接受 main 或 branch:<id>', () => {
+  expect(assertChannel('main')).toBe('main')
+  expect(assertChannel('branch:b1')).toBe('branch:b1')
+  for (const c of ['branch:', 'branch:../x', 'other', 1])
+    expect(() => assertChannel(c)).toThrow('無效的對話頻道')
+})
+
+test('設定只保留已知欄位', () => {
+  expect(pickSettingsPatch({ branchPrefix: 'x/', evil: 1, claudePath: '/bin/claude' })).toEqual({
+    branchPrefix: 'x/',
+    claudePath: '/bin/claude'
+  })
+  expect(() => pickSettingsPatch(null)).toThrow('無效的設定')
+})
+
+describe('ensureClaudeReady', () => {
+  const ok: ClaudeStatus = { found: true, loggedIn: true, path: '/bin/claude' }
+  const out: ClaudeStatus = {
+    found: true,
+    loggedIn: false,
+    error: '尚未登入，請在終端機執行 claude 並完成登入。'
+  }
+
+  test('已登入直接通過，不重新偵測', async () => {
+    const get = vi.fn(async () => ok)
+    await expect(ensureClaudeReady(get)).resolves.toBe(ok)
+    expect(get).toHaveBeenCalledTimes(1)
+  })
+
+  test('快取未登入時重新偵測一次，登入了就通過', async () => {
+    const get = vi.fn(async (refresh?: boolean) => (refresh ? ok : out))
+    await expect(ensureClaudeReady(get)).resolves.toBe(ok)
+    expect(get).toHaveBeenLastCalledWith(true)
+  })
+
+  test('仍未登入就以偵測的錯誤訊息拒絕', async () => {
+    const get = vi.fn(async () => out)
+    await expect(ensureClaudeReady(get)).rejects.toThrow(out.error)
+  })
+})
+```
+
+**Step 2: ipcGuards 實作**
+
+```ts
+// src/main/ipcGuards.ts
+// IPC 邊界的輸入檢查（純函式，不依賴 electron，可單元測試）
+import type { Channel, ClaudeStatus, Settings } from '@shared/types'
+
+const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/
+
+/** 任務／repo id：只允許英數、底線與連字號，避免被拿來組出 Store 以外的路徑 */
+export function isSafeId(value: unknown): value is string {
+  return typeof value === 'string' && SAFE_ID.test(value)
+}
+
+export function assertId(value: unknown, what: string): string {
+  if (!isSafeId(value)) throw new Error(`無效的${what} id`)
+  return value
+}
+
+export function assertVersion(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1)
+    throw new Error('無效的報告版本')
+  return value
+}
+
+export function assertChannel(value: unknown): Channel {
+  if (value === 'main') return value
+  if (typeof value === 'string' && value.startsWith('branch:')) {
+    if (isSafeId(value.slice('branch:'.length))) return value as Channel
+  }
+  throw new Error('無效的對話頻道')
+}
+
+const SETTINGS_KEYS: (keyof Settings)[] = [
+  'defaultModel',
+  'worktreeRoot',
+  'branchPrefix',
+  'alwaysAllowedCommands',
+  'loadProjectSettings',
+  'claudePath'
+]
+
+/** 只保留已知的設定欄位，其他欄位不寫進 settings.json */
+export function pickSettingsPatch(patch: unknown): Partial<Settings> {
+  if (!patch || typeof patch !== 'object') throw new Error('無效的設定')
+  const out: Record<string, unknown> = {}
+  for (const k of SETTINGS_KEYS) if (k in patch) out[k] = (patch as Record<string, unknown>)[k]
+  return out as Partial<Settings>
+}
+
+/**
+ * 開始任務前確認 Claude Code 已登入：快取的狀態未登入時重新偵測一次
+ * （使用者可能在 app 開著時才去終端機登入），仍未登入就以偵測的錯誤訊息拒絕。
+ */
+export async function ensureClaudeReady(
+  getStatus: (refresh?: boolean) => Promise<ClaudeStatus>
+): Promise<ClaudeStatus> {
+  let s = await getStatus()
+  if (!s.loggedIn) s = await getStatus(true)
+  if (!s.loggedIn) throw new Error(s.error ?? '尚未登入，請在終端機執行 claude 並完成登入。')
+  return s
+}
+```
+
+**Step 3: blockHtml 測試**
+
+```ts
+// tests/main/blockHtml.test.ts
 import { expect, test } from 'vitest'
-import { BLOCK_CSP, wrapBlockHtml } from '../../src/main/report/blockHtml'
+import { BLOCK_CSP, parseBlockUrl, wrapBlockHtml } from '../../src/main/report/blockHtml'
 
 test('包住區塊 HTML 並回報高度', () => {
   const html = wrapBlockHtml({ id: 'state-machine', title: 't', html: '<div id="x">hi</div>' })
@@ -7282,41 +7434,199 @@ test('包住區塊 HTML 並回報高度', () => {
   expect(html).toContain('"harness-block-height"')
   expect(html).toContain('"state-machine"')
   expect(html.startsWith('<!doctype html>')).toBe(true)
+  expect(html).toContain(`content="${BLOCK_CSP}"`)
+})
+
+test('id 裡的 < 不會結束 script', () => {
+  const html = wrapBlockHtml({ id: '</script>', title: 't', html: '' })
+  expect(html).not.toContain('"</script>"')
 })
 
 test('CSP 禁止網路', () => {
   expect(BLOCK_CSP).toContain("default-src 'none'")
   expect(BLOCK_CSP).not.toContain('http')
 })
+
+test('解析區塊網址', () => {
+  expect(parseBlockUrl('harness-block://report/ab12cd34/2/state-machine')).toEqual({
+    taskId: 'ab12cd34',
+    version: 2,
+    blockId: 'state-machine'
+  })
+})
+
+test.each([
+  'harness-block://report/ab12/0/x',
+  'harness-block://report/ab12/1.5/x',
+  'harness-block://report/ab12/-1/x',
+  'harness-block://report/ab12/abc/x',
+  'harness-block://report/..%2f..%2fetc/1/x',
+  'harness-block://report/ab12/1/..',
+  'harness-block://report/ab12/1/X%20Y',
+  'harness-block://report/ab12/1',
+  'harness-block://report/ab12/1/x/extra',
+  'harness-block://other/ab12/1/x',
+  'https://report/ab12/1/x',
+  'not a url'
+])('拒絕不合格式的網址 %s', (url) => {
+  expect(parseBlockUrl(url)).toBeNull()
+})
 ```
 
-**Step 2: blockHtml 實作**
+**Step 4: blockHtml 實作**
 
 ```ts
 // src/main/report/blockHtml.ts
-export const BLOCK_CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:"
+import { isSafeId } from '../ipcGuards'
+
+/** 自訂區塊只能用 inline 的 style／script 與 data: 圖片字型，不能連網、不能送表單 */
+export const BLOCK_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'"
 
 export function wrapBlockHtml(block: { id: string; title: string; html: string }): string {
-  const id = JSON.stringify(block.id)
+  // 避免 id 裡的 `</script>` 提早結束 script（id 已經過 zod 檢查，這裡再保險一次）
+  const id = JSON.stringify(block.id).replace(/</g, '\\u003c')
   return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="${BLOCK_CSP}">
 <style>html,body{margin:0;background:transparent;color:#1c2430;font-family:'Noto Sans TC',-apple-system,'PingFang TC',sans-serif;font-size:14px;line-height:1.6}</style>
 </head><body>${block.html}
 <script>(function(){var post=function(){parent.postMessage({type:"harness-block-height",id:${id},height:document.documentElement.scrollHeight},"*")};new ResizeObserver(post).observe(document.documentElement);addEventListener("load",post);post()})()</script>
 </body></html>`
 }
+
+const BLOCK_ID = /^[a-z0-9_-]{1,128}$/
+
+/** 解析 `harness-block://report/<taskId>/<version>/<blockId>`，格式不符回傳 null */
+export function parseBlockUrl(
+  url: string
+): { taskId: string; version: number; blockId: string } | null {
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return null
+  }
+  if (u.protocol !== 'harness-block:' || u.hostname !== 'report') return null
+  const parts = u.pathname.split('/').filter(Boolean)
+  if (parts.length !== 3) return null
+  const [taskId, v, blockId] = parts
+  if (!isSafeId(taskId) || !BLOCK_ID.test(blockId) || !/^[1-9][0-9]{0,8}$/.test(v)) return null
+  return { taskId, version: Number(v), blockId }
+}
 ```
 
-**Step 3: ipc.ts（把 IpcApi 的每個 channel 對應到實作）**
+**Step 5: TaskManager.shutdown（測試加在 `tests/main/taskManager.test.ts` 最後）**
+
+```ts
+describe('TaskManager：關閉 app', () => {
+  test('shutdown 中止所有執行、拒絕核准，主線標為中斷，之後拒絕新操作', async () => {
+    const { tm, claude, id, repo } = await toImplementing()
+    let result: PermissionResult | null | undefined
+    claude.script = async () => {
+      await new Promise(() => undefined) // 一直執行，直到被中止
+    }
+    await tm.openBranch(id, { title: '查資料' })
+    await until(() => tm.get(id).branches[0]?.running === true)
+    claude.script = async ({ options }) => {
+      result = await options.canUseTool!('Bash', { command: 'npm test' }, signalOf())
+      await new Promise(() => undefined)
+    }
+    await tm.send(id, 'main', '開始')
+    await until(() => !!tm.get(id).pendingPermission)
+
+    await tm.shutdown(500)
+    expect(result).toMatchObject({ behavior: 'deny' })
+    const t = tm.get(id)
+    expect(t.runState).toBe('interrupted')
+    expect(t.pendingPermission).toBeUndefined()
+    expect(t.branches[0].running).toBe(false)
+    await expect(tm.send(id, 'main', '再一則')).rejects.toThrow('正在關閉')
+    await expect(
+      tm.createTask({ repoId: 'r1', request: 'x', baseBranch: 'main', model: 'claude-opus-5-5' })
+    ).rejects.toThrow('正在關閉')
+    // 寫進磁碟的狀態也是中斷，下次啟動可以「繼續」
+    expect((await repo.listTasks()).find((x) => x.id === id)?.runState).toBe('interrupted')
+  })
+
+  test('shutdown 不會被不理會 abort 的執行卡住', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.afterResult = 'hang_ignoring_abort'
+    await tm.send(id, 'main', '第一輪')
+    await until(() => claude.results === 2)
+    const started = Date.now()
+    await tm.shutdown(100)
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(tm.get(id).runState).toBe('interrupted')
+    claude.releaseHang()
+  })
+
+  test('沒有執行時 shutdown 立即結束，閒置任務狀態不變', async () => {
+    const { tm, create } = await setup()
+    const id = await create()
+    await tm.shutdown(100)
+    expect(tm.get(id).runState).toBe('idle')
+  })
+})
+```
+
+實作：TaskManager 加 `private shuttingDown = false`；`assertCanSend` 與 `createTask` 開頭在關閉中時丟出 `new Error('Harness 正在關閉')`；在 `stop()` 之後加：
+
+```ts
+  /**
+   * 關閉 app 前呼叫：之後拒絕新任務與新訊息，拒絕等待中的核准、中止所有執行。
+   * 等執行結束與狀態寫入各最多 timeoutMs，不讓關閉卡住；被中止的主線標為已中斷，下次啟動可「繼續」。
+   */
+  async shutdown(timeoutMs = this.abortGraceMs) {
+    this.shuttingDown = true
+    for (const w of [...this.permissionWaiters.values()])
+      w.resolve({ allow: false, message: 'Harness 正在關閉' })
+    const runs = [...this.runs.entries()]
+    runs.forEach(([, r]) => r.abort())
+    await settlesWithin(Promise.all(runs.map(([, r]) => r.done.catch(() => undefined))), timeoutMs)
+    const taskIds = new Set(runs.map(([key]) => key.slice(0, key.indexOf('|'))))
+    const marks = [...taskIds].map((taskId) =>
+      // 排在 onRunDone 的收尾之後，才不會被它改回 idle
+      this.enqueue(taskId, () =>
+        this.update(taskId, (t) => {
+          const mainAborted = runs.some(([key]) => key === runKey(taskId, 'main'))
+          if (
+            mainAborted &&
+            (t.runState === 'idle' ||
+              t.runState === 'running' ||
+              t.runState === 'waiting_permission')
+          )
+            t.runState = 'interrupted'
+          t.branches.forEach((b) => {
+            b.running = false
+          })
+          this.syncPermission(t)
+        })
+      )
+    )
+    await settlesWithin(Promise.all(marks), timeoutMs)
+  }
+```
+
+**Step 6: ipc.ts（把 IpcApi 的每個 channel 對應到實作）**
 
 ```ts
 // src/main/ipc.ts
+// 把 IpcApi 的每個 channel 對應到實作；這裡只做對應與輸入檢查，邏輯放在各模組
 import { randomUUID } from 'node:crypto'
-import { basename } from 'node:path'
 import { writeFile } from 'node:fs/promises'
-import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import type { IpcApi, IpcChannel } from '@shared/ipc'
+import { basename } from 'node:path'
+import { type BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import type { CreateTaskInput, IpcApi, IpcChannel } from '@shared/ipc'
 import type { ClaudeStatus, Repo } from '@shared/types'
 import type { GitService } from './git/gitService'
+import {
+  assertChannel,
+  assertId,
+  assertVersion,
+  ensureClaudeReady,
+  pickSettingsPatch
+} from './ipcGuards'
 import type { Repository } from './store/repository'
 import type { TaskManager } from './tasks/taskManager'
 
@@ -7329,13 +7639,20 @@ export interface IpcDeps {
   emitRepos: (repos: Repo[]) => void
 }
 
-type Handlers = { [C in IpcChannel]: (...args: Parameters<IpcApi[C]>) => ReturnType<IpcApi[C]> | Promise<ReturnType<IpcApi[C]>> }
+type Handlers = {
+  [C in IpcChannel]: (
+    ...args: Parameters<IpcApi[C]>
+  ) => ReturnType<IpcApi[C]> | Promise<ReturnType<IpcApi[C]>>
+}
+
+const task = (id: unknown) => assertId(id, '任務')
 
 export function registerIpc(d: IpcDeps) {
   const handlers: Handlers = {
-    'claude:status': (refresh) => d.claudeStatus(refresh),
+    'claude:status': (refresh) => d.claudeStatus(refresh === true),
     'settings:get': () => d.repo.getSettings(),
-    'settings:set': async (patch) => {
+    'settings:set': async (raw) => {
+      const patch = pickSettingsPatch(raw)
       const next = { ...(await d.repo.getSettings()), ...patch }
       await d.repo.saveSettings(next)
       if ('claudePath' in patch) await d.claudeStatus(true)
@@ -7344,62 +7661,89 @@ export function registerIpc(d: IpcDeps) {
     'repos:list': () => d.repo.listRepos(),
     'repos:pick': async () => {
       const w = d.win()
-      const res = w ? await dialog.showOpenDialog(w, { properties: ['openDirectory'], title: '選擇 git repo' }) : { canceled: true, filePaths: [] }
+      if (!w) return null
+      const res = await dialog.showOpenDialog(w, {
+        properties: ['openDirectory'],
+        title: '選擇 git repo'
+      })
       if (res.canceled || !res.filePaths[0]) return null
       if (!(await d.git.isRepo(res.filePaths[0]))) throw new Error('這個資料夾不是 git repo')
       const root = await d.git.repoRoot(res.filePaths[0])
       const repos = await d.repo.listRepos()
       const existing = repos.find((r) => r.path === root)
       if (existing) return existing
-      const repo: Repo = { id: randomUUID().slice(0, 8), name: basename(root), path: root, addedAt: new Date().toISOString() }
+      const repo: Repo = {
+        id: randomUUID().slice(0, 8),
+        name: basename(root),
+        path: root,
+        addedAt: new Date().toISOString()
+      }
       await d.repo.saveRepos([...repos, repo])
       d.emitRepos([...repos, repo])
       return repo
     },
     'repos:branches': async (repoId) => {
+      assertId(repoId, 'repo')
       const r = (await d.repo.listRepos()).find((x) => x.id === repoId)
       if (!r) throw new Error('找不到 repo')
       return { branches: await d.git.branches(r.path), current: await d.git.currentBranch(r.path) }
     },
     'tasks:list': () => d.tasks.list(),
-    'tasks:create': (input) => d.tasks.createTask(input),
-    'tasks:timeline': (taskId) => d.tasks.timeline(taskId),
-    'tasks:send': (taskId, channel, text) => d.tasks.send(taskId, channel, text),
-    'tasks:answer': (taskId, qid, answer) => d.tasks.answerQuestion(taskId, qid, answer),
-    'tasks:counter': (taskId, qid, text) => d.tasks.counterQuestion(taskId, qid, text),
-    'tasks:changedFiles': (taskId) => d.tasks.changedFiles(taskId),
-    'branch:open': (taskId, input) => d.tasks.openBranch(taskId, input),
-    'branch:conclude': (taskId, branchId) => d.tasks.concludeBranch(taskId, branchId),
-    'branch:confirm': (taskId, branchId, edited) => d.tasks.confirmBranch(taskId, branchId, edited),
-    'spec:approve': (taskId) => d.tasks.approveSpec(taskId),
-    'spec:requestChanges': (taskId, text) => d.tasks.requestSpecChanges(taskId, text),
-    'run:stop': (taskId, channel) => d.tasks.stop(taskId, channel),
-    'run:resume': (taskId) => d.tasks.resume(taskId),
-    'permission:resolve': (taskId, requestId, decision) => d.tasks.resolvePermission(taskId, requestId, decision),
-    'report:get': (taskId, version) => d.tasks.getReport(taskId, version),
-    'report:feedback': (taskId, items, overall) => d.tasks.submitReportFeedback(taskId, items, overall),
+    'tasks:create': async (input: CreateTaskInput) => {
+      assertId(input?.repoId, 'repo')
+      await ensureClaudeReady(d.claudeStatus)
+      return d.tasks.createTask(input)
+    },
+    'tasks:timeline': (taskId) => d.tasks.timeline(task(taskId)),
+    'tasks:send': (taskId, channel, text) =>
+      d.tasks.send(task(taskId), assertChannel(channel), text),
+    'tasks:answer': (taskId, qid, answer) => d.tasks.answerQuestion(task(taskId), qid, answer),
+    'tasks:counter': (taskId, qid, text) => d.tasks.counterQuestion(task(taskId), qid, text),
+    'tasks:changedFiles': (taskId) => d.tasks.changedFiles(task(taskId)),
+    'branch:open': (taskId, input) => d.tasks.openBranch(task(taskId), input),
+    'branch:conclude': (taskId, branchId) => d.tasks.concludeBranch(task(taskId), branchId),
+    'branch:confirm': (taskId, branchId, edited) =>
+      d.tasks.confirmBranch(task(taskId), branchId, edited),
+    'spec:approve': (taskId) => d.tasks.approveSpec(task(taskId)),
+    'spec:requestChanges': (taskId, text) => d.tasks.requestSpecChanges(task(taskId), text),
+    'run:stop': (taskId, channel) => d.tasks.stop(task(taskId), assertChannel(channel)),
+    'run:resume': (taskId) => d.tasks.resume(task(taskId)),
+    'permission:resolve': (taskId, requestId, decision) =>
+      d.tasks.resolvePermission(task(taskId), requestId, decision),
+    'report:get': (taskId, version) => d.tasks.getReport(task(taskId), assertVersion(version)),
+    'report:feedback': (taskId, items, overall) =>
+      d.tasks.submitReportFeedback(task(taskId), items, overall),
     'report:saveHtml': async (suggestedName, html) => {
       const w = d.win()
       if (!w) return null
-      const res = await dialog.showSaveDialog(w, { defaultPath: suggestedName, filters: [{ name: 'HTML', extensions: ['html'] }] })
+      const res = await dialog.showSaveDialog(w, {
+        defaultPath: suggestedName,
+        filters: [{ name: 'HTML', extensions: ['html'] }]
+      })
       if (res.canceled || !res.filePath) return null
       await writeFile(res.filePath, html)
       return res.filePath
     },
-    'finish:pr': (taskId) => d.tasks.createPullRequest(taskId),
-    'finish:merge': (taskId) => d.tasks.merge(taskId),
-    'finish:discard': (taskId) => d.tasks.discard(taskId),
-    'shell:showInFolder': (path) => { shell.showItemInFolder(path) },
-    'shell:openExternal': async (url) => { if (/^https:\/\//.test(url)) await shell.openExternal(url) }
+    'finish:pr': (taskId) => d.tasks.createPullRequest(task(taskId)),
+    'finish:merge': (taskId) => d.tasks.merge(task(taskId)),
+    'finish:discard': (taskId) => d.tasks.discard(task(taskId)),
+    'shell:showInFolder': (path) => {
+      if (typeof path === 'string' && path) shell.showItemInFolder(path)
+    },
+    'shell:openExternal': async (url) => {
+      if (typeof url === 'string' && /^https:\/\//.test(url)) await shell.openExternal(url)
+    }
   }
 
   for (const [channel, fn] of Object.entries(handlers)) {
-    ipcMain.handle(channel, async (_e, ...args: unknown[]) => (fn as (...a: unknown[]) => unknown)(...args))
+    ipcMain.handle(channel, async (_e, ...args: unknown[]) =>
+      (fn as (...a: unknown[]) => unknown)(...args)
+    )
   }
 }
 ```
 
-**Step 4: main/index.ts**
+**Step 7: main/index.ts**
 
 ```ts
 // src/main/index.ts
@@ -7414,32 +7758,58 @@ import type { QueryFn } from './agent/agentRun'
 import { applyLoginShellPath, detectClaude, execCapture } from './claude/detect'
 import { GitService } from './git/gitService'
 import { registerIpc } from './ipc'
-import { BLOCK_CSP, wrapBlockHtml } from './report/blockHtml'
+import { BLOCK_CSP, parseBlockUrl, wrapBlockHtml } from './report/blockHtml'
 import { Repository } from './store/repository'
 import { Store } from './store/store'
 import { TaskManager } from './tasks/taskManager'
 import { createHarnessServer } from './tools/harnessTools'
 import { runVerification } from './verify/verifyRunner'
 
-protocol.registerSchemesAsPrivileged([{ scheme: 'harness-block', privileges: { standard: true, secure: true } }])
+// 自訂區塊用獨立的 scheme：iframe 不和 renderer 同源，也拿不到 preload 的 bridge
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'harness-block', privileges: { standard: true, secure: true } }
+])
+
+/** 關閉 app 時等執行停下來的上限（TaskManager 內每個階段各自也有上限） */
+const SHUTDOWN_TIMEOUT_MS = 3000
 
 let mainWindow: BrowserWindow | null = null
+let tasks: TaskManager | null = null
+
+const devUrl = () => (is.dev ? process.env.ELECTRON_RENDERER_URL : undefined)
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 1440, height: 920, minWidth: 1100, minHeight: 700, show: false,
-    titleBarStyle: 'hiddenInset', backgroundColor: '#eef0f3',
-    webPreferences: { preload: fileURLToPath(new URL('../preload/index.cjs', import.meta.url)), sandbox: true, contextIsolation: true }
+    width: 1440,
+    height: 920,
+    minWidth: 1100,
+    minHeight: 700,
+    show: false,
+    autoHideMenuBar: true,
+    titleBarStyle: 'hiddenInset',
+    backgroundColor: '#eef0f3',
+    webPreferences: {
+      preload: fileURLToPath(new URL('../preload/index.cjs', import.meta.url)),
+      sandbox: true,
+      contextIsolation: true
+    }
   })
   win.on('ready-to-show', () => win.show())
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null
+  })
+  // 新視窗一律拒絕；https 連結交給系統瀏覽器
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\//.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
+  // 主視窗不離開 app 本身（開發時允許 Vite 的 HMR 重新載入）
   win.webContents.on('will-navigate', (e, url) => {
-    if (!(is.dev && process.env.ELECTRON_RENDERER_URL && url.startsWith(process.env.ELECTRON_RENDERER_URL))) e.preventDefault()
+    const dev = devUrl()
+    if (!(dev && url.startsWith(dev))) e.preventDefault()
   })
-  if (is.dev && process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL)
+  const dev = devUrl()
+  if (dev) void win.loadURL(dev)
   else void win.loadFile(fileURLToPath(new URL('../renderer/index.html', import.meta.url)))
   return win
 }
@@ -7447,51 +7817,95 @@ function createWindow() {
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.harness.app')
   app.on('browser-window-created', (_, w) => optimizer.watchWindowShortcuts(w))
+  // 必須在 detectClaude 之前：從 Finder 啟動時 PATH 不含 homebrew / nvm
   await applyLoginShellPath()
 
-  const repo = new Repository(new Store(join(app.getPath('userData'), 'harness')), app.getPath('home'))
+  const repo = new Repository(
+    new Store(join(app.getPath('userData'), 'harness')),
+    app.getPath('home')
+  )
   const git = new GitService()
   let claude: ClaudeStatus = await detectClaude(execCapture, (await repo.getSettings()).claudePath)
   const claudeStatus = async (refresh?: boolean) => {
     if (refresh) claude = await detectClaude(execCapture, (await repo.getSettings()).claudePath)
     return claude
   }
-  const emit = (e: AppEvent) => mainWindow?.webContents.send(APP_EVENT_CHANNEL, e)
+  const emit = (e: AppEvent) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(APP_EVENT_CHANNEL, e)
+  }
 
-  const tasks = new TaskManager({
-    repo, git, emit,
+  const tm = new TaskManager({
+    repo,
+    git,
+    emit,
     queryFn: query as unknown as QueryFn,
     createToolServer: createHarnessServer,
     getClaudePath: () => claude.path,
     verify: runVerification
   })
-  await tasks.init()
+  await tm.init()
+  tasks = tm
 
   protocol.handle('harness-block', async (req) => {
-    const [taskId, version, blockId] = new URL(req.url).pathname.split('/').filter(Boolean)
+    const notFound = () => new Response('not found', { status: 404 })
+    const target = parseBlockUrl(req.url)
+    if (!target) return notFound()
     try {
-      const report = await tasks.getReport(taskId, Number(version))
-      const block = report.input.custom_blocks.find((b) => b.id === blockId)
-      if (!block) return new Response('not found', { status: 404 })
-      return new Response(wrapBlockHtml(block), { headers: { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': BLOCK_CSP } })
+      const report = await tm.getReport(target.taskId, target.version)
+      const block = report.input.custom_blocks.find((b) => b.id === target.blockId)
+      if (!block) return notFound()
+      return new Response(wrapBlockHtml(block), {
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+          'content-security-policy': BLOCK_CSP,
+          'x-content-type-options': 'nosniff'
+        }
+      })
     } catch {
-      return new Response('not found', { status: 404 })
+      return notFound()
     }
   })
 
-  registerIpc({ win: () => mainWindow, repo, git, tasks, claudeStatus, emitRepos: (repos) => emit({ type: 'repos', repos }) })
+  registerIpc({
+    win: () => mainWindow,
+    repo,
+    git,
+    tasks: tm,
+    claudeStatus,
+    emitRepos: (repos) => emit({ type: 'repos', repos })
+  })
 
   mainWindow = createWindow()
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow() })
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow()
+  })
 })
 
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
+// 關閉前中止所有執行（有時間上限，不讓關閉卡住）；被中止的任務標為已中斷，下次啟動可「繼續」。
+// 收尾後用 app.exit 而不是再呼叫 app.quit：由 SIGTERM 觸發、又被 preventDefault 擋下的關閉，
+// 在 macOS 上再 app.quit() 只會關掉視窗、程序不會結束。
+let quitting = false
+app.on('before-quit', (e) => {
+  if (!tasks) return
+  e.preventDefault()
+  if (quitting) return
+  quitting = true
+  const hardLimit = new Promise((r) => setTimeout(r, SHUTDOWN_TIMEOUT_MS))
+  void Promise.race([tasks.shutdown().catch((err) => console.error(err)), hardLimit]).finally(() =>
+    app.exit(0)
+  )
+})
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit()
+})
 ```
 
-**Step 5: preload**
+**Step 8: preload**
 
 ```ts
 // src/preload/index.ts
+// sandbox 下的 preload：只能 import electron 與 @shared/*（會被打包成單一 CJS 檔）
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { APP_EVENT_CHANNEL, type AppEvent, type HarnessBridge } from '@shared/ipc'
 
@@ -7500,7 +7914,9 @@ const bridge: HarnessBridge = {
   onEvent: (cb) => {
     const listener = (_e: IpcRendererEvent, ev: AppEvent) => cb(ev)
     ipcRenderer.on(APP_EVENT_CHANNEL, listener)
-    return () => ipcRenderer.removeListener(APP_EVENT_CHANNEL, listener)
+    return () => {
+      ipcRenderer.removeListener(APP_EVENT_CHANNEL, listener)
+    }
   }
 }
 
@@ -7512,23 +7928,27 @@ contextBridge.exposeInMainWorld('harness', bridge)
 import type { HarnessBridge } from '@shared/ipc'
 
 declare global {
-  interface Window { harness: HarnessBridge }
+  interface Window {
+    harness: HarnessBridge
+  }
 }
 export {}
 ```
 
-注意 preload 是 sandbox 下的 CJS，`@shared/ipc` 只用到常數與型別，會被打包進 preload，沒問題。
+注意 preload 是 sandbox 下的 CJS，`@shared/ipc` 只用到常數與型別，會被打包進 preload（`out/preload/index.cjs` 只 `require("electron")`）。模板的 `@electron-toolkit/preload` 不再使用：`npm uninstall @electron-toolkit/preload`。
 
-**Step 6: 驗證**
+**Step 9: 驗證**
 
-Run: `npx vitest run tests/main/blockHtml.test.ts` → 2 passed
-Run: `npm run typecheck` → PASS
-Run: `npm run dev` → 視窗正常開啟；在 DevTools Console 執行 `await window.harness.invoke('claude:status')` → 回傳 `{ found: true, loggedIn: true, subscriptionType: 'max', ... }`；`await window.harness.invoke('tasks:list')` → `[]`
+Run: `npx vitest run tests/main/ipcGuards.test.ts tests/main/blockHtml.test.ts` → 36 passed
+Run: `npx vitest run tests/main/taskManager.test.ts` → 46 passed（含 3 個 shutdown 測試）
+Run: `npm test`、`npm run typecheck`、`npm run lint`（0 errors）
+Run: `npx electron-vite build` → `out/preload/index.cjs` 只 require `electron`
+Run: `npm run dev` → 視窗正常開啟；在 DevTools Console 執行 `await window.harness.invoke('claude:status')` → 回傳 `{ found: true, loggedIn: true, subscriptionType: 'max', ... }`；`await window.harness.invoke('tasks:list')` → `[]`；`await window.harness.invoke('tasks:timeline', '../x')` → 拒絕（無效的任務 id）；`window.electron` 為 `undefined`
 
-**Step 7: Commit**
+**Step 10: Commit**
 
 ```bash
-git add src/main src/preload tests/main/blockHtml.test.ts
+git add package.json package-lock.json src/main src/preload tests/main docs/plans
 git commit -m "feat(main): wire IPC, sandboxed custom block protocol and preload bridge
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
