@@ -1,27 +1,7 @@
 // src/main/report/blockHtml.ts
 import { isSafeId } from '../ipcGuards'
 
-/** 自訂區塊只能用 inline 的 style／script 與 data: 圖片字型，不能連網、不能送表單 */
-export const BLOCK_CSP =
-  "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'"
-
-const escapeHtml = (s: string) =>
-  s.replace(
-    /[&<>"']/g,
-    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!
-  )
-
-export function wrapBlockHtml(block: { id: string; title: string; html: string }): string {
-  // 避免 id 裡的 `</script>` 提早結束 script（id 已經過 zod 檢查，這裡再保險一次）
-  const id = JSON.stringify(block.id).replace(/</g, '\\u003c')
-  return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="${BLOCK_CSP}">
-<title>${escapeHtml(block.title)}</title>
-<style>html,body{margin:0;background:transparent;color:#1c2430;font-family:'Noto Sans TC',-apple-system,'PingFang TC',sans-serif;font-size:14px;line-height:1.6}</style>
-</head><body>${block.html}
-<script>(function(){var post=function(){parent.postMessage({type:"harness-block-height",id:${id},height:document.documentElement.scrollHeight},"*")};new ResizeObserver(post).observe(document.documentElement);addEventListener("load",post);post()})()</script>
-</body></html>`
-}
+export { BLOCK_CSP, wrapBlockHtml } from '@shared/blockHtml'
 
 /** 與 @shared/report 的 custom block id 規則一致 */
 const BLOCK_ID = /^[a-z0-9_-]{1,64}$/

@@ -11,6 +11,13 @@ test('包住區塊 HTML 並回報高度', () => {
   expect(html).toContain(`content="${BLOCK_CSP}"`)
 })
 
+test('回報包住內容的容器高度（不是 scrollHeight：那至少是 iframe 目前的高度，縮不回來）', () => {
+  const html = wrapBlockHtml({ id: 'a', title: 't', html: '<p>x</p>' })
+  expect(html).toContain('<div id="harness-block-root" style="display:flow-root"><p>x</p></div>')
+  expect(html).toContain('observe(root)')
+  expect(html).not.toContain('scrollHeight')
+})
+
 test('標題轉義後放進 <title>', () => {
   const html = wrapBlockHtml({ id: 'x', title: '狀態機 <script>&"\'', html: '' })
   expect(html).toContain('<title>狀態機 &lt;script&gt;&amp;&quot;&#39;</title>')
