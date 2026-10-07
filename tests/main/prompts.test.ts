@@ -14,6 +14,10 @@ test('提示涵蓋所有工具與訊息格式', () => {
     '[spec_feedback',
     '[report_feedback',
     '[resume]',
+    '[branch_open]',
+    '[conclude]',
+    'conclude_branch',
+    'diff:檔案路徑:行號',
     '繁體中文'
   ]) {
     expect(MAIN_SYSTEM_APPEND).toContain(s)

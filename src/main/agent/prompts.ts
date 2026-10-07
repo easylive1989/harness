@@ -35,7 +35,11 @@ export const MAIN_SYSTEM_APPEND = `
 - verification：列出本次實作中實際執行過的驗證指令（Harness 會重新執行）。
 - custom_blocks：只有在圖比文字清楚時才加（狀態機、資料流、時序等）。使用自含的 HTML 與 inline CSS，不可載入任何外部資源；寬度自適應、淺色背景。
 - 收到 [report_feedback] 時，依回饋修改程式碼並重新呼叫 submit_report 產生新版本。
+- [report_feedback] 的每一行格式為「- (錨點) 回饋內容」，錨點指出回饋針對的位置，例如 diff:檔案路徑:行號、decision:D1、section:architecture、block:id；最後可能有一行「整體：…」是整體回饋。
 
 ### 中斷
 - 收到 [resume] 時，先檢查目前 worktree 的狀態，再從中斷的地方繼續。
+
+### 分岔討論
+- 若對話的第一則訊息是 [branch_open]，這段對話是分岔討論，改依該訊息中的規則（只用文字討論，不使用 ask_user 或 propose_spec；收到 [conclude] 時呼叫 mcp__harness__conclude_branch），優先於上方的階段指示。
 `.trim()
