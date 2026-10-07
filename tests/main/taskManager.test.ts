@@ -844,8 +844,25 @@ describe('TaskManager：上一段執行卡住', () => {
     await expect(tm.send(id, 'main', '第二輪')).rejects.toThrow('上一輪尚未結束，請先停止')
     expect(claude.calls).toHaveLength(2)
     expect((await tm.timeline(id)).map((e) => e.text)).not.toContain('第二輪')
-    claude.releaseHang()
+    // 卡住的執行已被丟掉：狀態回到 idle，whenIdle 不再等它，下一則訊息開新的一輪
+    expect(tm.get(id).runState).toBe('idle')
     await tm.whenIdle(id)
+    await tm.send(id, 'main', '第三輪')
+    await tm.whenIdle(id)
+    expect(claude.calls.map((c) => c.prompt).at(-1)).toBe('第三輪')
+    claude.releaseHang()
+  })
+
+  test('丟棄時不理會 abort 的執行不會卡住', async () => {
+    const { tm, claude, create } = await setup({ prevRunTimeoutMs: 50 })
+    const id = await create()
+    claude.afterResult = 'hang_ignoring_abort'
+    await tm.send(id, 'main', '第一輪')
+    await until(() => claude.results === 2)
+    await tm.discard(id)
+    expect(tm.get(id)).toMatchObject({ status: 'discarded', runState: 'idle' })
+    await tm.whenIdle(id)
+    claude.releaseHang()
   })
 
   test('等上一段執行期間任務被丟棄，就不再開新的一輪', async () => {
@@ -863,6 +880,94 @@ describe('TaskManager：上一段執行卡住', () => {
     await tm.discard(id)
     expect(await sending).toContain('收尾')
     expect(claude.calls).toHaveLength(2)
+    await tm.whenIdle(id)
+  })
+})
+
+describe('TaskManager：審查補強', () => {
+  test('分岔與決策 id 取現有最大編號 + 1', async () => {
+    const { tm, claude, repo } = await setup()
+    const { makeTask } = await import('../fixtures/task')
+    await repo.saveTask(
+      makeTask({
+        id: 'x',
+        mainSessionId: 's1',
+        branches: [
+          {
+            id: 'b2',
+            title: '舊分岔',
+            status: 'concluding',
+            running: false,
+            sessionId: 'f2',
+            conclusion: { decision: '用 Redis', rationale: '多台', deferred: [] },
+            createdAt: 'x'
+          }
+        ],
+        decisions: [{ id: 'd2', text: '舊決策', source: { type: 'question', ref: 'q1' } }]
+      })
+    )
+    await tm.init()
+    claude.script = async () => []
+    const b = await tm.openBranch('x', { title: '新分岔' })
+    expect(b.id).toBe('b3')
+    await tm.whenIdle('x')
+    await tm.confirmBranch('x', 'b2')
+    await tm.whenIdle('x')
+    expect(tm.get('x').decisions.map((d) => d.id)).toEqual(['d2', 'd3'])
+  })
+
+  test('submit_report 存檔失敗時不會卡在 finalizing', async () => {
+    const { tm, claude, repo, id } = await toImplementing()
+    const save = repo.saveTask.bind(repo)
+    const spy = vi.spyOn(repo, 'saveTask').mockImplementation(async (t) => {
+      if (t.runState === 'finalizing') throw new Error('disk full')
+      return save(t)
+    })
+    let error: unknown
+    claude.script = async ({ sink }) => {
+      await Promise.resolve(sink.submitReport(sampleReport)).catch((e: unknown) => {
+        error = e
+      })
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    spy.mockRestore()
+    expect(String(error)).toContain('disk full')
+    expect(tm.get(id)).toMatchObject({ status: 'implementing', runState: 'idle' })
+    // 沒有殘留的整理中狀態：主線可以繼續送訊息
+    await tm.send(id, 'main', '再試一次')
+    await tm.whenIdle(id)
+  })
+
+  test('插話前再檢查一次：排隊期間開始收尾就拒絕', async () => {
+    const { tm, claude, id } = await toImplementing()
+    claude.script = async () => {
+      await new Promise(() => undefined) // 一直執行，直到被停止
+    }
+    await tm.send(id, 'main', '開始')
+    await until(() => tm.get(id).runState === 'running')
+    // 白箱：佔住主線的 turn lock，讓下一則訊息排隊
+    const internals = tm as unknown as {
+      chainOn: (
+        m: Map<string, Promise<unknown>>,
+        k: string,
+        fn: () => Promise<void>
+      ) => Promise<void>
+      turnLocks: Map<string, Promise<unknown>>
+      finishing: Set<string>
+    }
+    const gate = deferred()
+    void internals.chainOn(internals.turnLocks, `${id}|main`, () => gate.promise)
+    const sending = tm.send(id, 'main', '插話').then(
+      () => 'sent',
+      (e: unknown) => String(e)
+    )
+    internals.finishing.add(id)
+    gate.resolve()
+    expect(await sending).toContain('收尾')
+    expect((await tm.timeline(id)).map((e) => e.text)).not.toContain('插話')
+    internals.finishing.delete(id)
+    await tm.stop(id, 'main')
     await tm.whenIdle(id)
   })
 })

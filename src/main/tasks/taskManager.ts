@@ -70,6 +70,14 @@ const runKey = (taskId: string, channel: Channel) => `${taskId}|${channel}`
 const branchIdOf = (channel: Channel) =>
   channel.startsWith('branch:') ? channel.slice('branch:'.length) : undefined
 const errorMessage = (e: unknown) => (e instanceof Error ? e.message : String(e))
+/** 取 `<prefix><數字>` 形式的 id 中最大的編號 + 1（刪除或還原過也不會撞號） */
+function nextId(prefix: string, ids: string[]): string {
+  const max = ids.reduce((m, id) => {
+    const n = id.startsWith(prefix) ? Number(id.slice(prefix.length)) : NaN
+    return Number.isInteger(n) && n > m ? n : m
+  }, 0)
+  return `${prefix}${max + 1}`
+}
 const logError = (what: string) => (e: unknown) => console.error(`[TaskManager] ${what}`, e)
 
 /** p 在 ms 內結束（成功或失敗）回傳 true，逾時回傳 false */
@@ -112,11 +120,14 @@ export class TaskManager {
   private readonly now: () => string
   private readonly newId: () => string
   private readonly prevRunTimeoutMs: number
+  /** 中止執行後再等它結束的上限 */
+  private readonly abortGraceMs: number
 
   constructor(private d: TaskManagerDeps) {
     this.now = d.now ?? (() => new Date().toISOString())
     this.newId = d.newId ?? (() => randomUUID().slice(0, 8))
     this.prevRunTimeoutMs = d.prevRunTimeoutMs ?? 15_000
+    this.abortGraceMs = Math.min(ABORT_GRACE_MS, this.prevRunTimeoutMs)
   }
 
   // ───────── 讀取 ─────────
@@ -329,25 +340,48 @@ export class TaskManager {
     ]
     const key = runKey(taskId, channel)
     await this.chainOn(this.turnLocks, key, async () => {
+      // 排隊等 lock 的期間任務可能已開始收尾或整理報告
+      this.assertCanSend(taskId, channel)
       const prev = this.runs.get(key)
       if (prev?.send(text)) {
         await this.writeEntries(taskId, entries)
         return
       }
       // 上一段執行已關閉輸入但程序還沒結束：等它結束，同一個 channel 永遠只有一個 run
-      if (prev) await this.settlePrevious(prev)
+      if (prev) await this.settlePrevious(taskId, channel, prev)
       await this.startTurn(taskId, channel, text, entries)
     })
   }
 
-  /** 等上一段執行結束；逾時就中止它，仍不結束則拒絕開新的一輪 */
-  private async settlePrevious(prev: AgentRun) {
+  /** 等上一段執行結束；逾時就中止它，仍不結束就把它丟掉並拒絕這次送出（下一次會開新的一輪） */
+  private async settlePrevious(taskId: string, channel: Channel, prev: AgentRun) {
     if (await settlesWithin(prev.done, this.prevRunTimeoutMs)) return
     console.warn('[TaskManager] 上一段執行逾時未結束，中止它')
     prev.abort()
     this.denyWaitersOf(prev, '執行已結束')
-    if (await settlesWithin(prev.done, Math.min(ABORT_GRACE_MS, this.prevRunTimeoutMs))) return
+    if (await settlesWithin(prev.done, this.abortGraceMs)) return
+    this.dropStuckRun(taskId, channel, prev)
     throw new Error('上一輪尚未結束，請先停止')
+  }
+
+  /** abort 之後仍不結束的執行：不再追蹤它，避免整個 channel 永遠被卡住 */
+  private dropStuckRun(taskId: string, channel: Channel, run: AgentRun) {
+    const key = runKey(taskId, channel)
+    if (this.runs.get(key) !== run) return
+    console.warn(`[TaskManager] 執行 ${key} 在中止後仍未結束，不再等待它`)
+    this.runs.delete(key)
+    this.denyWaitersOf(run, '執行已結束')
+    const branchId = branchIdOf(channel)
+    if (!branchId) this.pendingCounter.delete(taskId)
+    this.persist(taskId, (t) => {
+      if (branchId) {
+        const b = t.branches.find((x) => x.id === branchId)
+        if (b) b.running = false
+      } else if (t.runState === 'running' || t.runState === 'waiting_permission') {
+        t.runState = 'idle'
+      }
+      this.syncPermission(t)
+    })
   }
 
   private async startTurn(
@@ -594,13 +628,18 @@ export class TaskManager {
             throw new Error('只有實作階段可以提交報告')
           if (this.finalizing.has(taskId)) throw new Error('報告已提交，正在整理中')
           const run = this.runs.get(runKey(taskId, 'main'))
+          const before = this.task(taskId).runState
           this.finalizing.add(taskId)
           try {
             await this.update(taskId, (t) => {
               t.runState = 'finalizing'
             })
           } catch (e) {
+            // 記憶體中已改成 finalizing：還原，不然主線會一直卡在整理中
             this.finalizing.delete(taskId)
+            this.persist(taskId, (t) => {
+              if (t.runState === 'finalizing') t.runState = before
+            })
             throw e
           }
           const job: Promise<void> = this.finalizeReport(taskId, input, run).finally(() => {
@@ -675,7 +714,10 @@ export class TaskManager {
   ): Promise<Branch> {
     const t = this.openTask(taskId)
     if (!t.mainSessionId) throw new Error('請等 Claude 在主線回覆至少一次後再分岔')
-    const branchId = `b${t.branches.length + 1}`
+    const branchId = nextId(
+      'b',
+      t.branches.map((b) => b.id)
+    )
     const channel: Channel = `branch:${branchId}`
     this.assertCanSend(taskId, channel)
     // 主線在執行中時 session 還在變動，fork 出來的內容不確定
@@ -735,7 +777,10 @@ export class TaskManager {
     const c = edited ?? b.conclusion
     if (!c) throw new Error('分岔還沒有結論')
     const before = { status: b.status, conclusion: b.conclusion }
-    const decisionId = `d${t.decisions.length + 1}`
+    const decisionId = nextId(
+      'd',
+      t.decisions.map((d) => d.id)
+    )
     await this.update(taskId, (x) => {
       b.conclusion = c
       b.status = 'concluded'
@@ -1001,10 +1046,15 @@ export class TaskManager {
       for (const w of [...this.permissionWaiters.values()]) {
         if (w.taskId === taskId) w.resolve({ allow: false, message: '任務已丟棄' })
       }
-      const runs = this.runsOf(taskId).map(([, r]) => r)
-      runs.forEach((r) => r.abort())
-      // abort 後仍不結束的程序不要卡住丟棄
-      await Promise.all(runs.map((r) => settlesWithin(r.done, ABORT_GRACE_MS)))
+      const runs = this.runsOf(taskId)
+      runs.forEach(([, r]) => r.abort())
+      // abort 後仍不結束的程序不要卡住丟棄：不再追蹤它
+      await Promise.all(
+        runs.map(async ([key, r]) => {
+          if (await settlesWithin(r.done, this.abortGraceMs)) return
+          this.dropStuckRun(taskId, key.slice(taskId.length + 1) as Channel, r)
+        })
+      )
       await this.d.git.removeWorktree((await this.repoOf(t)).path, t.worktreePath, t.branch)
       await this.update(taskId, (x) => {
         if (x.status !== 'done' && x.status !== 'discarded')
