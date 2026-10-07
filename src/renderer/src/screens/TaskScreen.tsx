@@ -5,6 +5,7 @@ import { currentStage, type Stage } from '../lib/stage'
 import { useStore } from '../store'
 import { ClarifyScreen } from './ClarifyScreen'
 import { ImplementScreen } from './ImplementScreen'
+import { ReportScreen } from './ReportScreen'
 import { SpecScreen } from './SpecScreen'
 
 export function TaskScreen({ taskId }: { taskId: string }) {
@@ -27,8 +28,8 @@ export function TaskScreen({ taskId }: { taskId: string }) {
       return <SpecScreen task={task} nav={nav} readOnly={readOnly} onOpenStage={openStage} />
     case 'implement':
       return <ImplementScreen task={task} nav={nav} readOnly={readOnly} />
-    default:
-      // Task 33 補上報告
-      return <ClarifyScreen task={task} nav={nav} readOnly onOpenStage={openStage} />
+    case 'report':
+      // 依回饋修改中（implementing）回看報告時只能看；送出回饋只在待審閱時
+      return <ReportScreen task={task} nav={nav} readOnly={readOnly} onOpenStage={openStage} />
   }
 }

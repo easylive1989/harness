@@ -15335,6 +15335,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 33：變更報告畫面
 
 **Files:**
+- Create: `src/shared/blockHtml.ts`（Task 25 的 `BLOCK_CSP`／`wrapBlockHtml` 移到這裡：匯出 HTML 的 srcdoc 也用同一份包裝）
+- Modify: `src/main/report/blockHtml.ts`（改成 re-export）、`tests/main/blockHtml.test.ts`
+- Modify: `src/renderer/src/styles/app.css`（補 diff 與架構圖用的 tokens）、`src/renderer/src/components/ui.tsx`（`Icons.Minus`、`Icons.Chevron`）
+- Create: `src/renderer/src/lib/format.ts`
+- Create: `src/renderer/src/report/anchors.ts`、`blocks.ts`、`comments.tsx`
 - Create: `src/renderer/src/report/ArchitectureDiagram.tsx`
 - Create: `src/renderer/src/report/CustomBlockFrame.tsx`
 - Create: `src/renderer/src/report/DiffView.tsx`
@@ -15343,18 +15348,108 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `src/renderer/src/report/exportHtml.tsx`
 - Create: `src/renderer/src/screens/ReportScreen.tsx`
 - Modify: `src/renderer/src/screens/TaskScreen.tsx`
-- Test: `tests/renderer/DiffView.test.tsx`、`tests/renderer/ArchitectureDiagram.test.tsx`
+- Modify: `tests/fixtures/report.ts`（`sampleDiff`、`makeReport`）
+- Test: `tests/renderer/DiffView.test.tsx`、`tests/renderer/ArchitectureDiagram.test.tsx`、`tests/renderer/CustomBlockFrame.test.tsx`、`tests/renderer/ReportScreen.test.tsx`、`tests/renderer/exportHtml.test.tsx`
+
+**行為重點：**
+- 只有「待審閱且正在看最新版本」可以留言；依回饋修改中（implementing）回看報告、已完成、已丟棄、看舊版本都只能看。回饋清單與送出回饋只在待審閱時出現；看舊版本時回饋仍是針對最新版本送出。
+- 回饋錨點（主程序原樣轉給 Claude）：`section:overview|architecture|limitations`、`decision:<id>`、`block:<id>`、`diff:<路徑>:<新檔行號>`。刪除的行沒有新檔行號，不能留言。
+- 段落說明（`file_notes[].hunks`，行號是新檔的）放在範圍內第一個顯示出來的行之前；範圍內沒有任何顯示出來的行就列在檔案說明下方，不會消失。
+- 架構圖只有對應到變更檔案的方塊可以點（跳到那個檔案的 diff）；圖比欄寬寬時縮小（最小 0.6 倍），再寬就水平捲動；連線畫到方塊邊緣，每張圖的箭頭 marker id 不重複。
+- 自訂區塊：`harness-block://` + `sandbox="allow-scripts"`（沒有 same-origin），只接受 `e.source === iframe.contentWindow` 的高度訊息，高度夾在 80–1600。包裝量的是包住內容的 flow-root 容器高度（`documentElement.scrollHeight` 至少是 iframe 目前的高度，內容變矮時縮不回來）。
+- 收尾操作（送出回饋、開 PR、合併、丟棄）共用一個 `usePending`；開 PR／合併／丟棄失敗的原因（例如合併衝突）留在面板上；PR 開好但瀏覽器打不開只用 toast 提示。丟棄要再確認一次。
+- 匯出 HTML：`renderToStaticMarkup` 靜態渲染（React 轉義所有報告文字），沒有任何按鈕／輸入框，所有檔案的 diff 依序列出，自訂區塊用同一份包裝放進 `<iframe sandbox="allow-scripts" srcdoc>`；整份檔案有 `default-src 'none'` 的 CSP（srcdoc 會繼承），字型檔不打包，唯一的 script 是依區塊回報調整 iframe 高度。待送出的回饋不會出現在匯出檔。
 
 **Step 1: 寫失敗測試**
 
+`tests/fixtures/report.ts` 加上（檔頭補 `import type { Report } from '@shared/types'`）：
+
+```ts
+/** 兩個檔案的 diff：新增 lockout.ts（4 行）、login.ts 改一行加一行 */
+export const sampleDiff = `diff --git a/src/auth/lockout.ts b/src/auth/lockout.ts
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/src/auth/lockout.ts
+@@ -0,0 +1,4 @@
++export const MAX_ATTEMPTS = 5
++export const LOCK_TTL_SECONDS = 15 * 60
++
++export async function registerFailure() {}
+diff --git a/src/auth/login.ts b/src/auth/login.ts
+index 2222222..3333333 100644
+--- a/src/auth/login.ts
++++ b/src/auth/login.ts
+@@ -10,3 +10,4 @@ export async function login() {
+   const user = await find()
+-  check(user)
++  await lockoutGuard(user)
++  check(user)
+   return user
+`
+
+/** 畫面測試用的完整報告：file_notes 對應 sampleDiff 的行號 */
+export function makeReport(over: Partial<Report> = {}): Report {
+  return {
+    version: 1,
+    taskId: 't1',
+    input: {
+      ...sampleReport,
+      file_notes: [
+        {
+          path: 'src/auth/lockout.ts',
+          why: '獨立計數邏輯',
+          hunks: [{ line_start: 2, line_end: 2, why: 'TTL 用 EXPIRE' }]
+        },
+        { path: 'src/auth/login.ts', why: '登入前先檢查鎖定', hunks: [] }
+      ]
+    },
+    diff: sampleDiff,
+    stats: {
+      files: 2,
+      additions: 6,
+      deletions: 1,
+      perFile: [
+        { path: 'src/auth/lockout.ts', additions: 4, deletions: 0 },
+        { path: 'src/auth/login.ts', additions: 2, deletions: 1 }
+      ]
+    },
+    verification: [
+      { command: 'npm test', exitCode: 0, durationMs: 3200, outputTail: 'Tests  48 passed' },
+      {
+        command: 'npm run lint',
+        exitCode: 1,
+        durationMs: 1500,
+        outputTail: 'error  no-unused-vars'
+      },
+      {
+        command: 'npm run e2e',
+        exitCode: null,
+        durationMs: 0,
+        outputTail: '',
+        skipped: '這個指令在實作期間沒有被核准過，Harness 未自動執行'
+      }
+    ],
+    commit: 'abc1234def',
+    createdAt: '2026-10-07T06:20:00.000Z',
+    ...over
+  }
+}
+```
+
 ```tsx
 // tests/renderer/DiffView.test.tsx
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, test, vi } from 'vitest'
-vi.mock('@renderer/api', () => ({ call: vi.fn(), onEvent: vi.fn(() => () => {}), errorText: String }))
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(),
+  onEvent: vi.fn(() => () => {}),
+  errorText: String
+}))
 import { DiffView } from '@renderer/report/DiffView'
 import { useStore } from '@renderer/store'
+import { makeReport } from '../fixtures/report'
 
 const diff = `diff --git a/src/a.ts b/src/a.ts
 --- a/src/a.ts
@@ -15367,14 +15462,150 @@ const diff = `diff --git a/src/a.ts b/src/a.ts
 beforeEach(() => useStore.setState({ feedback: {} }))
 
 test('顯示檔案說明與段落原因，點行號留下回饋', async () => {
-  render(<DiffView taskId="t1" diff={diff} perFile={[{ path: 'src/a.ts', additions: 1, deletions: 0 }]}
-    notes={[{ path: 'src/a.ts', why: '加上 b', hunks: [{ line_start: 2, line_end: 2, why: '新常數' }] }]} />)
+  render(
+    <DiffView
+      taskId="t1"
+      diff={diff}
+      perFile={[{ path: 'src/a.ts', additions: 1, deletions: 0 }]}
+      notes={[
+        { path: 'src/a.ts', why: '加上 b', hunks: [{ line_start: 2, line_end: 2, why: '新常數' }] }
+      ]}
+    />
+  )
   expect(screen.getByText(/加上 b/)).toBeInTheDocument()
   expect(screen.getByText(/新常數/)).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: '對第 2 行留言' }))
   await userEvent.type(screen.getByRole('textbox', { name: '回饋' }), '改成常數檔{Enter}')
-  expect(useStore.getState().feedback.t1).toEqual([{ anchor: 'diff:src/a.ts:2', label: 'src/a.ts:2', text: '改成常數檔' }])
+  expect(useStore.getState().feedback.t1).toEqual([
+    { anchor: 'diff:src/a.ts:2', label: 'src/a.ts:2', text: '改成常數檔' }
+  ])
   expect(screen.getByText('改成常數檔')).toBeInTheDocument()
+  expect(screen.queryByRole('textbox', { name: '回饋' })).not.toBeInTheDocument()
+})
+
+test('段落說明放在範圍內第一個顯示的行之前；範圍內沒有顯示的行就列在檔案說明下', () => {
+  render(
+    <DiffView
+      taskId="t1"
+      diff={diff}
+      perFile={[]}
+      notes={[
+        {
+          path: 'src/a.ts',
+          why: '加上 b',
+          hunks: [
+            { line_start: 2, line_end: 9, why: '範圍從新增的行開始' },
+            { line_start: 40, line_end: 42, why: '不在 diff 裡的行' }
+          ]
+        }
+      ]}
+    />
+  )
+  expect(screen.getByText(/為什麼（第 2–9 行）/).parentElement).toHaveTextContent(
+    '範圍從新增的行開始'
+  )
+  expect(screen.getByText(/第 40–42 行/).parentElement).toHaveTextContent('不在 diff 裡的行')
+})
+
+test('再點一次已留言的行可以修改，Esc 取消', async () => {
+  useStore.setState({
+    feedback: { t1: [{ anchor: 'diff:src/a.ts:3', label: 'src/a.ts:3', text: '舊的意見' }] }
+  })
+  render(<DiffView taskId="t1" diff={diff} perFile={[]} notes={[]} />)
+  expect(screen.getByText('回饋 · 第 3 行')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '對第 3 行留言' }))
+  const input = screen.getByRole('textbox', { name: '回饋' })
+  expect(input).toHaveValue('舊的意見')
+  await userEvent.keyboard('{Escape}')
+  expect(screen.queryByRole('textbox', { name: '回饋' })).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '對第 3 行留言' }))
+  await userEvent.clear(screen.getByRole('textbox', { name: '回饋' }))
+  await userEvent.type(screen.getByRole('textbox', { name: '回饋' }), '新的意見{Enter}')
+  expect(useStore.getState().feedback.t1).toEqual([
+    { anchor: 'diff:src/a.ts:3', label: 'src/a.ts:3', text: '新的意見' }
+  ])
+})
+
+test('唯讀時沒有留言按鈕、不顯示待送出的回饋，行號顯示新檔行號', () => {
+  useStore.setState({
+    feedback: { t1: [{ anchor: 'diff:src/a.ts:2', label: 'src/a.ts:2', text: '待送出' }] }
+  })
+  const { container } = render(
+    <DiffView taskId="t1" diff={diff} perFile={[]} notes={[]} readOnly />
+  )
+  expect(screen.queryByRole('button', { name: /留言/ })).not.toBeInTheDocument()
+  expect(screen.queryByText('待送出')).not.toBeInTheDocument()
+  const gutters = [...container.querySelectorAll('[data-line]')].map((e) => e.textContent)
+  expect(gutters).toEqual(['1', '2', '3'])
+})
+
+test('切換檔案；檔案標籤附增刪行數；刪除的行顯示舊檔行號', async () => {
+  const report = makeReport()
+  render(
+    <DiffView
+      taskId="t1"
+      diff={report.diff}
+      perFile={report.stats.perFile}
+      notes={report.input.file_notes}
+    />
+  )
+  const files = screen.getByRole('group', { name: '變更的檔案' })
+  expect(
+    within(files)
+      .getAllByRole('button')
+      .map((b) => b.textContent)
+  ).toEqual(['src/auth/lockout.ts +4', 'src/auth/login.ts +2 −1'])
+  expect(screen.getByText(/獨立計數邏輯/)).toBeInTheDocument()
+  await userEvent.click(within(files).getByRole('button', { name: /login\.ts/ }))
+  expect(within(files).getByRole('button', { name: /login\.ts/ })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  expect(screen.getByText(/登入前先檢查鎖定/)).toBeInTheDocument()
+  expect(screen.queryByText(/獨立計數邏輯/)).not.toBeInTheDocument()
+  // 新檔第 11 行可以留言；刪除的那一行沒有新檔行號，顯示舊檔第 11 行、不能留言
+  expect(screen.getAllByRole('button', { name: '對第 11 行留言' })).toHaveLength(1)
+  expect(screen.getByText('- check(user)', { exact: false }).previousSibling).toHaveTextContent(
+    '11'
+  )
+})
+
+test('二進位檔案不顯示內容；沒有變更時顯示說明', () => {
+  const bin = `diff --git a/logo.png b/logo.png
+new file mode 100644
+Binary files /dev/null and b/logo.png differ
+`
+  const { unmount } = render(
+    <DiffView
+      taskId="t1"
+      diff={bin}
+      perFile={[{ path: 'logo.png', additions: 0, deletions: 0 }]}
+      notes={[]}
+    />
+  )
+  expect(screen.getByText('二進位檔案，不顯示內容')).toBeInTheDocument()
+  // 二進位檔的增刪行數都是 0，不顯示
+  expect(screen.getByRole('button', { name: 'logo.png' })).toBeInTheDocument()
+  unmount()
+  render(<DiffView taskId="t1" diff="" perFile={[]} notes={[]} />)
+  expect(screen.getByText('沒有程式碼變更')).toBeInTheDocument()
+})
+
+test('匯出（static）時依序列出每個檔案，沒有任何按鈕', () => {
+  const report = makeReport()
+  render(
+    <DiffView
+      taskId="t1"
+      diff={report.diff}
+      perFile={report.stats.perFile}
+      notes={report.input.file_notes}
+      isStatic
+    />
+  )
+  expect(screen.getByText(/獨立計數邏輯/)).toBeInTheDocument()
+  expect(screen.getByText(/登入前先檢查鎖定/)).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: /src\/auth\/login\.ts/ })).toBeInTheDocument()
+  expect(screen.queryByRole('button')).not.toBeInTheDocument()
 })
 ```
 
@@ -15388,369 +15619,1914 @@ import { sampleReport } from '../fixtures/report'
 
 test('畫出節點與連線，點節點回呼檔案', async () => {
   const onSelect = vi.fn()
-  const { container } = render(<ArchitectureDiagram graph={sampleReport.architecture.after} onSelectFile={onSelect} />)
+  const { container } = render(
+    <ArchitectureDiagram graph={sampleReport.architecture.after} onSelectFile={onSelect} />
+  )
   expect(screen.getByRole('button', { name: /lockoutGuard/ })).toBeInTheDocument()
   expect(container.querySelectorAll('line')).toHaveLength(2)
   await userEvent.click(screen.getByRole('button', { name: /lockoutGuard/ }))
   expect(onSelect).toHaveBeenCalledWith('src/auth/lockout.ts')
 })
+
+test('只有對應到變更檔案的節點可以點；節點標出狀態', async () => {
+  const onSelect = vi.fn()
+  render(
+    <ArchitectureDiagram
+      graph={sampleReport.architecture.after}
+      onSelectFile={onSelect}
+      changedFiles={new Set(['src/auth/lockout.ts'])}
+    />
+  )
+  expect(screen.getByRole('button', { name: 'lockoutGuard（新增）' })).toBeInTheDocument()
+  // Client 沒有檔案、login.ts 的檔案不在 diff 裡：不是按鈕
+  expect(screen.queryByRole('button', { name: /Client/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /login\.ts/ })).not.toBeInTheDocument()
+  expect(screen.getByText('login.ts')).toBeInTheDocument()
+  expect(screen.getByText('（修改）')).toBeInTheDocument()
+})
+
+test('沒有 onSelectFile（匯出）時節點都不是按鈕；同一頁兩張圖的箭頭 id 不重複', () => {
+  const { container } = render(
+    <>
+      <ArchitectureDiagram graph={sampleReport.architecture.before} />
+      <ArchitectureDiagram graph={sampleReport.architecture.after} />
+    </>
+  )
+  expect(screen.queryByRole('button')).not.toBeInTheDocument()
+  const ids = [...container.querySelectorAll('marker')].map((m) => m.id)
+  expect(new Set(ids).size).toBe(2)
+  for (const line of container.querySelectorAll('line')) {
+    expect(ids.map((id) => `url(#${id})`)).toContain(line.getAttribute('marker-end'))
+  }
+})
+
+test('略過指向自己的連線', () => {
+  const { container } = render(
+    <ArchitectureDiagram
+      graph={{
+        nodes: [
+          { id: 'a', label: 'A', status: 'unchanged', files: [] },
+          { id: 'b', label: 'B', status: 'added', files: [] }
+        ],
+        edges: [
+          { from: 'a', to: 'a' },
+          { from: 'a', to: 'b', label: '呼叫' }
+        ]
+      }}
+    />
+  )
+  expect(container.querySelectorAll('line')).toHaveLength(1)
+  expect(screen.getByText('呼叫')).toBeInTheDocument()
+})
+```
+
+```tsx
+// tests/renderer/CustomBlockFrame.test.tsx
+import { act, render, screen } from '@testing-library/react'
+import { expect, test } from 'vitest'
+import { CustomBlockFrame } from '@renderer/report/CustomBlockFrame'
+
+const post = (data: unknown, source: Window | null) =>
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', { data, source }))
+  })
+
+test('以獨立 scheme 載入、只允許 script（不給 same-origin）', () => {
+  render(<CustomBlockFrame taskId="t1" version={2} id="state-machine" title="鎖定狀態機" />)
+  const frame = screen.getByTitle('鎖定狀態機')
+  expect(frame.tagName).toBe('IFRAME')
+  expect(frame).toHaveAttribute('sandbox', 'allow-scripts')
+  expect(frame).toHaveAttribute('src', 'harness-block://report/t1/2/state-machine')
+})
+
+test('只接受自己 iframe 回報的高度，並限制在合理範圍', async () => {
+  render(
+    <>
+      <CustomBlockFrame taskId="t1" version={1} id="a" title="A" />
+      <CustomBlockFrame taskId="t1" version={1} id="b" title="B" />
+    </>
+  )
+  const a = screen.getByTitle('A') as HTMLIFrameElement
+  const b = screen.getByTitle('B') as HTMLIFrameElement
+  const initial = a.style.height
+  await post({ type: 'harness-block-height', id: 'a', height: 480 }, a.contentWindow)
+  expect(a.style.height).toBe('480px')
+  expect(b.style.height).toBe(initial)
+  // 別的 iframe 冒用 id、來源不是 iframe、格式不對：都忽略
+  await post({ type: 'harness-block-height', id: 'a', height: 300 }, b.contentWindow)
+  await post({ type: 'harness-block-height', id: 'a', height: 300 }, window)
+  await post({ type: 'harness-block-height', id: 'b', height: 300 }, a.contentWindow)
+  await post({ type: 'harness-block-height', id: 'a', height: Number.NaN }, a.contentWindow)
+  await post(null, a.contentWindow)
+  expect(a.style.height).toBe('480px')
+  await post({ type: 'harness-block-height', id: 'a', height: 99999 }, a.contentWindow)
+  expect(a.style.height).toBe('1600px')
+  await post({ type: 'harness-block-height', id: 'a', height: 1 }, a.contentWindow)
+  expect(a.style.height).toBe('80px')
+})
+```
+
+```tsx
+// tests/renderer/ReportScreen.test.tsx
+import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { beforeEach, expect, test, vi } from 'vitest'
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(),
+  onEvent: vi.fn(() => () => {}),
+  errorText: (e: unknown) => (e instanceof Error ? e.message : String(e))
+}))
+import { call } from '@renderer/api'
+import { ReportScreen } from '@renderer/screens/ReportScreen'
+import { TaskScreen } from '@renderer/screens/TaskScreen'
+import { resetStoreInternals, useStore } from '@renderer/store'
+import type { Report, Task } from '@shared/types'
+import { holdNextCall } from '../fixtures/hold'
+import { makeReport } from '../fixtures/report'
+import { makeTask } from '../fixtures/task'
+
+let replies: Record<string, (...args: never[]) => unknown>
+
+const reviewTask = (over: Partial<Task> = {}) =>
+  makeTask({
+    status: 'reviewing',
+    reportVersions: [1],
+    questions: [
+      {
+        id: 'q1',
+        text: '計數單位',
+        options: [],
+        allowFreeText: true,
+        status: 'answered',
+        followups: [],
+        askedAt: ''
+      }
+    ],
+    ...over
+  })
+
+const renderReport = (task: Task, readOnly = false, onOpenStage = vi.fn()) => {
+  useStore.setState({ tasks: { [task.id]: task } })
+  return render(
+    <ReportScreen task={task} nav={null} readOnly={readOnly} onOpenStage={onOpenStage} />
+  )
+}
+const loaded = () => screen.findByRole('heading', { name: '登入流程多了一道鎖定關卡' })
+const panel = () => screen.getByRole('complementary', { name: '回饋與收尾' })
+
+beforeEach(() => {
+  replies = {
+    'report:get': (_taskId: string, version: number) => makeReport({ version }),
+    'report:feedback': () => undefined,
+    'report:saveHtml': () => '/Users/me/報告.html',
+    'finish:pr': () => 'https://github.com/me/shop/pull/7',
+    'finish:merge': () => undefined,
+    'finish:discard': () => undefined,
+    'shell:openExternal': () => undefined
+  }
+  vi.mocked(call).mockReset()
+  vi.mocked(call).mockImplementation((async (ch: string, ...args: never[]) =>
+    replies[ch](...args)) as typeof call)
+  resetStoreInternals()
+  useStore.setState({ tasks: {}, timelines: {}, feedback: {}, toast: undefined })
+})
+
+test('讀取最新版本報告並顯示各區塊', async () => {
+  renderReport(reviewTask({ reportVersions: [1, 2] }))
+  await loaded()
+  expect(call).toHaveBeenCalledWith('report:get', 't1', 2)
+  const overview = screen.getByRole('region', { name: '概觀' })
+  expect(within(overview).getByText('變更檔案').nextSibling).toHaveTextContent('2')
+  expect(within(overview).getByText('行數').nextSibling).toHaveTextContent('+6 −1')
+  // 略過的指令不算在分母
+  expect(within(overview).getByText('驗證').nextSibling).toHaveTextContent('1 / 2 通過')
+  expect(within(overview).getByText('決策').nextSibling).toHaveTextContent('1')
+
+  const arch = screen.getByRole('region', { name: '架構前後對照' })
+  expect(within(arch).getByText('之前')).toBeInTheDocument()
+  expect(within(arch).getByRole('button', { name: 'lockoutGuard（新增）' })).toBeInTheDocument()
+
+  const decisions = screen.getByRole('region', { name: '決策與原因' })
+  expect(within(decisions).getByText('計數存在 Redis')).toBeInTheDocument()
+  expect(within(decisions).getByText('來自分岔')).toBeInTheDocument()
+  expect(within(decisions).getByText('多台機器共享')).toBeInTheDocument()
+
+  const block = screen.getByRole('region', { name: '鎖定狀態機' })
+  expect(within(block).getByTitle('鎖定狀態機')).toHaveAttribute(
+    'src',
+    'harness-block://report/t1/2/state-machine'
+  )
+
+  const limits = screen.getByRole('region', { name: '限制與後續' })
+  expect(within(limits).getByText('Redis 掛掉時放行')).toBeInTheDocument()
+  expect(within(limits).getByText('後台解鎖')).toBeInTheDocument()
+
+  const diff = screen.getByRole('region', { name: '程式碼變更' })
+  expect(within(diff).getByText(/獨立計數邏輯/)).toBeInTheDocument()
+
+  const tests = screen.getByRole('region', { name: '測試結果' })
+  expect(within(tests).getByText('通過 · 3.2 秒')).toBeInTheDocument()
+  expect(within(tests).getByText('失敗（exit 1）· 1.5 秒')).toBeInTheDocument()
+  // 失敗的輸出預設展開；略過的列出原因
+  expect(within(tests).getByText('error no-unused-vars').closest('details')).toHaveAttribute('open')
+  expect(within(tests).getByText('Tests 48 passed').closest('details')).not.toHaveAttribute('open')
+  expect(within(tests).getByText(/沒有被核准過/)).toBeInTheDocument()
+})
+
+test('對區塊與決策留言會出現在回饋清單，可以刪除', async () => {
+  renderReport(reviewTask())
+  await loaded()
+  expect(within(panel()).getByText('0 則待送出')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '對「架構前後對照」留言' }))
+  await userEvent.type(screen.getByRole('textbox', { name: '回饋' }), 'Redis 也畫出來{Enter}')
+  await userEvent.click(screen.getByRole('button', { name: '對決策 D1 留言' }))
+  await userEvent.type(screen.getByRole('textbox', { name: '回饋' }), '說明 TTL{Enter}')
+  expect(useStore.getState().feedback.t1).toEqual([
+    { anchor: 'section:architecture', label: '架構前後對照', text: 'Redis 也畫出來' },
+    { anchor: 'decision:d1', label: 'D1 計數存在 Redis', text: '說明 TTL' }
+  ])
+  expect(within(panel()).getByText('2 則待送出')).toBeInTheDocument()
+  expect(within(panel()).getByText('區塊 · 架構前後對照')).toBeInTheDocument()
+  expect(within(panel()).getByText('決策 · D1 計數存在 Redis')).toBeInTheDocument()
+  // 留過的意見也顯示在原位置
+  expect(
+    within(screen.getByRole('region', { name: '架構前後對照' })).getByText('Redis 也畫出來')
+  ).toBeInTheDocument()
+  await userEvent.click(
+    within(panel()).getByRole('button', { name: '刪除對「架構前後對照」的回饋' })
+  )
+  expect(useStore.getState().feedback.t1.map((f) => f.anchor)).toEqual(['decision:d1'])
+})
+
+test('送出回饋：沒有內容時停用；送出中停用、連點只送一次；成功後清空', async () => {
+  renderReport(reviewTask())
+  await loaded()
+  const send = within(panel()).getByRole('button', { name: '送出回饋，產生 v2' })
+  expect(send).toBeDisabled()
+  useStore
+    .getState()
+    .addFeedback('t1', { anchor: 'diff:src/a.ts:2', label: 'src/a.ts:2', text: 'x' })
+  await userEvent.type(within(panel()).getByRole('textbox', { name: /整體意見/ }), '  整體  ')
+  const release = holdNextCall(vi.mocked(call))
+  await userEvent.dblClick(send)
+  expect(call).toHaveBeenCalledWith(
+    'report:feedback',
+    't1',
+    [{ anchor: 'diff:src/a.ts:2', label: 'src/a.ts:2', text: 'x' }],
+    '整體'
+  )
+  expect(vi.mocked(call).mock.calls.filter((c) => c[0] === 'report:feedback')).toHaveLength(1)
+  expect(send).toBeDisabled()
+  expect(within(panel()).getByRole('button', { name: '開 Pull Request' })).toBeDisabled()
+  await release()
+  expect(useStore.getState().feedback.t1).toEqual([])
+  expect(within(panel()).getByRole('textbox', { name: /整體意見/ })).toHaveValue('')
+})
+
+test('只有整體意見也能送出；失敗時保留內容', async () => {
+  replies['report:feedback'] = () => {
+    throw new Error('Claude 正在執行')
+  }
+  renderReport(reviewTask())
+  await loaded()
+  await userEvent.type(within(panel()).getByRole('textbox', { name: /整體意見/ }), '改名')
+  expect(within(panel()).getByText(/整體意見還沒送出/)).toBeInTheDocument()
+  await userEvent.click(within(panel()).getByRole('button', { name: '送出回饋，產生 v2' }))
+  expect(call).toHaveBeenCalledWith('report:feedback', 't1', [], '改名')
+  expect(useStore.getState().toast?.text).toBe('Claude 正在執行')
+  expect(within(panel()).getByRole('textbox', { name: /整體意見/ })).toHaveValue('改名')
+})
+
+test('PR 開好但瀏覽器打不開：不算開 PR 失敗', async () => {
+  replies['shell:openExternal'] = () => {
+    throw new Error('無法開啟瀏覽器')
+  }
+  renderReport(reviewTask())
+  await loaded()
+  await userEvent.click(within(panel()).getByRole('button', { name: '開 Pull Request' }))
+  await waitFor(() => expect(useStore.getState().toast?.text).toBe('無法開啟瀏覽器'))
+  expect(within(panel()).queryByRole('alert')).not.toBeInTheDocument()
+})
+
+test('開 PR 後用瀏覽器打開 PR 網址', async () => {
+  renderReport(reviewTask())
+  await loaded()
+  await userEvent.click(within(panel()).getByRole('button', { name: '開 Pull Request' }))
+  expect(call).toHaveBeenCalledWith('finish:pr', 't1')
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('shell:openExternal', 'https://github.com/me/shop/pull/7')
+  )
+})
+
+test('還有未送出的回饋時提醒；合併失敗時在面板顯示 git 的訊息', async () => {
+  replies['finish:merge'] = () => {
+    throw new Error('git merge: CONFLICT (content): Merge conflict in src/auth/login.ts')
+  }
+  renderReport(reviewTask())
+  await loaded()
+  useStore.getState().addFeedback('t1', { anchor: 'section:overview', label: '概觀', text: 'x' })
+  expect(await within(panel()).findByText(/還有 1 則回饋沒送出/)).toBeInTheDocument()
+  await userEvent.click(within(panel()).getByRole('button', { name: '合併到 main' }))
+  expect(call).toHaveBeenCalledWith('finish:merge', 't1')
+  const alert = await within(panel()).findByRole('alert')
+  expect(alert).toHaveTextContent('合併失敗')
+  expect(alert).toHaveTextContent('Merge conflict in src/auth/login.ts')
+})
+
+test('丟棄 worktree 要再確認一次，可以取消', async () => {
+  renderReport(reviewTask())
+  await loaded()
+  await userEvent.click(within(panel()).getByRole('button', { name: '丟棄 worktree' }))
+  expect(call).not.toHaveBeenCalledWith('finish:discard', 't1')
+  expect(within(panel()).getByText(/harness\/t1/)).toBeInTheDocument()
+  await userEvent.click(within(panel()).getByRole('button', { name: '取消' }))
+  await userEvent.click(within(panel()).getByRole('button', { name: '丟棄 worktree' }))
+  await userEvent.click(within(panel()).getByRole('button', { name: '確定丟棄' }))
+  expect(call).toHaveBeenCalledWith('finish:discard', 't1')
+})
+
+test('依回饋修改中（implementing）回看報告：只能看', async () => {
+  renderReport(reviewTask({ status: 'implementing', runState: 'running' }), true)
+  await loaded()
+  expect(screen.queryByRole('button', { name: /留言/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /送出回饋/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '開 Pull Request' })).not.toBeInTheDocument()
+  expect(within(panel()).getByText(/Claude 正在依回饋修改，完成後會產生 v2/)).toBeInTheDocument()
+})
+
+test('切換版本：讀取該版本；舊版本只能看，可以回到最新版', async () => {
+  renderReport(reviewTask({ reportVersions: [1, 2] }))
+  await loaded()
+  await userEvent.selectOptions(screen.getByRole('combobox', { name: '版本' }), '1')
+  await waitFor(() => expect(call).toHaveBeenCalledWith('report:get', 't1', 1))
+  expect(await screen.findByText(/正在看 v1（舊版本）/)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /留言/ })).not.toBeInTheDocument()
+  // 回饋仍然可以針對最新版本送出
+  expect(within(panel()).getByRole('button', { name: '送出回饋，產生 v3' })).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '回到 v2' }))
+  expect(screen.getByRole('combobox', { name: '版本' })).toHaveValue('2')
+  expect(screen.getByRole('button', { name: '對「概觀」留言' })).toBeInTheDocument()
+  // 讀過的版本不再重新讀取
+  expect(vi.mocked(call).mock.calls.filter((c) => c[0] === 'report:get')).toHaveLength(2)
+})
+
+test('讀取失敗時顯示原因與重試', async () => {
+  let fail = true
+  replies['report:get'] = (_t: string, version: number) => {
+    if (fail) throw new Error('找不到報告 v1')
+    return makeReport({ version })
+  }
+  renderReport(reviewTask())
+  expect(await screen.findByText(/找不到報告 v1/)).toBeInTheDocument()
+  fail = false
+  await userEvent.click(screen.getByRole('button', { name: '重試' }))
+  await loaded()
+})
+
+test('匯出 HTML：送出自含的 HTML 與安全的檔名', async () => {
+  renderReport(reviewTask({ title: '登入/鎖定' }))
+  await loaded()
+  const button = screen.getByRole('button', { name: '匯出 HTML' })
+  const release = holdNextCall(vi.mocked(call))
+  await userEvent.dblClick(button)
+  expect(button).toBeDisabled()
+  await release('/Users/me/報告.html')
+  const calls = vi.mocked(call).mock.calls.filter((c) => c[0] === 'report:saveHtml')
+  expect(calls).toHaveLength(1)
+  const [, name, html] = calls[0] as unknown as [string, string, string]
+  expect(name).toBe('登入-鎖定-變更報告-v1.html')
+  expect(html).toMatch(/^<!doctype html>/)
+  expect(html).toContain('登入流程多了一道鎖定關卡')
+  expect(useStore.getState().toast?.text).toBe('已匯出：/Users/me/報告.html')
+})
+
+test('點決策的問題來源打開釐清階段；點架構節點切換到對應檔案', async () => {
+  const onOpenStage = vi.fn()
+  const report = makeReport()
+  report.input.decisions = [
+    { ...report.input.decisions[0], id: 'd2', source: { type: 'question', ref: 'q1' } }
+  ]
+  replies['report:get'] = () => report
+  renderReport(reviewTask(), false, onOpenStage)
+  await loaded()
+  await userEvent.click(screen.getByRole('button', { name: '問題 1' }))
+  expect(onOpenStage).toHaveBeenCalledWith('clarify')
+  const files = screen.getByRole('group', { name: '變更的檔案' })
+  expect(within(files).getByRole('button', { name: /lockout\.ts/ })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  await userEvent.click(screen.getAllByRole('button', { name: 'login.ts（修改）' })[0])
+  expect(within(files).getByRole('button', { name: /login\.ts/ })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+})
+
+test('點回饋清單裡的程式碼回饋會切換到那個檔案', async () => {
+  renderReport(reviewTask())
+  await loaded()
+  useStore.getState().addFeedback('t1', {
+    anchor: 'diff:src/auth/login.ts:11',
+    label: 'src/auth/login.ts:11',
+    text: '改用 await'
+  })
+  await userEvent.click(await within(panel()).findByText('程式碼 · src/auth/login.ts:11'))
+  const files = screen.getByRole('group', { name: '變更的檔案' })
+  expect(within(files).getByRole('button', { name: /login\.ts/ })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  expect(screen.getByText('回饋 · 第 11 行')).toBeInTheDocument()
+})
+
+test('已完成：顯示 PR 連結與清除 worktree', async () => {
+  renderReport(reviewTask({ status: 'done', prUrl: 'https://github.com/me/shop/pull/7' }), true)
+  await loaded()
+  expect(screen.queryByRole('button', { name: /送出回饋/ })).not.toBeInTheDocument()
+  await userEvent.click(within(panel()).getByRole('button', { name: '開啟 Pull Request' }))
+  expect(call).toHaveBeenCalledWith('shell:openExternal', 'https://github.com/me/shop/pull/7')
+  await userEvent.click(within(panel()).getByRole('button', { name: '清除 worktree' }))
+  await userEvent.click(within(panel()).getByRole('button', { name: '確定清除' }))
+  expect(call).toHaveBeenCalledWith('finish:discard', 't1')
+})
+
+test('TaskScreen：待審閱顯示報告；依回饋修改中可以回看報告但只能看', async () => {
+  useStore.setState({ tasks: { t1: reviewTask() } })
+  const { unmount } = render(<TaskScreen taskId="t1" />)
+  await loaded()
+  expect(screen.getByRole('button', { name: '對「概觀」留言' })).toBeInTheDocument()
+  unmount()
+  const report: Report = makeReport()
+  replies['report:get'] = () => report
+  replies['tasks:timeline'] = () => []
+  replies['tasks:changedFiles'] = () => ({ files: 0, additions: 0, deletions: 0, perFile: [] })
+  useStore.setState({
+    tasks: { t1: reviewTask({ status: 'implementing', runState: 'running' }) },
+    timelines: { t1: [] }
+  })
+  render(<TaskScreen taskId="t1" />)
+  await userEvent.click(screen.getByRole('button', { name: /報告/ }))
+  await loaded()
+  expect(screen.queryByRole('button', { name: /留言/ })).not.toBeInTheDocument()
+})
+```
+
+```tsx
+// tests/renderer/exportHtml.test.tsx
+import { expect, test, vi } from 'vitest'
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(),
+  onEvent: vi.fn(() => () => {}),
+  errorText: String
+}))
+import { buildReportHtml, exportFileName } from '@renderer/report/exportHtml'
+import { useStore } from '@renderer/store'
+import { BLOCK_CSP } from '@shared/blockHtml'
+import { makeReport } from '../fixtures/report'
+import { makeTask } from '../fixtures/task'
+
+const parse = (html: string) => new DOMParser().parseFromString(html, 'text/html')
+
+test('匯出的 HTML 自含、轉義所有報告文字、沒有互動控制', () => {
+  // 待送出的回饋不應該出現在匯出檔
+  useStore.setState({
+    feedback: { t1: [{ anchor: 'diff:src/auth/login.ts:11', label: 'x', text: '私人意見' }] }
+  })
+  const report = makeReport()
+  report.input.overview = {
+    headline: '<img src=x onerror=alert(1)>標題',
+    summary: '</style><script>alert(2)</script>'
+  }
+  const task = makeTask({ status: 'reviewing', reportVersions: [1], title: '鎖定 <b>&</b>' })
+  const html = buildReportHtml(task, report)
+  expect(html).toMatch(/^<!doctype html>/)
+  expect(html).not.toContain('<img src=x')
+  expect(html).not.toContain('<script>alert(2)')
+  expect(html).toContain('<title>鎖定 &lt;b&gt;&amp;&lt;/b&gt; · 變更報告 v1</title>')
+  expect(html).not.toContain('私人意見')
+
+  const doc = parse(html)
+  // 不能連網
+  const csp = doc.querySelector('meta[http-equiv="Content-Security-Policy"]')
+  expect(csp?.getAttribute('content')).toContain("default-src 'none'")
+  expect(doc.querySelectorAll('link, script[src], img[src^="http"]')).toHaveLength(0)
+  expect(doc.querySelector('h1')?.textContent).toBe('<img src=x onerror=alert(1)>標題')
+  expect(doc.querySelectorAll('button, input, textarea, select, form')).toHaveLength(0)
+  // 所有檔案的 diff 都在（沒有切換檔案的按鈕可用）
+  expect(doc.body.textContent).toContain('獨立計數邏輯')
+  expect(doc.body.textContent).toContain('登入前先檢查鎖定')
+
+  const frames = doc.querySelectorAll('iframe')
+  expect(frames).toHaveLength(1)
+  const frame = frames[0]
+  expect(frame.getAttribute('sandbox')).toBe('allow-scripts')
+  expect(frame.hasAttribute('src')).toBe(false)
+  const srcdoc = frame.getAttribute('srcdoc') ?? ''
+  expect(srcdoc).toContain('<div>正常 → 鎖定</div>')
+  expect(srcdoc).toContain(`content="${BLOCK_CSP}"`)
+})
+
+test('匯出檔名去掉不能用在檔名的字元', () => {
+  expect(exportFileName(makeTask({ title: 'a/b:c*?"<>|d\n e' }), 3)).toBe(
+    'a-b-c------d e-變更報告-v3.html'
+  )
+  expect(exportFileName(makeTask({ title: '  ' }), 1)).toBe('任務-變更報告-v1.html')
+})
+```
+
+`tests/main/blockHtml.test.ts` 加上：
+
+```ts
+test('回報包住內容的容器高度（不是 scrollHeight：那至少是 iframe 目前的高度，縮不回來）', () => {
+  const html = wrapBlockHtml({ id: 'a', title: 't', html: '<p>x</p>' })
+  expect(html).toContain('<div id="harness-block-root" style="display:flow-root"><p>x</p></div>')
+  expect(html).toContain('observe(root)')
+  expect(html).not.toContain('scrollHeight')
+})
 ```
 
 **Step 2: 確認失敗**
 
-**Step 3: ArchitectureDiagram.tsx**
+Run: `npx vitest run tests/renderer/DiffView.test.tsx tests/renderer/ArchitectureDiagram.test.tsx tests/renderer/CustomBlockFrame.test.tsx tests/renderer/ReportScreen.test.tsx tests/renderer/exportHtml.test.tsx tests/main/blockHtml.test.ts` → FAIL（模組不存在）
+
+**Step 3: 共用的區塊包裝、tokens 與圖示**
+
+```ts
+// src/shared/blockHtml.ts
+// 主程序以 harness-block:// 提供自訂區塊、renderer 匯出 HTML 時放進 srcdoc，兩邊用同一份包裝。
+
+/** 自訂區塊只能用 inline 的 style／script 與 data: 圖片字型，不能連網、不能送表單 */
+export const BLOCK_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'"
+
+const escapeHtml = (s: string) =>
+  s.replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!
+  )
+
+/**
+ * 回報的高度量的是包住內容的容器（flow-root，子元素的 margin 也算在內），
+ * 不是 documentElement.scrollHeight：後者至少是 iframe 目前的高度，內容變矮時 iframe 就縮不回來。
+ */
+export function wrapBlockHtml(block: { id: string; title: string; html: string }): string {
+  // 避免 id 裡的 `</script>` 提早結束 script（id 已經過 zod 檢查，這裡再保險一次）
+  const id = JSON.stringify(block.id).replace(/</g, '\\u003c')
+  return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="${BLOCK_CSP}">
+<title>${escapeHtml(block.title)}</title>
+<style>html,body{margin:0;background:transparent;color:#1c2430;font-family:'Noto Sans TC',-apple-system,'PingFang TC',sans-serif;font-size:14px;line-height:1.6}</style>
+</head><body><div id="harness-block-root" style="display:flow-root">${block.html}</div>
+<script>(function(){var root=document.getElementById("harness-block-root");var post=function(){parent.postMessage({type:"harness-block-height",id:${id},height:Math.ceil(root.getBoundingClientRect().height)},"*")};new ResizeObserver(post).observe(root);addEventListener("load",post);post()})()</script>
+</body></html>`
+}
+```
+
+`src/main/report/blockHtml.ts` 刪掉 `BLOCK_CSP`、`escapeHtml`、`wrapBlockHtml`，改成 re-export（`parseBlockUrl` 不變）：
+
+```ts
+// src/main/report/blockHtml.ts
+import { isSafeId } from '../ipcGuards'
+
+export { BLOCK_CSP, wrapBlockHtml } from '@shared/blockHtml'
+```
+
+`src/renderer/src/styles/app.css` 的 `@theme` 補上（`brand-deep` 放在 `brand-halo` 後面，其餘放在 `code-muted` 後面）：
+
+```css
+  --color-brand-deep: #134e4a;
+  --color-code-line: #7d8794;
+  --color-diff-add: #22c55e;
+  --color-diff-del: #ef4444;
+  --color-diff-flag: #facc15;
+  --color-connector: #8a93a0;
+```
+
+`src/renderer/src/components/ui.tsx` 的 `Icons` 補上：
 
 ```tsx
+  Minus: (p: IconProps) => svg(p, <path d="M6 12h12" />),
+  Chevron: (p: IconProps) => svg(p, <path d="M9 6l6 6-6 6" />)
+```
+
+```ts
+// src/renderer/src/lib/format.ts
+
+const pad = (n: number) => String(n).padStart(2, '0')
+
+/** 報告等的產生時間（本地時間），例如 10/07 14:20；無法解析時回傳空字串 */
+export function shortTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+```
+
+**Step 4: ArchitectureDiagram.tsx**
+
+```tsx
+// src/renderer/src/report/ArchitectureDiagram.tsx
+import { useEffect, useId, useRef, useState } from 'react'
 import { BOX_H, BOX_W, layoutGraph } from '@shared/layout'
 import type { ReportInput } from '@shared/report'
 import { cx } from '../components/ui'
 
 type Graph = ReportInput['architecture']['after']
+type GraphNode = Graph['nodes'][number]
+
 const STATUS_CLASS = {
-  added: 'bg-brand text-white font-medium',
-  modified: 'bg-surface shadow-[inset_0_0_0_2px_#2563eb]',
+  added: 'bg-brand font-medium text-white',
+  modified: 'bg-surface shadow-[inset_0_0_0_2px_var(--color-review)]',
   unchanged: 'bg-surface'
 } as const
 const STATUS_LABEL = { added: '新增', modified: '修改', unchanged: '未變' } as const
+/** 圖比欄寬寬時縮小到塞得下，但不小於這個比例（再寬就水平捲動） */
+const MIN_SCALE = 0.6
+/** 箭頭與方塊之間留的空隙 */
+const GAP = 3
 
-export function ArchitectureDiagram({ graph, onSelectFile }: { graph: Graph; onSelectFile?: (path: string) => void }) {
+/** 從方塊中心沿 (dx, dy) 走到方塊邊緣，佔整段中心距離的比例 */
+function edgeT(dx: number, dy: number) {
+  const tx = dx ? BOX_W / 2 / Math.abs(dx) : Infinity
+  const ty = dy ? BOX_H / 2 / Math.abs(dy) : Infinity
+  return Math.min(tx, ty)
+}
+
+/** 量容器寬度，算出讓整張圖塞進去的縮放比例（沒有 ResizeObserver 時不縮放） */
+function useFitScale(width: number) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [avail, setAvail] = useState<number>()
+  useEffect(() => {
+    const el = ref.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(([entry]) => setAvail(entry.contentRect.width))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  const scale = avail && width > avail ? Math.max(MIN_SCALE, avail / width) : 1
+  return { ref, scale }
+}
+
+/**
+ * 架構圖：自動分層排版，方塊是 HTML（可以點、可以截斷文字），連線畫在下面的 SVG。
+ * 有 onSelectFile 時，對應到變更檔案的方塊可以點（跳到那個檔案的 diff）。
+ */
+export function ArchitectureDiagram({
+  graph,
+  onSelectFile,
+  changedFiles
+}: {
+  graph: Graph
+  onSelectFile?: (path: string) => void
+  /** 這次變更的檔案；有給的話，只有檔案在裡面的方塊可以點 */
+  changedFiles?: ReadonlySet<string>
+}) {
+  const markerId = useId()
   const { nodes, width, height } = layoutGraph(graph.nodes, graph.edges)
+  const { ref, scale } = useFitScale(width)
   const pos = new Map(nodes.map((n) => [n.node.id, n]))
+  const targetOf = (node: GraphNode) =>
+    changedFiles ? node.files.find((f) => changedFiles.has(f)) : node.files[0]
+
   return (
-    <div className="overflow-x-auto">
-      <div className="relative mx-auto" style={{ width, height }}>
-        <svg width={width} height={height} className="absolute inset-0" aria-hidden>
-          <defs>
-            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-              <path d="M0 0L10 5L0 10z" fill="#8a93a0" />
-            </marker>
-          </defs>
-          {graph.edges.map((e, i) => {
-            const a = pos.get(e.from)
-            const b = pos.get(e.to)
-            if (!a || !b) return null
-            const down = b.y > a.y
-            const x1 = a.x + BOX_W / 2
-            const y1 = down ? a.y + BOX_H : a.y + BOX_H / 2
-            const x2 = b.x + BOX_W / 2
-            const y2 = down ? b.y : b.y + BOX_H / 2
-            return (
-              <g key={i}>
-                <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#8a93a0" strokeWidth={1.5} markerEnd="url(#arrow)" />
-                {e.label && <text x={(x1 + x2) / 2 + 6} y={(y1 + y2) / 2} fontSize={11} fill="#5b6472">{e.label}</text>}
-              </g>
+    <div ref={ref} className="overflow-x-auto">
+      <div className="mx-auto" style={{ width: width * scale, height: height * scale }}>
+        <div
+          className="relative origin-top-left"
+          style={{ width, height, transform: scale < 1 ? `scale(${scale})` : undefined }}
+        >
+          <svg width={width} height={height} className="absolute inset-0" aria-hidden>
+            <defs>
+              <marker
+                id={markerId}
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M0 0L10 5L0 10z" className="fill-connector" />
+              </marker>
+            </defs>
+            {graph.edges.map((e, i) => {
+              const a = pos.get(e.from)
+              const b = pos.get(e.to)
+              if (!a || !b || a === b) return null
+              // 從起點方塊的邊緣畫到終點方塊的邊緣（沿兩個中心的連線）
+              const ax = a.x + BOX_W / 2
+              const ay = a.y + BOX_H / 2
+              const dx = b.x + BOX_W / 2 - ax
+              const dy = b.y + BOX_H / 2 - ay
+              const len = Math.hypot(dx, dy)
+              const t0 = edgeT(dx, dy) + GAP / len
+              const t1 = 1 - edgeT(dx, dy) - GAP / len
+              if (t1 <= t0) return null
+              const x1 = ax + dx * t0
+              const y1 = ay + dy * t0
+              const x2 = ax + dx * t1
+              const y2 = ay + dy * t1
+              return (
+                <g key={i}>
+                  <line
+                    x1={x1}
+                    y1={y1}
+                    x2={x2}
+                    y2={y2}
+                    className="stroke-connector"
+                    strokeWidth={1.5}
+                    markerEnd={`url(#${markerId})`}
+                  />
+                  {e.label && (
+                    <text
+                      x={(x1 + x2) / 2 + 6}
+                      y={(y1 + y2) / 2 + 4}
+                      className="fill-muted text-[11px]"
+                    >
+                      {e.label}
+                    </text>
+                  )}
+                </g>
+              )
+            })}
+          </svg>
+          {nodes.map(({ node, x, y }) => {
+            const target = onSelectFile && targetOf(node)
+            const className = cx(
+              'absolute flex items-center justify-center rounded-xl px-2.5 text-[13px]',
+              STATUS_CLASS[node.status]
+            )
+            const style = { left: x, top: y, width: BOX_W, height: BOX_H }
+            const title = node.files.join('\n') || undefined
+            const label = <span className="min-w-0 truncate">{node.label}</span>
+            return target ? (
+              <button
+                key={node.id}
+                type="button"
+                title={title}
+                aria-label={`${node.label}（${STATUS_LABEL[node.status]}）`}
+                onClick={() => onSelectFile?.(target)}
+                className={cx(
+                  className,
+                  'cursor-pointer hover:brightness-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand'
+                )}
+                style={style}
+              >
+                {label}
+              </button>
+            ) : (
+              <div key={node.id} title={title} className={className} style={style}>
+                {label}
+                <span className="sr-only">（{STATUS_LABEL[node.status]}）</span>
+              </div>
             )
           })}
-        </svg>
-        {nodes.map(({ node, x, y }) => (
-          <button
-            key={node.id} type="button" title={node.files.join('\n')}
-            aria-label={`${node.label}（${STATUS_LABEL[node.status]}）`}
-            onClick={() => node.files[0] && onSelectFile?.(node.files[0])}
-            className={cx('absolute flex items-center justify-center truncate rounded-xl px-2 text-[13px]', STATUS_CLASS[node.status])}
-            style={{ left: x, top: y, width: BOX_W, height: BOX_H }}
-          >
-            {node.label}
-          </button>
-        ))}
+        </div>
       </div>
     </div>
   )
 }
 ```
 
-**Step 4: CustomBlockFrame.tsx**
+**Step 5: CustomBlockFrame.tsx 與 blocks.ts**
+
+```ts
+// src/renderer/src/report/blocks.ts
+// 自訂區塊 iframe 的高度規則：畫面上的 CustomBlockFrame 與匯出 HTML 的小段 script 共用。
+
+/** 自訂區塊 iframe 的高度範圍：區塊回報的高度夾在這之間 */
+export const BLOCK_MIN_H = 80
+export const BLOCK_MAX_H = 1600
+/** 區塊還沒回報高度前的預設高度（匯出檔沒有 script 可跑時也用這個） */
+export const BLOCK_DEFAULT_H = 220
+
+/** 區塊回報的高度：只接受有限的數字，並夾在範圍內；格式不對回傳 undefined */
+export function blockHeight(data: unknown, id: string): number | undefined {
+  const d = data as { type?: unknown; id?: unknown; height?: unknown } | null
+  if (!d || d.type !== 'harness-block-height' || d.id !== id) return undefined
+  if (typeof d.height !== 'number' || !Number.isFinite(d.height)) return undefined
+  return Math.min(Math.max(d.height, BLOCK_MIN_H), BLOCK_MAX_H)
+}
+```
 
 ```tsx
+// src/renderer/src/report/CustomBlockFrame.tsx
 import { useEffect, useRef, useState } from 'react'
+import { BLOCK_DEFAULT_H, blockHeight } from './blocks'
 
-/** 以獨立 protocol + sandbox iframe 呈現 Claude 產生的 HTML，不給 same-origin、禁止網路 */
-export function CustomBlockFrame({ taskId, version, id, title }: { taskId: string; version: number; id: string; title: string }) {
+/**
+ * 以獨立的 harness-block:// scheme + sandbox iframe 呈現 Claude 產生的 HTML：
+ * 只給 allow-scripts（不給 same-origin，拿不到 renderer 與 preload），主程序回應的 CSP 禁止連網。
+ * 高度由區塊自己回報；只接受來自這個 iframe 的訊息。
+ */
+export function CustomBlockFrame({
+  taskId,
+  version,
+  id,
+  title
+}: {
+  taskId: string
+  version: number
+  id: string
+  title: string
+}) {
   const ref = useRef<HTMLIFrameElement>(null)
-  const [height, setHeight] = useState(220)
+  const [height, setHeight] = useState(BLOCK_DEFAULT_H)
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
-      if (e.source !== ref.current?.contentWindow) return
-      const d = e.data as { type?: string; id?: string; height?: number }
-      if (d?.type === 'harness-block-height' && d.id === id && typeof d.height === 'number') setHeight(Math.min(Math.max(d.height, 80), 1600))
+      const frame = ref.current
+      if (!frame || e.source === null || e.source !== frame.contentWindow) return
+      const h = blockHeight(e.data, id)
+      if (h !== undefined) setHeight(h)
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
   }, [id])
   return (
     <iframe
-      ref={ref} title={title} sandbox="allow-scripts"
+      ref={ref}
+      title={title}
+      sandbox="allow-scripts"
+      referrerPolicy="no-referrer"
       src={`harness-block://report/${taskId}/${version}/${id}`}
-      className="w-full rounded-2xl border-0 bg-fill-2" style={{ height }}
+      className="block w-full rounded-2xl border-0 bg-fill-2"
+      style={{ height }}
     />
   )
 }
 ```
 
-**Step 5: DiffView.tsx**
+**Step 6: 錨點、留言元件與 DiffView.tsx**
+
+```ts
+// src/renderer/src/report/anchors.ts
+// 回饋錨點（主程序原樣轉給 Claude）：section:<id>、decision:<id>、block:<id>、diff:<路徑>:<新檔行號>
+import type { FeedbackItem } from '@shared/types'
+
+export const diffAnchor = (path: string, line: number) => `diff:${path}:${line}`
+
+/** diff 錨點的檔案路徑（路徑本身可能含冒號，所以取最後一個冒號之前） */
+export function diffAnchorPath(anchor: string): string | undefined {
+  if (!anchor.startsWith('diff:')) return undefined
+  const rest = anchor.slice('diff:'.length)
+  const i = rest.lastIndexOf(':')
+  return i > 0 ? rest.slice(0, i) : undefined
+}
+
+const KIND: Record<string, string> = {
+  diff: '程式碼',
+  decision: '決策',
+  block: '視覺化',
+  section: '區塊'
+}
+
+/** 回饋清單上的標題，例如「程式碼 · src/a.ts:12」 */
+export function feedbackTitle(f: FeedbackItem): string {
+  const kind = KIND[f.anchor.slice(0, f.anchor.indexOf(':'))]
+  return kind ? `${kind} · ${f.label}` : f.label
+}
+```
 
 ```tsx
-import { type FormEvent, useMemo, useState } from 'react'
-import { parseUnifiedDiff } from '@shared/diff'
-import type { ReportInput } from '@shared/report'
-import type { DiffStats } from '@shared/types'
-import { useStore } from '../store'
-import { cx } from '../components/ui'
+// src/renderer/src/report/comments.tsx
+// 報告上的留言：留言按鈕、輸入框，以及已經留下（還沒送出）的回饋
+import { type FormEvent, useState } from 'react'
+import { cx, Icons } from '../components/ui'
 
-type Note = ReportInput['file_notes'][number]
-
-export function DiffView({ taskId, diff, perFile, notes, selected: controlled, onSelect, readOnly }: {
-  taskId: string; diff: string; perFile: DiffStats['perFile']; notes: Note[]
-  selected?: string; onSelect?: (path: string) => void; readOnly?: boolean
+export function CommentButton({
+  label,
+  onClick,
+  className
+}: {
+  /** 螢幕閱讀器唸的名稱，例如「對「概觀」留言」 */
+  label: string
+  onClick: () => void
+  className?: string
 }) {
-  const files = useMemo(() => parseUnifiedDiff(diff), [diff])
-  const [own, setOwn] = useState(files[0]?.path)
-  const selected = controlled ?? own
-  const select = (p: string) => { setOwn(p); onSelect?.(p) }
-  const file = files.find((f) => f.path === selected) ?? files[0]
-  const note = notes.find((n) => n.path === file?.path)
-  const addFeedback = useStore((s) => s.addFeedback)
-  const items = useStore((s) => s.feedback[taskId]) ?? []
-  const [commenting, setCommenting] = useState<number>()
-  const [text, setText] = useState('')
-
-  if (!file) return <span className="text-muted">沒有程式碼變更</span>
-
-  const submit = (e: FormEvent, line: number) => {
-    e.preventDefault()
-    if (!text.trim()) return
-    addFeedback(taskId, { anchor: `diff:${file.path}:${line}`, label: `${file.path}:${line}`, text: text.trim() })
-    setText('')
-    setCommenting(undefined)
-  }
-
   return (
-    <div className="flex flex-col gap-3.5">
-      <div className="flex flex-wrap gap-1.5 text-xs">
-        {files.map((f) => {
-          const s = perFile.find((p) => p.path === f.path)
-          return (
-            <button key={f.path} type="button" onClick={() => select(f.path)}
-              className={cx('rounded-full px-3 py-1.5 font-mono', f.path === file.path ? 'bg-ink text-white' : 'bg-fill')}>
-              {f.path}{s ? ` +${s.additions}${s.deletions ? ` −${s.deletions}` : ''}` : ''}
-            </button>
-          )
-        })}
-      </div>
-      {note && <div className="rounded-xl bg-brand-tint px-3.5 py-3 text-[13px] text-[#134e4a]"><span className="font-bold">為什麼：</span>{note.why}</div>}
-      <div className="overflow-x-auto rounded-xl bg-code font-mono text-[12.5px] leading-[1.8] text-code-ink">
-        {file.hunks.map((h, hi) => (
-          <div key={hi}>
-            <div className="px-3 text-[#7d8794]">{h.header}</div>
-            {h.lines.map((l, li) => {
-              const lineNo = l.newNo
-              const hunkNote = lineNo !== undefined ? note?.hunks.find((x) => x.line_start === lineNo) : undefined
-              const fb = lineNo !== undefined ? items.find((f) => f.anchor === `diff:${file.path}:${lineNo}`) : undefined
-              return (
-                <div key={li}>
-                  {hunkNote && <div className="mx-3 my-1 rounded-lg bg-[#134e4a] px-3 py-1.5 font-sans text-[12px] text-[#d5ebe8]">為什麼（{hunkNote.line_start}–{hunkNote.line_end} 行）：{hunkNote.why}</div>}
-                  <div className={cx('grid grid-cols-[52px_minmax(0,1fr)]', l.type === 'add' && 'bg-[rgba(34,197,94,0.14)]', l.type === 'del' && 'bg-[rgba(239,68,68,0.16)]', fb && 'shadow-[inset_3px_0_0_#facc15]')}>
-                    {lineNo !== undefined && !readOnly ? (
-                      <button type="button" aria-label={`對第 ${lineNo} 行留言`} onClick={() => setCommenting(lineNo)} className="pr-3 text-right text-[#7d8794] hover:text-white">{lineNo}</button>
-                    ) : <span className="pr-3 text-right text-[#4f5864]">{l.oldNo}</span>}
-                    <span className="whitespace-pre">{l.type === 'add' ? '+ ' : l.type === 'del' ? '- ' : '  '}{l.text}</span>
-                  </div>
-                  {fb && <div className="ml-[52px] flex gap-2.5 rounded-lg bg-note px-3 py-2 font-sans text-[13px] text-ink"><span className="text-xs text-note-ink">回饋</span>{fb.text}</div>}
-                  {commenting === lineNo && lineNo !== undefined && (
-                    <form onSubmit={(e) => submit(e, lineNo)} className="ml-[52px] flex gap-2 p-2 font-sans">
-                      <input autoFocus aria-label="回饋" value={text} onChange={(e) => setText(e.target.value)} placeholder="這一行要怎麼改？"
-                        className="h-9 flex-1 rounded-lg border-none bg-white px-3 text-[13px] text-ink outline-none" />
-                      <button type="button" onClick={() => setCommenting(undefined)} className="px-2 text-xs text-[#a9b3bf]">取消</button>
-                    </form>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        ))}
-      </div>
+    <button
+      type="button"
+      aria-label={label}
+      title="留言"
+      onClick={onClick}
+      className={cx(
+        'flex h-7 flex-none cursor-pointer items-center gap-1 rounded-lg px-2 text-xs text-muted hover:bg-fill hover:text-ink',
+        className
+      )}
+    >
+      <Icons.Comment width={13} height={13} />
+      留言
+    </button>
+  )
+}
+
+/** 輸入一則回饋：Enter 加入、Esc 取消；dark 用在程式碼區塊裡 */
+export function CommentForm({
+  initial = '',
+  placeholder,
+  dark,
+  onSubmit,
+  onCancel,
+  className
+}: {
+  initial?: string
+  placeholder: string
+  dark?: boolean
+  onSubmit: (text: string) => void
+  onCancel: () => void
+  className?: string
+}) {
+  const [text, setText] = useState(initial)
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    if (text.trim()) onSubmit(text.trim())
+  }
+  return (
+    <form onSubmit={submit} className={cx('flex items-center gap-2 font-sans', className)}>
+      <input
+        // 按了「留言」就是要打字
+        autoFocus
+        aria-label="回饋"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onCancel()
+        }}
+        placeholder={placeholder}
+        className={cx(
+          'h-9 min-w-0 flex-1 rounded-lg px-3 text-[13px] text-ink outline-none placeholder:text-muted-2',
+          dark ? 'bg-surface' : 'border border-line bg-surface focus:border-brand'
+        )}
+      />
+      <button
+        type="submit"
+        disabled={!text.trim()}
+        className="h-9 flex-none cursor-pointer rounded-lg bg-brand px-3 text-xs font-medium text-white hover:bg-brand-hover disabled:cursor-default disabled:opacity-50"
+      >
+        加入
+      </button>
+      <button
+        type="button"
+        onClick={onCancel}
+        className={cx(
+          'h-9 flex-none cursor-pointer px-1.5 text-xs',
+          dark ? 'text-code-muted hover:text-white' : 'text-muted hover:text-ink'
+        )}
+      >
+        取消
+      </button>
+    </form>
+  )
+}
+
+/** 已經留下、等著跟其他回饋一起送出的意見（對照 B5 程式碼下方的黃色便條） */
+export function FeedbackNote({
+  title,
+  text,
+  className
+}: {
+  title: string
+  text: string
+  className?: string
+}) {
+  return (
+    <div
+      className={cx(
+        'flex gap-2.5 rounded-xl bg-note px-3.5 py-3 font-sans text-[13px] leading-relaxed text-ink',
+        className
+      )}
+    >
+      <span
+        aria-hidden
+        className="flex size-6 flex-none items-center justify-center rounded-full bg-ink text-[11px] text-white"
+      >
+        你
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="text-xs text-note-ink">{title}</span>
+        <span className="break-words whitespace-pre-wrap">{text}</span>
+      </span>
     </div>
   )
 }
 ```
 
-**Step 6: ReportView.tsx**（對照 `B5-Report.dc.html`；`static` 模式給匯出用，不含互動控制）
+```tsx
+// src/renderer/src/report/DiffView.tsx
+import { useMemo, useState } from 'react'
+import { type DiffFile, parseUnifiedDiff } from '@shared/diff'
+import type { ReportInput } from '@shared/report'
+import type { DiffStats } from '@shared/types'
+import { InlineCode } from '../components/Markdown'
+import { cx } from '../components/ui'
+import { useStore } from '../store'
+import { diffAnchor } from './anchors'
+import { CommentForm, FeedbackNote } from './comments'
+
+type Note = ReportInput['file_notes'][number]
+type HunkNote = Note['hunks'][number]
+type PerFile = DiffStats['perFile']
+
+/**
+ * 段落說明（行號是新檔的）放在範圍內第一個顯示出來的行之前；
+ * 範圍內沒有任何顯示出來的行（例如只刪除、或 Claude 給的行號不在 diff 裡）就列在檔案說明下方。
+ */
+function placeHunkNotes(file: DiffFile, notes: HunkNote[]) {
+  const before = new Map<string, HunkNote[]>()
+  const placed = new Set<HunkNote>()
+  file.hunks.forEach((h, hi) =>
+    h.lines.forEach((l, li) => {
+      if (l.newNo === undefined) return
+      for (const n of notes) {
+        if (placed.has(n) || l.newNo < n.line_start || l.newNo > n.line_end) continue
+        placed.add(n)
+        const key = `${hi}:${li}`
+        before.set(key, [...(before.get(key) ?? []), n])
+      }
+    })
+  )
+  return { before, rest: notes.filter((n) => !placed.has(n)) }
+}
+
+/** 檔案標籤上的增刪行數；二進位檔（都是 0）不顯示 */
+const statText = (s?: PerFile[number]) =>
+  s && (s.additions || s.deletions)
+    ? ` +${s.additions}${s.deletions ? ` −${s.deletions}` : ''}`
+    : ''
+
+/** 一個檔案的 diff：檔案說明、段落說明、每一行（可以點行號留言） */
+function FileDiff({
+  taskId,
+  file,
+  note,
+  stats,
+  readOnly,
+  heading
+}: {
+  taskId: string
+  file: DiffFile
+  note?: Note
+  stats?: PerFile[number]
+  readOnly?: boolean
+  /** 匯出時每個檔案前面加上檔名標題 */
+  heading?: boolean
+}) {
+  const items = useStore((s) => s.feedback[taskId])
+  const addFeedback = useStore((s) => s.addFeedback)
+  const [commenting, setCommenting] = useState<number>()
+  const { before, rest } = placeHunkNotes(file, note?.hunks ?? [])
+  // 唯讀（舊版本、回看、匯出）不顯示待送出的回饋：那些是針對最新版本留的
+  const feedbackOf = (line: number) =>
+    readOnly ? undefined : items?.find((f) => f.anchor === diffAnchor(file.path, line))?.text
+
+  return (
+    <div className="flex flex-col gap-3.5">
+      {heading && (
+        <h3 className="m-0 font-mono text-[13px] font-medium">
+          {file.path}
+          <span className="font-normal text-muted">{statText(stats)}</span>
+        </h3>
+      )}
+      {(note || rest.length > 0) && (
+        <div className="flex flex-col gap-1 rounded-xl bg-brand-tint px-3.5 py-3 text-[13px] text-brand-deep">
+          {note && (
+            <div>
+              <span className="font-bold">為什麼：</span>
+              <InlineCode text={note.why} />
+            </div>
+          )}
+          {rest.map((n, i) => (
+            <div key={i}>
+              <span className="font-medium">
+                第 {n.line_start}–{n.line_end} 行：
+              </span>
+              <InlineCode text={n.why} />
+            </div>
+          ))}
+        </div>
+      )}
+      {file.binary ? (
+        <div className="rounded-xl bg-fill-2 px-3.5 py-3 text-[13px] text-muted">
+          二進位檔案，不顯示內容
+        </div>
+      ) : file.hunks.length === 0 ? (
+        <div className="rounded-xl bg-fill-2 px-3.5 py-3 text-[13px] text-muted">
+          {file.status === 'added'
+            ? '新增的空白檔案'
+            : file.status === 'deleted'
+              ? '刪除的空白檔案'
+              : '只有檔名或權限變更'}
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-xl bg-code py-1.5 font-mono text-[12.5px] leading-[1.8] text-code-ink">
+          {file.hunks.map((h, hi) => (
+            <div key={hi}>
+              <div className="px-3 whitespace-pre text-code-line">{h.header}</div>
+              {h.lines.map((l, li) => {
+                const n = l.newNo
+                const fb = n !== undefined ? feedbackOf(n) : undefined
+                return (
+                  <div
+                    key={li}
+                    data-anchor={n !== undefined ? diffAnchor(file.path, n) : undefined}
+                  >
+                    {before.get(`${hi}:${li}`)?.map((x, i) => (
+                      <div
+                        key={i}
+                        className="mx-3 my-1 rounded-lg bg-brand-deep px-3 py-1.5 font-sans text-xs leading-relaxed text-brand-soft"
+                      >
+                        <span className="font-medium">
+                          為什麼（第 {x.line_start}–{x.line_end} 行）：
+                        </span>
+                        <InlineCode text={x.why} />
+                      </div>
+                    ))}
+                    <div
+                      className={cx(
+                        'grid grid-cols-[52px_minmax(0,1fr)]',
+                        l.type === 'add' && 'bg-diff-add/14',
+                        l.type === 'del' && 'bg-diff-del/16',
+                        fb !== undefined &&
+                          'bg-diff-flag/22 shadow-[inset_3px_0_0_var(--color-diff-flag)]'
+                      )}
+                    >
+                      {n !== undefined && !readOnly ? (
+                        <button
+                          type="button"
+                          data-line
+                          aria-label={`對第 ${n} 行留言`}
+                          onClick={() => setCommenting(n)}
+                          className="cursor-pointer pr-3 text-right text-code-line hover:text-white"
+                        >
+                          {n}
+                        </button>
+                      ) : (
+                        // 刪除的行沒有新檔行號：顯示舊檔行號，顏色淡一點
+                        <span
+                          data-line
+                          className={cx(
+                            'pr-3 text-right select-none',
+                            n === undefined ? 'text-code-line/60' : 'text-code-line'
+                          )}
+                        >
+                          {n ?? l.oldNo}
+                        </span>
+                      )}
+                      <span className="whitespace-pre">
+                        {l.type === 'add' ? '+ ' : l.type === 'del' ? '- ' : '  '}
+                        {l.text}
+                      </span>
+                    </div>
+                    {n !== undefined && commenting === n ? (
+                      <CommentForm
+                        dark
+                        initial={fb}
+                        placeholder="這一行要怎麼改？"
+                        onSubmit={(text) => {
+                          addFeedback(taskId, {
+                            anchor: diffAnchor(file.path, n),
+                            label: `${file.path}:${n}`,
+                            text
+                          })
+                          setCommenting(undefined)
+                        }}
+                        onCancel={() => setCommenting(undefined)}
+                        className="my-1.5 mr-3 ml-[52px]"
+                      />
+                    ) : (
+                      fb !== undefined && (
+                        <FeedbackNote
+                          title={`回饋 · 第 ${n} 行`}
+                          text={fb}
+                          className="my-1.5 mr-3 ml-[52px]"
+                        />
+                      )
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 程式碼變更：上方是檔案標籤，下方是選取檔案的 diff。
+ * isStatic（匯出 HTML）時沒有 script 可以切換，依序列出所有檔案。
+ */
+export function DiffView({
+  taskId,
+  diff,
+  perFile,
+  notes,
+  selected,
+  onSelect,
+  readOnly,
+  isStatic
+}: {
+  taskId: string
+  diff: string
+  perFile: PerFile
+  notes: Note[]
+  /** 由外部控制選取的檔案（例如點架構圖的方塊） */
+  selected?: string
+  onSelect?: (path: string) => void
+  readOnly?: boolean
+  isStatic?: boolean
+}) {
+  const files = useMemo(() => parseUnifiedDiff(diff), [diff])
+  const [own, setOwn] = useState<string>()
+  const current = selected ?? own
+  const file = files.find((f) => f.path === current) ?? files[0]
+  const statsOf = (path: string) => perFile.find((p) => p.path === path)
+  const noteOf = (path: string) => notes.find((n) => n.path === path)
+
+  if (!file) return <span className="text-[13px] text-muted">沒有程式碼變更</span>
+  if (isStatic)
+    return (
+      <div className="flex flex-col gap-7">
+        {files.map((f) => (
+          <FileDiff
+            key={f.path}
+            taskId={taskId}
+            file={f}
+            note={noteOf(f.path)}
+            stats={statsOf(f.path)}
+            readOnly
+            heading
+          />
+        ))}
+      </div>
+    )
+  return (
+    <div className="flex flex-col gap-3.5">
+      <div role="group" aria-label="變更的檔案" className="flex flex-wrap gap-1.5 text-xs">
+        {files.map((f) => (
+          <button
+            key={f.path}
+            type="button"
+            aria-pressed={f.path === file.path}
+            onClick={() => {
+              setOwn(f.path)
+              onSelect?.(f.path)
+            }}
+            className={cx(
+              'cursor-pointer rounded-full px-3 py-1.5 font-mono',
+              f.path === file.path ? 'bg-ink text-white' : 'bg-fill hover:bg-chip'
+            )}
+          >
+            {f.path}
+            {statText(statsOf(f.path))}
+          </button>
+        ))}
+      </div>
+      {/* key：換檔案時關掉正在輸入的留言 */}
+      <FileDiff
+        key={file.path}
+        taskId={taskId}
+        file={file}
+        note={noteOf(file.path)}
+        readOnly={readOnly}
+      />
+    </div>
+  )
+}
+```
+
+**Step 7: ReportView.tsx**（對照 `B5-Report.dc.html`；`isStatic` 給匯出用，不含互動控制）
 
 ```tsx
+// src/renderer/src/report/ReportView.tsx
+// 對照 docs/design/B5-Report.dc.html 的 <main>；isStatic 給匯出 HTML 用，不含任何互動控制
 import { type ReactNode, useState } from 'react'
-import type { Report, Task } from '@shared/types'
+import { wrapBlockHtml } from '@shared/blockHtml'
+import type { ReportInput } from '@shared/report'
+import type { Report, Task, VerificationResult } from '@shared/types'
+import { InlineCode } from '../components/Markdown'
+import { cx, Icons, Pill } from '../components/ui'
+import { shortTime } from '../lib/format'
+import { useStore } from '../store'
 import { ArchitectureDiagram } from './ArchitectureDiagram'
+import { BLOCK_DEFAULT_H } from './blocks'
+import { CommentButton, CommentForm, FeedbackNote } from './comments'
 import { CustomBlockFrame } from './CustomBlockFrame'
 import { DiffView } from './DiffView'
-import { useStore } from '../store'
-import { cx, Icons, Pill } from '../components/ui'
 
-function Section({ id, title, tag, children, onComment, className }: { id: string; title: string; tag?: ReactNode; children: ReactNode; onComment?: () => void; className?: string }) {
+type Decision = ReportInput['decisions'][number]
+type Limitation = ReportInput['limitations'][number]
+
+/** 報告的一個區塊（白底卡片）；data-anchor 讓回饋清單可以捲到這裡 */
+function Section({
+  id,
+  anchor,
+  title,
+  tag,
+  end,
+  subtitle,
+  className,
+  children
+}: {
+  id: string
+  anchor?: string
+  title: string
+  /** 緊接在標題後面（例如「Claude 自訂視覺化」） */
+  tag?: ReactNode
+  /** 靠右（圖例、留言按鈕） */
+  end?: ReactNode
+  subtitle?: ReactNode
+  className?: string
+  children: ReactNode
+}) {
   return (
-    <section id={`report-${id}`} className={cx('flex flex-col gap-4 rounded-2xl bg-surface p-7 shadow-card', className)}>
-      <div className="flex flex-wrap items-center gap-2.5">
-        <span className="text-lg font-bold">{title}</span>{tag}
-        {onComment && <button type="button" aria-label={`對「${title}」留言`} onClick={onComment} className="ml-auto flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs text-muted hover:bg-fill"><Icons.Comment width={14} height={14} />留言</button>}
+    <section
+      id={`report-${id}`}
+      data-anchor={anchor}
+      aria-label={title}
+      className={cx('flex flex-col gap-4 rounded-2xl bg-surface p-7 shadow-card', className)}
+    >
+      <div className="flex flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <h2 className="m-0 text-lg font-bold">{title}</h2>
+          {tag}
+          {end && <div className="ml-auto flex items-center gap-3">{end}</div>}
+        </div>
+        {subtitle && <span className="text-xs text-muted">{subtitle}</span>}
       </div>
       {children}
     </section>
   )
 }
 
-function SectionComment({ taskId, anchor, label, onDone }: { taskId: string; anchor: string; label: string; onDone: () => void }) {
+/** 某個錨點的留言：正在輸入時顯示輸入框，否則顯示已留下的意見（沒有就不顯示） */
+function CommentSlot({
+  taskId,
+  anchor,
+  label,
+  open,
+  onClose
+}: {
+  taskId: string
+  anchor: string
+  label: string
+  open: boolean
+  onClose: () => void
+}) {
+  const existing = useStore((s) => s.feedback[taskId]?.find((f) => f.anchor === anchor)?.text)
   const addFeedback = useStore((s) => s.addFeedback)
-  const [text, setText] = useState('')
+  if (open)
+    return (
+      <CommentForm
+        initial={existing}
+        placeholder={`對「${label}」的回饋…`}
+        onSubmit={(text) => {
+          addFeedback(taskId, { anchor, label, text })
+          onClose()
+        }}
+        onCancel={onClose}
+      />
+    )
+  return existing === undefined ? null : <FeedbackNote title="回饋" text={existing} />
+}
+
+function Stat({
+  label,
+  className,
+  labelClass,
+  children
+}: {
+  label: string
+  className?: string
+  labelClass?: string
+  children: ReactNode
+}) {
   return (
-    <form onSubmit={(e) => { e.preventDefault(); if (text.trim()) { addFeedback(taskId, { anchor, label, text: text.trim() }); onDone() } }} className="flex gap-2">
-      <input autoFocus aria-label="回饋" value={text} onChange={(e) => setText(e.target.value)} placeholder={`對「${label}」的回饋…`} className="h-10 flex-1 rounded-xl border border-line px-3 text-[13px] outline-none focus:border-brand" />
-      <button type="button" onClick={onDone} className="px-2 text-xs text-muted">取消</button>
-    </form>
+    <div className={cx('flex flex-col rounded-[14px] bg-fill-2 px-4 py-3.5', className)}>
+      <span className={cx('text-xs text-muted', labelClass)}>{label}</span>
+      <span className="text-2xl font-bold">{children}</span>
+    </div>
   )
 }
 
-export function ReportView({ task, report, isStatic, onOpenQuestion }: { task: Task; report: Report; isStatic?: boolean; onOpenQuestion?: () => void }) {
+function DecisionSource({
+  task,
+  source,
+  onOpenQuestion
+}: {
+  task: Task
+  source: Decision['source']
+  onOpenQuestion?: () => void
+}) {
+  if (source.type === 'branch') return <Pill tone="decision">來自分岔</Pill>
+  if (source.type === 'implementation') return <Pill tone="muted">實作中決定</Pill>
+  const i = task.questions.findIndex((q) => q.id === source.ref)
+  const label = i >= 0 ? `問題 ${i + 1}` : '問題'
+  // 點了打開釐清階段（回看當時的問答）
+  return onOpenQuestion ? (
+    <button type="button" onClick={onOpenQuestion} className="cursor-pointer">
+      <Pill className="hover:bg-chip">{label}</Pill>
+    </button>
+  ) : (
+    <Pill>{label}</Pill>
+  )
+}
+
+const SEVERITY: Record<Limitation['severity'], { box: string; body: string; tag: string }> = {
+  high: { box: 'bg-danger-soft', body: 'text-ink-2', tag: 'text-danger' },
+  medium: { box: 'bg-decision', body: 'text-decision-body', tag: 'text-decision-ink' },
+  low: { box: 'bg-fill-2', body: 'text-muted', tag: 'text-muted' }
+}
+const SEVERITY_LABEL: Record<Limitation['severity'], string> = {
+  high: '高風險',
+  medium: '中風險',
+  low: '低風險'
+}
+
+const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} 秒`
+
+function VerificationRow({ v }: { v: VerificationResult }) {
+  const state = v.skipped ? 'skipped' : v.exitCode === 0 ? 'passed' : 'failed'
+  const status = v.skipped
+    ? v.skipped
+    : v.exitCode === 0
+      ? `通過 · ${seconds(v.durationMs)}`
+      : v.exitCode === null
+        ? `未完成 · ${seconds(v.durationMs)}`
+        : `失敗（exit ${v.exitCode}）· ${seconds(v.durationMs)}`
+  const row = (
+    <>
+      {state === 'passed' ? (
+        <Icons.Check className="flex-none text-brand" strokeWidth={2.5} />
+      ) : state === 'failed' ? (
+        <Icons.X className="flex-none text-danger" strokeWidth={2.5} />
+      ) : (
+        <Icons.Minus className="flex-none text-muted" strokeWidth={2.5} />
+      )}
+      <code className="min-w-0 truncate bg-transparent p-0" title={v.command}>
+        {v.command}
+      </code>
+      <span
+        className={cx(
+          'ml-auto min-w-0 text-right text-xs',
+          state === 'passed' ? 'text-brand-ink' : state === 'failed' ? 'text-danger' : 'text-muted'
+        )}
+      >
+        {status}
+      </span>
+    </>
+  )
+  const box = cx(
+    'rounded-xl px-3.5 py-3',
+    state === 'passed' ? 'bg-brand-tint' : state === 'failed' ? 'bg-danger-soft' : 'bg-fill-2'
+  )
+  if (!v.outputTail) return <div className={cx(box, 'flex items-center gap-3')}>{row}</div>
+  // 失敗的輸出預設展開
+  return (
+    <details className={cx(box, 'group')} open={state === 'failed'}>
+      <summary className="flex cursor-pointer list-none items-center gap-3 [&::-webkit-details-marker]:hidden">
+        {row}
+        <Icons.Chevron
+          width={14}
+          height={14}
+          className="flex-none text-muted transition-transform group-open:rotate-90"
+        />
+      </summary>
+      <pre className="mt-2.5 mb-0 max-h-64 overflow-auto rounded-lg bg-code p-3 font-mono text-xs whitespace-pre-wrap text-code-ink">
+        {v.outputTail}
+      </pre>
+    </details>
+  )
+}
+
+export function ReportView({
+  task,
+  report,
+  isStatic,
+  canComment,
+  diffFile,
+  onDiffFile,
+  onOpenQuestion
+}: {
+  task: Task
+  report: Report
+  /** 匯出 HTML：沒有按鈕、所有檔案的 diff 都列出來、自訂區塊用 srcdoc */
+  isStatic?: boolean
+  /** 可以留言（待審閱且正在看最新版本） */
+  canComment?: boolean
+  /** diff 選取的檔案（由外部控制時給） */
+  diffFile?: string
+  onDiffFile?: (path: string) => void
+  onOpenQuestion?: () => void
+}) {
   const r = report.input
-  const [diffFile, setDiffFile] = useState<string>()
+  const [ownFile, setOwnFile] = useState<string>()
   const [commentOn, setCommentOn] = useState<string>()
-  const passed = report.verification.filter((v) => v.exitCode === 0).length
-  const ran = report.verification.filter((v) => !v.skipped).length
-  const comment = (anchor: string) => (isStatic ? undefined : () => setCommentOn(anchor))
-  const commentBox = (anchor: string, label: string) => commentOn === anchor && <SectionComment taskId={task.id} anchor={anchor} label={label} onDone={() => setCommentOn(undefined)} />
-  const jumpTo = (path: string) => { setDiffFile(path); document.getElementById('report-diff')?.scrollIntoView({ behavior: 'smooth' }) }
+  const commentable = !isStatic && !!canComment
+  const selectFile = (path: string) => {
+    setOwnFile(path)
+    onDiffFile?.(path)
+  }
+  const changed = new Set(report.stats.perFile.map((f) => f.path))
+  const ran = report.verification.filter((v) => !v.skipped)
+  const passed = ran.filter((v) => v.exitCode === 0).length
+  const skipped = report.verification.length - ran.length
+  const allPassed = ran.length > 0 && passed === ran.length
+
+  const button = (anchor: string, label: string, aria = `對「${label}」留言`) =>
+    commentable && <CommentButton label={aria} onClick={() => setCommentOn(anchor)} />
+  const slot = (anchor: string, label: string) =>
+    commentable && (
+      <CommentSlot
+        taskId={task.id}
+        anchor={anchor}
+        label={label}
+        open={commentOn === anchor}
+        onClose={() => setCommentOn(undefined)}
+      />
+    )
+  const jumpToFile = (path: string) => {
+    selectFile(path)
+    document.getElementById('report-diff')?.scrollIntoView?.({ behavior: 'smooth' })
+  }
 
   return (
     <div className="flex flex-col gap-3">
-      <Section id="overview" title="概觀" onComment={comment('section:overview')}>
-        {commentBox('section:overview', '概觀')}
-        <h1 className="m-0 text-[26px] font-bold">{r.overview.headline}</h1>
-        <p className="m-0 max-w-[720px] text-ink-2">{r.overview.summary}</p>
+      <section
+        id="report-overview"
+        data-anchor="section:overview"
+        aria-label="概觀"
+        className="flex flex-col gap-[18px] rounded-2xl bg-surface p-7 shadow-card"
+      >
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-3">
+            <span className="text-xs font-medium text-brand">概觀</span>
+            <span className="ml-auto">{button('section:overview', '概觀')}</span>
+          </div>
+          {slot('section:overview', '概觀')}
+          <h1 className="m-0 text-[26px] leading-snug font-bold">{r.overview.headline}</h1>
+          <span className="max-w-[720px] whitespace-pre-wrap text-ink-2">
+            <InlineCode text={r.overview.summary} />
+          </span>
+        </div>
         <div className="grid grid-cols-4 gap-2.5">
-          <div className="flex flex-col rounded-[14px] bg-fill-2 px-4 py-3.5"><span className="text-xs text-muted">變更檔案</span><span className="text-2xl font-bold">{report.stats.files}</span></div>
-          <div className="flex flex-col rounded-[14px] bg-fill-2 px-4 py-3.5"><span className="text-xs text-muted">行數</span><span className="text-2xl font-bold"><span className="text-ok">+{report.stats.additions}</span> <span className="text-lg text-danger">−{report.stats.deletions}</span></span></div>
-          <div className={cx('flex flex-col rounded-[14px] px-4 py-3.5', ran && passed === ran ? 'bg-brand-tint' : 'bg-red-50')}><span className="text-xs text-muted">驗證</span><span className="text-2xl font-bold">{passed} / {ran} 通過</span></div>
-          <div className="flex flex-col rounded-[14px] bg-decision px-4 py-3.5"><span className="text-xs text-decision-ink">決策</span><span className="text-2xl font-bold">{r.decisions.length}</span></div>
-        </div>
-      </Section>
-
-      <Section id="arch" title="架構前後對照" onComment={comment('section:architecture')}
-        tag={<span className="ml-auto flex gap-3 text-xs text-ink-2">
-          <span className="flex items-center gap-1.5"><span className="size-3 rounded bg-brand" />新增</span>
-          <span className="flex items-center gap-1.5"><span className="size-3 rounded bg-surface shadow-[inset_0_0_0_2px_#2563eb]" />修改</span>
-          <span className="flex items-center gap-1.5"><span className="size-3 rounded bg-line-soft" />未變</span>
-        </span>}>
-        {commentBox('section:architecture', '架構')}
-        <div className="grid grid-cols-2 gap-4">
-          {(['before', 'after'] as const).map((side) => (
-            <div key={side} className="flex flex-col gap-3 rounded-2xl bg-fill-2 p-5">
-              <span className={cx('text-[13px] font-bold', side === 'after' ? 'text-brand' : 'text-muted')}>{side === 'before' ? '之前' : '之後'}</span>
-              <ArchitectureDiagram graph={r.architecture[side]} onSelectFile={isStatic ? undefined : jumpTo} />
-            </div>
-          ))}
-        </div>
-      </Section>
-
-      <Section id="decisions" title="決策與原因">
-        <div className="grid grid-cols-2 gap-3">
-          {r.decisions.map((d) => (
-            <div key={d.id} className="flex flex-col gap-2 rounded-[14px] p-4 shadow-[0_0_0_1px_#e5e8ed]">
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-xs text-muted">{d.id.toUpperCase()}</span>
-                <span className="font-bold">{d.title}</span>
-                <span className="ml-auto">
-                  {d.source.type === 'branch' ? <Pill tone="decision">來自分岔</Pill>
-                    : d.source.type === 'question' ? <button type="button" onClick={onOpenQuestion}><Pill>問題 {task.questions.findIndex((q) => q.id === d.source.ref) + 1 || d.source.ref}</Pill></button>
-                    : <Pill tone="muted">實作中決定</Pill>}
-                </span>
-              </div>
-              <div className="text-[13px]"><span className="font-medium text-brand">選擇</span>　{d.chosen}</div>
-              {d.rejected.length > 0 && <div className="text-[13px] text-muted"><span className="font-medium">捨棄</span>　{d.rejected.join('；')}</div>}
-              <div className="rounded-[10px] bg-fill-2 px-3 py-2.5 text-[13px] text-ink-2">{d.rationale}</div>
-              {!isStatic && <button type="button" onClick={() => setCommentOn(`decision:${d.id}`)} className="self-start text-xs text-muted hover:text-ink">留言</button>}
-              {commentBox(`decision:${d.id}`, `決策 ${d.id}`)}
-            </div>
-          ))}
-        </div>
-      </Section>
-
-      {r.custom_blocks.map((b) => (
-        <Section key={b.id} id={`block-${b.id}`} title={b.title} tag={<Pill>Claude 自訂視覺化</Pill>} onComment={comment(`block:${b.id}`)}>
-          {commentBox(`block:${b.id}`, b.title)}
-          {isStatic
-            ? <iframe title={b.title} sandbox="allow-scripts" srcDoc={b.html} className="h-[360px] w-full rounded-2xl border-0 bg-fill-2" />
-            : <CustomBlockFrame taskId={task.id} version={report.version} id={b.id} title={b.title} />}
-        </Section>
-      ))}
-
-      <section id="report-limits" className="grid grid-cols-2 gap-4 rounded-2xl bg-surface p-7 shadow-card">
-        <div className="flex flex-col gap-2.5">
-          <div className="flex items-center"><span className="text-lg font-bold">限制與風險</span>
-            {!isStatic && <button type="button" aria-label="對「限制與風險」留言" onClick={() => setCommentOn('section:limitations')} className="ml-auto text-xs text-muted">留言</button>}</div>
-          {commentBox('section:limitations', '限制與風險')}
-          {r.limitations.length ? r.limitations.map((l, i) => (
-            <div key={i} className={cx('rounded-xl px-3.5 py-3 text-[13px]', l.severity === 'high' ? 'bg-red-50' : l.severity === 'medium' ? 'bg-decision' : 'bg-fill-2')}>
-              <span className="font-medium">{l.title}</span><br /><span className="text-ink-2">{l.detail}</span>
-            </div>
-          )) : <span className="text-[13px] text-muted">沒有已知限制</span>}
-        </div>
-        <div className="flex flex-col gap-2.5">
-          <span className="text-lg font-bold">後續工作</span>
-          {r.followups.length ? r.followups.map((f, i) => (
-            <div key={i} className="rounded-xl bg-fill-2 px-3.5 py-3 text-[13px]">{f.title}{f.detail && <span className="text-muted">：{f.detail}</span>}</div>
-          )) : <span className="text-[13px] text-muted">—</span>}
+          <Stat label="變更檔案">{report.stats.files}</Stat>
+          <Stat label="行數">
+            <span className="text-ok">+{report.stats.additions}</span>{' '}
+            <span className="text-lg text-danger">−{report.stats.deletions}</span>
+          </Stat>
+          <Stat
+            label="驗證"
+            className={ran.length === 0 ? '' : allPassed ? 'bg-brand-tint' : 'bg-danger-soft'}
+            labelClass={allPassed ? 'text-brand-muted' : undefined}
+          >
+            <span className={allPassed ? 'text-brand-ink' : ran.length ? 'text-danger' : ''}>
+              {ran.length ? `${passed} / ${ran.length} 通過` : '未執行'}
+            </span>
+            {skipped > 0 && (
+              <span className="ml-1.5 text-xs font-normal text-muted">略過 {skipped}</span>
+            )}
+          </Stat>
+          <Stat label="決策" className="bg-decision" labelClass="text-decision-ink">
+            {r.decisions.length}
+          </Stat>
         </div>
       </section>
 
-      <Section id="diff" title="程式碼變更" tag={<span className="text-xs text-muted">每段變更都附上「為什麼改」{!isStatic && '；點行號可以留下回饋'}</span>}>
-        <DiffView taskId={task.id} diff={report.diff} perFile={report.stats.perFile} notes={r.file_notes} selected={diffFile} onSelect={setDiffFile} readOnly={isStatic} />
+      <Section
+        id="arch"
+        anchor="section:architecture"
+        title="架構前後對照"
+        end={
+          <>
+            <span className="flex gap-3 text-xs text-ink-2">
+              <span className="flex items-center gap-1.5">
+                <span className="size-3 rounded bg-brand" />
+                新增
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="size-3 rounded bg-surface shadow-[inset_0_0_0_2px_var(--color-review)]" />
+                修改
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="size-3 rounded bg-line-soft" />
+                未變
+              </span>
+            </span>
+            {button('section:architecture', '架構前後對照')}
+          </>
+        }
+      >
+        {slot('section:architecture', '架構前後對照')}
+        <div className="grid grid-cols-2 gap-4">
+          {(['before', 'after'] as const).map((side) => (
+            <div key={side} className="flex min-w-0 flex-col gap-3 rounded-2xl bg-fill-2 p-5">
+              <span
+                className={cx(
+                  'text-[13px] font-bold',
+                  side === 'after' ? 'text-brand' : 'text-muted'
+                )}
+              >
+                {side === 'before' ? '之前' : '之後'}
+              </span>
+              <ArchitectureDiagram
+                graph={r.architecture[side]}
+                changedFiles={changed}
+                onSelectFile={isStatic ? undefined : jumpToFile}
+              />
+            </div>
+          ))}
+        </div>
+        {!isStatic && (
+          <span className="text-[13px] text-muted">點有變更的方塊可以跳到對應的程式碼變更。</span>
+        )}
       </Section>
 
-      <Section id="tests" title="測試結果" tag={<span className="text-xs text-muted">由 Harness 在 worktree 中實際執行</span>}>
+      <Section id="decisions" title="決策與原因">
+        {r.decisions.length === 0 ? (
+          <span className="text-[13px] text-muted">沒有記錄的決策</span>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            {r.decisions.map((d) => {
+              const anchor = `decision:${d.id}`
+              const label = `${d.id.toUpperCase()} ${d.title}`
+              return (
+                <div
+                  key={d.id}
+                  data-anchor={anchor}
+                  className="flex min-w-0 flex-col gap-2 rounded-[14px] p-4 shadow-[0_0_0_1px_var(--color-chip)]"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs text-muted">{d.id.toUpperCase()}</span>
+                    <span className="min-w-0 font-bold">
+                      <InlineCode text={d.title} />
+                    </span>
+                    <span className="ml-auto flex flex-none items-center gap-1">
+                      <DecisionSource
+                        task={task}
+                        source={d.source}
+                        onOpenQuestion={isStatic ? undefined : onOpenQuestion}
+                      />
+                      {button(anchor, label, `對決策 ${d.id.toUpperCase()} 留言`)}
+                    </span>
+                  </div>
+                  {d.chosen && (
+                    <div className="text-[13px]">
+                      <span className="mr-2 font-medium text-brand">選擇</span>
+                      <InlineCode text={d.chosen} />
+                    </div>
+                  )}
+                  {d.rejected.length > 0 && (
+                    <div className="text-[13px] text-muted">
+                      <span className="mr-2 font-medium">捨棄</span>
+                      <InlineCode text={d.rejected.join('；')} />
+                    </div>
+                  )}
+                  {d.rationale && (
+                    <div className="rounded-[10px] bg-fill-2 px-3 py-2.5 text-[13px] text-ink-2">
+                      <InlineCode text={d.rationale} />
+                    </div>
+                  )}
+                  {slot(anchor, label)}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </Section>
+
+      {r.custom_blocks.map((b) => (
+        <Section
+          key={b.id}
+          id={`block-${b.id}`}
+          anchor={`block:${b.id}`}
+          title={b.title}
+          tag={<Pill>Claude 自訂視覺化</Pill>}
+          end={button(`block:${b.id}`, b.title)}
+        >
+          {slot(`block:${b.id}`, b.title)}
+          {isStatic ? (
+            // 匯出檔：同一份包裝（CSP 禁止連網、回報高度）放進 srcdoc，一樣只給 allow-scripts
+            <iframe
+              title={b.title}
+              sandbox="allow-scripts"
+              srcDoc={wrapBlockHtml(b)}
+              data-block={b.id}
+              className="block w-full rounded-2xl border-0 bg-fill-2"
+              style={{ height: BLOCK_DEFAULT_H }}
+            />
+          ) : (
+            // key：換版本時重新載入、高度重新計算
+            <CustomBlockFrame
+              key={`${report.version}:${b.id}`}
+              taskId={task.id}
+              version={report.version}
+              id={b.id}
+              title={b.title}
+            />
+          )}
+        </Section>
+      ))}
+
+      <section
+        id="report-limits"
+        data-anchor="section:limitations"
+        aria-label="限制與後續"
+        className="flex flex-col gap-4 rounded-2xl bg-surface p-7 shadow-card"
+      >
+        {slot('section:limitations', '限制與後續')}
+        <div className="grid grid-cols-2 gap-4">
+          <div className="flex min-w-0 flex-col gap-2.5">
+            <div className="flex items-center">
+              <h2 className="m-0 text-lg font-bold">限制與風險</h2>
+              <span className="ml-auto">{button('section:limitations', '限制與後續')}</span>
+            </div>
+            {r.limitations.length ? (
+              r.limitations.map((l, i) => (
+                <div
+                  key={i}
+                  className={cx('rounded-xl px-3.5 py-3 text-[13px]', SEVERITY[l.severity].box)}
+                >
+                  <div className="flex items-baseline gap-2">
+                    <span className="font-medium">
+                      <InlineCode text={l.title} />
+                    </span>
+                    <span className={cx('ml-auto flex-none text-xs', SEVERITY[l.severity].tag)}>
+                      {SEVERITY_LABEL[l.severity]}
+                    </span>
+                  </div>
+                  <span className={SEVERITY[l.severity].body}>
+                    <InlineCode text={l.detail} />
+                  </span>
+                </div>
+              ))
+            ) : (
+              <span className="text-[13px] text-muted">沒有已知的限制</span>
+            )}
+          </div>
+          <div className="flex min-w-0 flex-col gap-2.5">
+            <h2 className="m-0 text-lg font-bold">後續工作</h2>
+            {r.followups.length ? (
+              r.followups.map((f, i) => (
+                <div key={i} className="rounded-xl bg-fill-2 px-3.5 py-3 text-[13px]">
+                  <InlineCode text={f.title} />
+                  {f.detail && (
+                    <span className="text-muted">
+                      ：<InlineCode text={f.detail} />
+                    </span>
+                  )}
+                </div>
+              ))
+            ) : (
+              <span className="text-[13px] text-muted">沒有</span>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <Section
+        id="diff"
+        title="程式碼變更"
+        tag={
+          <span className="text-xs text-muted">
+            每段變更都附上「為什麼改」{commentable && '；點行號可以留下回饋'}
+          </span>
+        }
+      >
+        <DiffView
+          taskId={task.id}
+          diff={report.diff}
+          perFile={report.stats.perFile}
+          notes={r.file_notes}
+          selected={diffFile ?? ownFile}
+          onSelect={selectFile}
+          readOnly={!commentable}
+          isStatic={isStatic}
+        />
+      </Section>
+
+      <Section
+        id="tests"
+        title="測試結果"
+        subtitle="由 Harness 在 worktree 中實際執行，不是 Claude 的自述。"
+      >
         <div className="flex flex-col gap-1.5 text-[13px]">
-          {report.verification.length === 0 && <span className="text-muted">Claude 沒有提供驗證指令</span>}
+          {report.verification.length === 0 && (
+            <span className="text-muted">Claude 沒有提供驗證指令</span>
+          )}
           {report.verification.map((v, i) => (
-            <details key={i} className={cx('rounded-xl px-3.5 py-3', v.skipped ? 'bg-fill-2' : v.exitCode === 0 ? 'bg-brand-tint' : 'bg-red-50')}>
-              <summary className="flex cursor-pointer items-center gap-3">
-                <span aria-hidden>{v.skipped ? '⏭' : v.exitCode === 0 ? '✓' : '✗'}</span>
-                <code className="bg-transparent p-0">{v.command}</code>
-                <span className="ml-auto text-xs">{v.skipped ?? (v.exitCode === 0 ? `通過 · ${(v.durationMs / 1000).toFixed(1)} 秒` : `失敗（exit ${v.exitCode ?? '—'}）`)}</span>
-              </summary>
-              {v.outputTail && <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-code p-3 text-xs whitespace-pre-wrap text-code-ink">{v.outputTail}</pre>}
-            </details>
+            <VerificationRow key={i} v={v} />
           ))}
         </div>
       </Section>
     </div>
   )
 }
+
+/** 匯出檔最上方的標題（畫面上這些資訊在 ReportScreen 的標題列） */
+export function ExportHeader({ task, report }: { task: Task; report: Report }) {
+  return (
+    <header className="mb-3 flex flex-col gap-1 rounded-2xl bg-surface px-7 py-[18px] shadow-card">
+      <span className="text-lg font-bold">{task.title}</span>
+      <span className="text-xs text-muted">
+        變更報告 v{report.version} · {shortTime(report.createdAt)} · 分支 <code>{task.branch}</code>{' '}
+        → <code>{task.baseBranch}</code>
+        {report.commit && (
+          <>
+            {' '}
+            · commit <code>{report.commit.slice(0, 7)}</code>
+          </>
+        )}
+      </span>
+    </header>
+  )
+}
 ```
 
-**Step 7: FeedbackPanel.tsx**
+**Step 8: FeedbackPanel.tsx**
 
 ```tsx
+// src/renderer/src/report/FeedbackPanel.tsx
+// 對照 docs/design/B5-Report.dc.html 的 <aside>：待送出的回饋、整體意見、收尾（PR／合併／丟棄）
 import { useState } from 'react'
 import type { Task } from '@shared/types'
-import { call } from '../api'
+import { call, errorText } from '../api'
+import { Button, cx, Icons, textareaClass } from '../components/ui'
+import { isBusy } from '../lib/stage'
+import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
-import { Button, Icons, textareaClass } from '../components/ui'
+import { feedbackTitle } from './anchors'
 
-export function FeedbackPanel({ task, onExport }: { task: Task; onExport: () => void }) {
+export function FeedbackPanel({
+  task,
+  onJump
+}: {
+  task: Task
+  /** 點回饋清單的項目：捲到報告上對應的位置 */
+  onJump?: (anchor: string) => void
+}) {
   const items = useStore((s) => s.feedback[task.id]) ?? []
   const removeFeedback = useStore((s) => s.removeFeedback)
-  const clearFeedback = useStore((s) => s.clearFeedback)
   const act = useStore((s) => s.act)
   const [overall, setOverall] = useState('')
   const [confirmDiscard, setConfirmDiscard] = useState(false)
+  // 收尾失敗的原因（例如合併衝突）留在面板上，不只是幾秒就消失的 toast
+  const [failure, setFailure] = useState<{ title: string; text: string }>()
+  // 送出回饋與收尾操作共用：其中一個進行中時全部停用（主程序也只允許一個收尾操作）
+  const [pending, run] = usePending()
+  const blocked = pending || isBusy(task)
   const reviewing = task.status === 'reviewing'
+  const done = task.status === 'done'
+  const latest = task.reportVersions.at(-1) ?? 0
+  const unsent = items.length > 0 || !!overall.trim()
 
-  const send = () => act(async () => {
-    await call('report:feedback', task.id, items, overall)
-    clearFeedback(task.id)
-    setOverall('')
-  })
-  const pr = () => act(async () => { const url = await call('finish:pr', task.id); await call('shell:openExternal', url) })
+  const send = () =>
+    run(async () => {
+      const sent = items
+      const note = overall.trim()
+      const ok = await act(async () => {
+        await call('report:feedback', task.id, sent, note || undefined)
+        return true
+      })
+      if (!ok) return
+      // 只清掉送出的那些（送出期間又改過的保留）
+      const now = useStore.getState().feedback[task.id] ?? []
+      for (const f of sent) {
+        if (now.some((x) => x.anchor === f.anchor && x.text === f.text))
+          removeFeedback(task.id, f.anchor)
+      }
+      setOverall((cur) => (cur.trim() === note ? '' : cur))
+    })
+
+  const finish = (title: string, fn: () => Promise<unknown>) =>
+    run(async () => {
+      setFailure(undefined)
+      try {
+        await fn()
+      } catch (e) {
+        setFailure({ title, text: errorText(e) })
+      }
+    })
+  const openPr = () =>
+    finish('開 PR 失敗', async () => {
+      const url = await call('finish:pr', task.id)
+      // PR 已經開了：瀏覽器打不開只提示，不算開 PR 失敗
+      await act(() => call('shell:openExternal', url))
+    })
+  const merge = () => finish('合併失敗', () => call('finish:merge', task.id))
+  const discard = () =>
+    finish(done ? '清除 worktree 失敗' : '丟棄失敗', async () => {
+      await call('finish:discard', task.id)
+      setConfirmDiscard(false)
+    })
 
   return (
-    <aside aria-label="回饋與收尾" className="sticky top-0 flex w-[300px] flex-none flex-col gap-3.5 self-start rounded-2xl bg-surface px-5 py-[18px] shadow-card">
+    <aside
+      aria-label="回饋與收尾"
+      className="flex max-h-full w-[300px] flex-none flex-col gap-3.5 self-start overflow-y-auto rounded-2xl bg-surface px-5 py-[18px] shadow-card"
+    >
       {reviewing && (
         <>
           <div className="flex items-baseline justify-between">
@@ -15758,120 +17534,388 @@ export function FeedbackPanel({ task, onExport }: { task: Task; onExport: () => 
             <span className="text-xs text-muted">{items.length} 則待送出</span>
           </div>
           <div className="flex flex-col gap-2 text-[13px]">
-            {items.length === 0 && <span className="text-muted">在報告的區塊、決策或程式碼行上按「留言」。</span>}
+            {items.length === 0 && (
+              <span className="text-muted">
+                在報告的區塊、決策或程式碼行號上按「留言」，留下的意見會先列在這裡，一起送出。
+              </span>
+            )}
             {items.map((f) => (
-              <div key={f.anchor} className="flex gap-2 rounded-xl bg-note p-3">
-                <span className="flex flex-1 flex-col gap-0.5"><span className="text-xs text-note-ink">{f.label}</span>{f.text}</span>
-                <button type="button" aria-label={`刪除對 ${f.label} 的回饋`} onClick={() => removeFeedback(task.id, f.anchor)} className="self-start text-note-ink"><Icons.X width={12} height={12} /></button>
+              <div key={f.anchor} className="flex items-start gap-1 rounded-xl bg-note p-3">
+                <button
+                  type="button"
+                  onClick={() => onJump?.(f.anchor)}
+                  className="flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 text-left text-ink"
+                >
+                  <span className="text-xs break-all text-note-ink">{feedbackTitle(f)}</span>
+                  <span className="break-words whitespace-pre-wrap">{f.text}</span>
+                </button>
+                <button
+                  type="button"
+                  aria-label={`刪除對「${f.label}」的回饋`}
+                  onClick={() => removeFeedback(task.id, f.anchor)}
+                  className="-mt-0.5 -mr-1 flex size-6 flex-none cursor-pointer items-center justify-center rounded-md text-note-ink hover:bg-diff-flag/30"
+                >
+                  <Icons.X width={12} height={12} />
+                </button>
               </div>
             ))}
           </div>
           <label className="flex flex-col gap-1.5 text-[13px]">
             <span className="font-medium">整體意見（選填）</span>
-            <textarea rows={3} value={overall} onChange={(e) => setOverall(e.target.value)} placeholder="其他想調整的地方…" className={textareaClass} />
+            <textarea
+              rows={3}
+              value={overall}
+              onChange={(e) => setOverall(e.target.value)}
+              placeholder="其他想調整的地方…"
+              className={cx(textareaClass, 'resize-y')}
+            />
           </label>
-          <Button variant="primary" disabled={!items.length && !overall.trim()} onClick={() => void send()}>送出回饋，產生 v{task.reportVersions.length + 1}</Button>
-          <div className="h-px bg-line-soft" />
+          <Button variant="primary" disabled={blocked || !unsent} onClick={() => void send()}>
+            送出回饋，產生 v{latest + 1}
+          </Button>
+          <div className="h-px flex-none bg-line-soft" />
           <span className="text-[15px] font-bold">滿意了？</span>
-          <Button variant="dark" onClick={() => void pr()}>開 Pull Request</Button>
-          <Button onClick={() => void act(() => call('finish:merge', task.id))}>合併到 {task.baseBranch}</Button>
+          {unsent && (
+            <span className="text-xs text-decision-ink">
+              {items.length
+                ? `還有 ${items.length} 則回饋${overall.trim() ? '與整體意見' : ''}沒送出`
+                : '整體意見還沒送出'}
+              ；開 PR 或合併不會送出。
+            </span>
+          )}
+          <Button variant="dark" disabled={blocked} onClick={() => void openPr()}>
+            開 Pull Request
+          </Button>
+          <Button className="text-ink" disabled={blocked} onClick={() => void merge()}>
+            合併到 {task.baseBranch}
+          </Button>
         </>
       )}
-      {task.status === 'done' && (
-        <div className="flex flex-col gap-2 text-[13px]">
-          <span className="text-[15px] font-bold">已完成</span>
-          {task.prUrl
-            ? <button type="button" className="self-start text-brand underline" onClick={() => void call('shell:openExternal', task.prUrl!)}>開啟 Pull Request</button>
-            : <span className="text-muted">已合併到 {task.baseBranch}。</span>}
+
+      {task.status === 'implementing' && (
+        <div className="flex flex-col gap-1.5 text-[13px]">
+          <span className="text-[15px] font-bold">修改中</span>
+          <span className="text-muted">
+            Claude 正在依回饋修改，完成後會產生 v{latest + 1}。這份報告只能看。
+          </span>
         </div>
       )}
-      <Button size="sm" onClick={onExport}>匯出 HTML</Button>
-      {task.status !== 'discarded' && (
-        <Button variant="danger" size="sm" onClick={() => (confirmDiscard ? void act(() => call('finish:discard', task.id)) : setConfirmDiscard(true))}>
-          {confirmDiscard ? '確定要刪除 worktree 與分支？' : task.status === 'done' ? '清除 worktree' : '丟棄 worktree'}
-        </Button>
+
+      {done && (
+        <div className="flex flex-col gap-1.5 text-[13px]">
+          <span className="text-[15px] font-bold">已完成</span>
+          {task.prUrl ? (
+            <button
+              type="button"
+              onClick={() => void act(() => call('shell:openExternal', task.prUrl!))}
+              className="cursor-pointer self-start text-brand underline hover:text-brand-hover"
+            >
+              開啟 Pull Request
+            </button>
+          ) : (
+            <span className="text-muted">已合併到 {task.baseBranch}。</span>
+          )}
+        </div>
+      )}
+
+      {task.status === 'discarded' && (
+        <div className="flex flex-col gap-1.5 text-[13px]">
+          <span className="text-[15px] font-bold">已丟棄</span>
+          <span className="text-muted">worktree 與分支已刪除，報告仍然可以看與匯出。</span>
+        </div>
+      )}
+
+      {task.status !== 'discarded' &&
+        (confirmDiscard ? (
+          <div className="flex flex-col gap-2.5 rounded-xl bg-danger-soft p-3 text-[13px]">
+            <span className="text-danger">
+              {done
+                ? `確定要刪除 worktree 與本機分支 ${task.branch}？已開的 PR 或已合併的內容不受影響。`
+                : `確定要丟棄？worktree 與分支 ${task.branch} 都會刪除，無法復原。`}
+            </span>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                className="bg-danger font-medium text-white hover:bg-danger/90"
+                disabled={pending}
+                onClick={() => void discard()}
+              >
+                {done ? '確定清除' : '確定丟棄'}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setConfirmDiscard(false)}>
+                取消
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <Button
+            variant="danger"
+            className="h-10"
+            disabled={pending}
+            onClick={() => setConfirmDiscard(true)}
+          >
+            {done ? '清除 worktree' : '丟棄 worktree'}
+          </Button>
+        ))}
+
+      {failure && (
+        <div
+          role="alert"
+          className="flex max-h-60 flex-col gap-1 overflow-auto rounded-xl bg-danger-soft px-3 py-2.5 text-[13px]"
+        >
+          <span className="font-medium text-danger">{failure.title}</span>
+          <span className="font-mono text-xs break-words whitespace-pre-wrap text-ink-2">
+            {failure.text}
+          </span>
+        </div>
       )}
     </aside>
   )
 }
 ```
 
-**Step 8: exportHtml.tsx**
+**Step 9: exportHtml.tsx**
 
 ```tsx
+// src/renderer/src/report/exportHtml.tsx
+// 匯出單一自含的 HTML：靜態渲染 ReportView（React 會轉義所有報告文字）＋ 目前頁面的 CSS
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { Report, Task } from '@shared/types'
-import { ReportView } from './ReportView'
+import { BLOCK_MAX_H, BLOCK_MIN_H } from './blocks'
+import { ExportHeader, ReportView } from './ReportView'
 
+/** 匯出檔不能連網；自訂區塊的 srcdoc 會繼承這份 CSP（再加上區塊自己的） */
+export const EXPORT_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'"
+
+const escapeHtml = (s: string) =>
+  s.replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!
+  )
+
+/** 匯出檔唯一的 script：依自訂區塊回報的高度調整 iframe（只認自己頁面上的 iframe） */
+const RESIZE_SCRIPT = `addEventListener("message",function(e){var d=e.data;if(!d||d.type!=="harness-block-height"||typeof d.height!=="number"||!isFinite(d.height))return;var f=document.querySelectorAll("iframe[data-block]");for(var i=0;i<f.length;i++){if(f[i].contentWindow===e.source&&f[i].getAttribute("data-block")===d.id)f[i].style.height=Math.min(Math.max(d.height,${BLOCK_MIN_H}),${BLOCK_MAX_H})+"px"}})`
+
+/** 目前頁面的所有 CSS 規則；字型檔不打包（改用字型堆疊裡的系統字型） */
 function collectCss(): string {
-  let css = ''
+  const out: string[] = []
   for (const sheet of Array.from(document.styleSheets)) {
-    try { css += Array.from(sheet.cssRules).map((r) => r.cssText).join('\n') } catch { /* 跨來源樣式表略過 */ }
+    let rules: CSSRuleList
+    try {
+      rules = sheet.cssRules
+    } catch {
+      continue // 跨來源的樣式表讀不到，略過
+    }
+    for (const rule of Array.from(rules)) {
+      if (rule.cssText.startsWith('@font-face')) continue
+      out.push(rule.cssText)
+    }
   }
-  return css.replace(/url\([^)]*\.(woff2?|ttf)[^)]*\)/g, 'local("PingFang TC")')
+  // 放在 <style> 裡：避免規則文字提早結束標籤
+  return out.join('\n').replace(/<\/style/gi, '<\\/style')
+}
+
+/** 匯出檔名：去掉不能用在檔名的字元 */
+export function exportFileName(task: Task, version: number): string {
+  const title =
+    task.title
+      .replace(/[\\/:*?"<>|]/g, '-')
+      .replace(/\s+/g, ' ')
+      .trim() || '任務'
+  return `${title}-變更報告-v${version}.html`
 }
 
 export function buildReportHtml(task: Task, report: Report): string {
-  const body = renderToStaticMarkup(<ReportView task={task} report={report} isStatic />)
-  return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${task.title.replace(/</g, '&lt;')} · 變更報告 v${report.version}</title><style>${collectCss()}</style></head>
-<body style="background:#eef0f3;padding:24px"><div style="max-width:1100px;margin:0 auto">${body}</div></body></html>`
+  const body = renderToStaticMarkup(
+    <>
+      <ExportHeader task={task} report={report} />
+      <ReportView task={task} report={report} isStatic />
+    </>
+  )
+  return `<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="${EXPORT_CSP}">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(`${task.title} · 變更報告 v${report.version}`)}</title>
+<style>${collectCss()}</style>
+</head><body><div style="max-width:1100px;margin:0 auto;padding:24px">${body}</div>
+<script>${RESIZE_SCRIPT}</script>
+</body></html>`
 }
 ```
 
-**Step 9: ReportScreen.tsx**
+**Step 10: ReportScreen.tsx**（版本選單與「匯出 HTML」在標題列，對照設計稿）
 
 ```tsx
+// src/renderer/src/screens/ReportScreen.tsx
 import { type ReactNode, useEffect, useState } from 'react'
+import { flushSync } from 'react-dom'
 import type { Report, Task } from '@shared/types'
-import { call } from '../api'
-import { buildReportHtml } from '../report/exportHtml'
+import { call, errorText } from '../api'
+import { Button, Spinner } from '../components/ui'
+import { shortTime } from '../lib/format'
+import { usePending } from '../lib/usePending'
+import { diffAnchorPath } from '../report/anchors'
+import { buildReportHtml, exportFileName } from '../report/exportHtml'
 import { FeedbackPanel } from '../report/FeedbackPanel'
 import { ReportView } from '../report/ReportView'
-import { Spinner } from '../components/ui'
 import { useStore } from '../store'
 
-export function ReportScreen({ task, nav, onOpenStage }: { task: Task; nav: ReactNode; onOpenStage: (s: 'clarify') => void }) {
+export function ReportScreen({
+  task,
+  nav,
+  readOnly,
+  onOpenStage
+}: {
+  task: Task
+  nav: ReactNode
+  /** 回看（依回饋修改中、已完成或已丟棄）：不能留言 */
+  readOnly: boolean
+  onOpenStage: (s: 'clarify') => void
+}) {
   const act = useStore((s) => s.act)
+  const showToast = useStore((s) => s.showToast)
   const latest = task.reportVersions.at(-1) ?? 0
   // 使用者選的版本只在「最新版本」沒變時有效；產生新版報告時自動切到最新版（不在 effect 裡 setState）
   const [picked, setPicked] = useState<{ latest: number; version: number }>()
   const version = picked?.latest === latest ? picked.version : latest
-  const [loaded, setLoaded] = useState<Report>()
-  // 只顯示目前版本的報告；切換版本、還在讀取時顯示載入中，而不是上一個版本
-  const report = loaded?.version === version ? loaded : undefined
-  useEffect(() => {
-    if (!version) return
-    let alive = true
-    void act(async () => { const r = await call('report:get', task.id, version); if (alive) setLoaded(r) })
-    return () => { alive = false }
-  }, [task.id, version, act])
+  // 報告產生後不會再變：讀過的版本留著，切回來不必重讀
+  const [reports, setReports] = useState<Record<number, Report>>({})
+  const [attempt, setAttempt] = useState(0)
+  const [failed, setFailed] = useState<{ version: number; attempt: number; text: string }>()
+  // diff 選取的檔案（點回饋清單時切換），只對選它時的版本有效
+  const [diffFile, setDiffFile] = useState<{ version: number; path: string }>()
+  const [exporting, runExport] = usePending()
+  const report = reports[version]
+  const has = !!report
+  const loadError = failed?.version === version && failed.attempt === attempt ? failed : undefined
 
-  const exportHtml = () => report && act(() => call('report:saveHtml', `${task.title}-報告-v${report.version}.html`, buildReportHtml(task, report)))
+  useEffect(() => {
+    if (!version || has) return
+    let alive = true
+    void (async () => {
+      try {
+        const r = await call('report:get', task.id, version)
+        if (alive) setReports((m) => ({ ...m, [version]: r }))
+      } catch (e) {
+        if (alive) setFailed({ version, attempt, text: errorText(e) })
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [task.id, version, has, attempt])
+
+  const viewingOld = version !== latest
+  const canComment = !readOnly && task.status === 'reviewing' && !viewingOld
+
+  const exportHtml = () =>
+    report &&
+    runExport(() =>
+      act(async () => {
+        const path = await call(
+          'report:saveHtml',
+          exportFileName(task, report.version),
+          buildReportHtml(task, report)
+        )
+        if (path) showToast(`已匯出：${path}`)
+      })
+    )
+
+  /** 回饋都是對最新版本留的：切回最新版、選到那個檔案，再捲到留言的位置 */
+  const jump = (anchor: string) => {
+    flushSync(() => {
+      if (viewingOld) setPicked(undefined)
+      const path = diffAnchorPath(anchor)
+      if (path) setDiffFile({ version: latest, path })
+    })
+    const el = [...document.querySelectorAll<HTMLElement>('[data-anchor]')].find(
+      (e) => e.dataset.anchor === anchor
+    )
+    el?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+  }
 
   return (
     <>
       <div className="flex min-w-0 flex-1 flex-col gap-3 overflow-y-auto">
-        <div className="flex flex-wrap items-center gap-4 rounded-2xl bg-surface px-7 py-[18px] shadow-card">
-          <span className="text-lg font-bold">{task.title}</span>
-          {nav}
-          {task.reportVersions.length > 1 && (
-            <label className="flex items-center gap-1.5 text-xs text-muted">版本
-              <select value={version} onChange={(e) => setPicked({ latest, version: Number(e.target.value) })} className="h-[34px] rounded-[10px] border border-line bg-surface px-2.5 text-xs text-ink">
-                {task.reportVersions.map((v) => <option key={v} value={v}>v{v}</option>)}
-              </select>
-            </label>
+        <div className="flex flex-col gap-2 rounded-2xl bg-surface px-7 py-[18px] shadow-card">
+          <div className="flex flex-wrap items-center gap-4">
+            <span className="text-lg font-bold">{task.title}</span>
+            {nav}
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-muted">
+                版本
+                <select
+                  value={version}
+                  onChange={(e) => setPicked({ latest, version: Number(e.target.value) })}
+                  className="h-[34px] cursor-pointer rounded-[10px] border border-line bg-surface px-2.5 text-xs text-ink outline-none focus:border-brand"
+                >
+                  {task.reportVersions.map((v) => (
+                    <option key={v} value={v}>
+                      v{v}
+                      {reports[v] && ` · ${shortTime(reports[v].createdAt)}`}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <Button
+                size="sm"
+                className="h-[34px]"
+                disabled={!report || exporting}
+                onClick={() => void exportHtml()}
+              >
+                匯出 HTML
+              </Button>
+            </div>
+          </div>
+          {viewingOld && (
+            <div className="text-xs text-muted">
+              正在看 v{version}（舊版本），只能看；留言請到最新的 v{latest}。{' '}
+              <button
+                type="button"
+                onClick={() => setPicked(undefined)}
+                className="cursor-pointer text-brand hover:text-brand-hover"
+              >
+                回到 v{latest}
+              </button>
+            </div>
           )}
         </div>
-        {report ? <ReportView task={task} report={report} onOpenQuestion={() => onOpenStage('clarify')} /> : <div className="flex items-center gap-2 p-7 text-muted"><Spinner />載入報告…</div>}
+        {report ? (
+          <ReportView
+            // key：換版本時重設正在輸入的留言等畫面狀態
+            key={version}
+            task={task}
+            report={report}
+            canComment={canComment}
+            diffFile={diffFile?.version === version ? diffFile.path : undefined}
+            onDiffFile={(path) => setDiffFile({ version, path })}
+            onOpenQuestion={() => onOpenStage('clarify')}
+          />
+        ) : loadError ? (
+          <div className="flex items-center gap-3 rounded-2xl bg-surface p-7 text-[13px] shadow-card">
+            <span className="text-danger">
+              無法讀取報告 v{version}：{loadError.text}
+            </span>
+            <Button size="sm" onClick={() => setAttempt((a) => a + 1)}>
+              重試
+            </Button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 rounded-2xl bg-surface p-7 text-muted shadow-card">
+            <Spinner />
+            載入報告…
+          </div>
+        )}
       </div>
-      <FeedbackPanel task={task} onExport={() => void exportHtml()} />
+      <FeedbackPanel task={task} onJump={jump} />
     </>
   )
 }
 ```
 
-**Step 10: TaskScreen 完成切換**
+**Step 11: TaskScreen 完成切換**
 
 TaskScreen 最終版：
 
@@ -15907,18 +17951,27 @@ export function TaskScreen({ taskId }: { taskId: string }) {
     case 'implement':
       return <ImplementScreen task={task} nav={nav} readOnly={readOnly} />
     case 'report':
-      return <ReportScreen task={task} nav={nav} onOpenStage={openStage} />
+      // 依回饋修改中（implementing）回看報告時只能看；送出回饋只在待審閱時
+      return <ReportScreen task={task} nav={nav} readOnly={readOnly} onOpenStage={openStage} />
   }
 }
 ```
 
-**Step 11: 確認通過** — `npx vitest run tests/renderer` 全部通過；`npm run typecheck` PASS
+**Step 12: 確認通過** — `npm test` 全部通過；`npm run typecheck`、`npm run lint` PASS
 
-**Step 12: Commit**
+**Step 13: Commit**
 
 ```bash
-git add src/renderer/src tests/renderer
-git commit -m "feat(ui): add change report with architecture diff, decisions, custom blocks and feedback
+git add src/shared/blockHtml.ts src/main/report/blockHtml.ts tests/main/blockHtml.test.ts
+git commit -m "refactor: share the custom block wrapper and size blocks by their content
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git add src/renderer/src/styles/app.css src/renderer/src/components/ui.tsx src/renderer/src/report/{anchors.ts,blocks.ts,comments.tsx,ArchitectureDiagram.tsx,CustomBlockFrame.tsx,DiffView.tsx} tests/fixtures/report.ts tests/renderer/{DiffView,ArchitectureDiagram,CustomBlockFrame}.test.tsx
+git commit -m "feat(ui): add architecture diagram, custom block frame and commentable diff view
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git add src/renderer/src docs/plans tests/renderer
+git commit -m "feat(ui): add change report screen with feedback, finish actions and HTML export
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
