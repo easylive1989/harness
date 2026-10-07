@@ -3492,6 +3492,26 @@ describe('AsyncQueue', () => {
     expect(q.isClosed).toBe(true)
   })
 
+  test('close 會結束所有等待中的讀取', async () => {
+    const q = new AsyncQueue<number>()
+    const it = q[Symbol.asyncIterator]()
+    const a = it.next()
+    const b = it.next()
+    q.close()
+    expect((await a).done).toBe(true)
+    expect((await b).done).toBe(true)
+  })
+
+  test('close 前 push 的項目仍會被讀完', async () => {
+    const q = new AsyncQueue<number>()
+    q.push(1)
+    q.push(2)
+    q.close()
+    const seen: number[] = []
+    for await (const n of q) seen.push(n)
+    expect(seen).toEqual([1, 2])
+  })
+
   test('close 後 push 丟錯', () => {
     const q = new AsyncQueue<number>()
     q.close()
