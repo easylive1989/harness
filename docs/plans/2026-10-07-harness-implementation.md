@@ -3975,16 +3975,18 @@ export interface RunConfig { options: Options; firstPrompt: string }
 /** 一輪對話：送出第一則訊息，可插話，收到 result 後關閉輸入讓程序結束 */
 export class AgentRun {
   private queue = new AsyncQueue<SDKUserMessage>()
-  private q: ReturnType<QueryFn>
+  private readonly q: ReturnType<QueryFn>
   private ended = false
   readonly done: Promise<void>
 
   constructor(queryFn: QueryFn, cfg: RunConfig, onEvent: (e: RunnerEvent) => void) {
     this.queue.push(userMessage(cfg.firstPrompt))
-    this.q = queryFn({ prompt: this.queue, options: cfg.options })
+    // 用區域變數迭代：TS 會把建構子內的 async IIFE 視為立即執行，直接讀 this.q 會報 TS2565
+    const q = queryFn({ prompt: this.queue, options: cfg.options })
+    this.q = q
     this.done = (async () => {
       try {
-        for await (const msg of this.q) {
+        for await (const msg of q) {
           for (const e of mapMessage(msg)) {
             onEvent(e)
             if (e.type === 'turn_end') this.closeInput()
