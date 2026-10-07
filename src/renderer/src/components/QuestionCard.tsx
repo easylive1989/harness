@@ -2,9 +2,10 @@
 import { type FormEvent, useId, useState } from 'react'
 import type { Question, Task } from '@shared/types'
 import { call } from '../api'
-import { isBusy } from '../lib/stage'
+import { awaitingCounterReply, isBusy } from '../lib/stage'
+import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
-import { Button, cx, Icons, inputClass, Spinner, textareaClass } from './ui'
+import { Button, cx, Icons, inputClass, LiveStatus, textareaClass } from './ui'
 
 const OTHER = '__other'
 
@@ -28,8 +29,12 @@ export function QuestionCard({
   const titleId = useId()
   // 使用者點選的選項；Claude 更新卡片後選項可能不見了，此時回到預設（render 時推導）
   const [picked, setPicked] = useState<string>()
-  const [freeText, setFreeText] = useState('')
+  // 選「其他」時的答案，與選一般選項時的補充說明分開保存
+  const [otherText, setOtherText] = useState('')
+  const [note, setNote] = useState('')
   const [counter, setCounter] = useState('')
+  const [answering, runAnswer] = usePending()
+  const [upgrading, runUpgrade] = usePending()
 
   const ids = q.options.map((o) => o.id)
   const valid = (id?: string): id is string =>
@@ -41,16 +46,26 @@ export function QuestionCard({
 
   const busy = isBusy(task)
   const disabled = readOnly || busy || q.status !== 'open'
-  const waitingCounter = busy && q.followups.at(-1)?.role === 'user'
+  const waitingCounter = awaitingCounterReply(task, q)
   const counted = q.followups.filter((f) => f.role === 'user').length
   const index = task.questions.findIndex((x) => x.id === q.id) + 1
+  // 已經從這個問題分出去的分岔：按鈕改成切過去看，不再開新的
+  const existing = task.branches.find((b) => b.fromQuestionId === q.id)
+  const canConfirm = !!selected && (selected !== OTHER || !!otherText.trim())
 
   const confirm = () =>
-    act(() =>
-      call('tasks:answer', task.id, q.id, {
-        optionId: selected === OTHER ? undefined : selected,
-        text: freeText.trim() || undefined
-      })
+    runAnswer(() =>
+      act(() =>
+        call(
+          'tasks:answer',
+          task.id,
+          q.id,
+          selected === OTHER
+            ? { optionId: undefined, text: otherText.trim() }
+            : // Claude 改成不允許自由文字後，之前打的補充說明不送出
+              { optionId: selected, text: (q.allowFreeText && note.trim()) || undefined }
+        )
+      )
     )
   const ask = (e: FormEvent) => {
     e.preventDefault()
@@ -59,12 +74,13 @@ export function QuestionCard({
     setCounter('')
     void act(() => call('tasks:counter', task.id, q.id, text))
   }
-  const upgrade = async () => {
-    const b = await act(() =>
-      call('branch:open', task.id, { title: q.text.slice(0, 30), fromQuestionId: q.id })
-    )
-    if (b) setActiveBranch(task.id, b.id)
-  }
+  const upgrade = () =>
+    runUpgrade(async () => {
+      const b = await act(() =>
+        call('branch:open', task.id, { title: q.text.slice(0, 30), fromQuestionId: q.id })
+      )
+      if (b) setActiveBranch(task.id, b.id)
+    })
 
   return (
     <section
@@ -120,16 +136,29 @@ export function QuestionCard({
         )}
       </div>
 
-      {(selected === OTHER || freeText) && (
+      {q.allowFreeText && selected === OTHER && (
         <label className="flex flex-col">
           <span className="sr-only">自己描述</span>
           <textarea
             rows={2}
-            value={freeText}
-            onChange={(e) => setFreeText(e.target.value)}
+            value={otherText}
+            onChange={(e) => setOtherText(e.target.value)}
             disabled={disabled}
-            placeholder={selected === OTHER ? '描述你的答案' : '補充說明（選填）'}
+            placeholder="描述你的答案"
             className={textareaClass}
+          />
+        </label>
+      )}
+      {q.allowFreeText && selected !== undefined && selected !== OTHER && !readOnly && (
+        <label className="flex flex-col">
+          <span className="sr-only">補充說明</span>
+          <textarea
+            rows={1}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            disabled={disabled}
+            placeholder="補充說明（選填）"
+            className={cx(textareaClass, 'resize-y')}
           />
         </label>
       )}
@@ -150,12 +179,7 @@ export function QuestionCard({
               <span className="min-w-0 whitespace-pre-wrap">{f.text}</span>
             </div>
           ))}
-          {waitingCounter && (
-            <span className="flex items-center gap-2 text-muted">
-              <Spinner />
-              Claude 正在回答…
-            </span>
-          )}
+          <LiveStatus text={waitingCounter && 'Claude 正在回答…'} />
         </div>
       )}
 
@@ -171,13 +195,26 @@ export function QuestionCard({
               className={cx(inputClass, 'flex-1')}
             />
           </label>
-          <Button className="h-[42px] px-3.5" disabled={busy} onClick={() => void upgrade()}>
-            升級成分岔
-          </Button>
+          {existing ? (
+            <Button
+              className="h-[42px] px-3.5"
+              onClick={() => setActiveBranch(task.id, existing.id)}
+            >
+              查看分岔
+            </Button>
+          ) : (
+            <Button
+              className="h-[42px] px-3.5"
+              disabled={busy || upgrading}
+              onClick={() => void upgrade()}
+            >
+              升級成分岔
+            </Button>
+          )}
           <Button
             variant="primary"
             className="h-[42px] px-5"
-            disabled={disabled || !selected || (selected === OTHER && !freeText.trim())}
+            disabled={disabled || answering || !canConfirm}
             onClick={() => void confirm()}
           >
             確認答案

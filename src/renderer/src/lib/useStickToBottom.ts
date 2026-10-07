@@ -1,23 +1,34 @@
 // src/renderer/src/lib/useStickToBottom.ts
-import { type UIEvent, useEffect, useRef } from 'react'
+import { type UIEvent, useLayoutEffect, useRef } from 'react'
 
 /** 距離底部多少 px 以內算「在底部」 */
 const THRESHOLD = 80
 
 /**
  * 對話捲動區：內容變多時自動捲到底，但使用者往上捲去看舊訊息時不打擾。
- * `version` 變了代表內容可能變了（例如事件數、任務的 updatedAt）。
+ * `version` 變了代表內容可能變了（例如事件數、任務的 updatedAt）；
+ * `resetKey` 變了代表換了一段對話（例如換分岔），重新黏在底部。
+ * 使用者自己送出訊息時呼叫 `stick()`，之後的回覆一定看得到。
  */
-export function useStickToBottom<T extends HTMLElement>(version: unknown) {
+export function useStickToBottom<T extends HTMLElement>(version: unknown, resetKey?: unknown) {
   const ref = useRef<T>(null)
-  const stick = useRef(true)
-  useEffect(() => {
+  const sticking = useRef(true)
+  const lastKey = useRef(resetKey)
+  // 在瀏覽器繪製前捲動，不會先閃一下舊的位置
+  useLayoutEffect(() => {
+    if (lastKey.current !== resetKey) {
+      lastKey.current = resetKey
+      sticking.current = true
+    }
     const el = ref.current
-    if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [version])
+    if (el && sticking.current) el.scrollTop = el.scrollHeight
+  }, [version, resetKey])
   const onScroll = (e: UIEvent<T>) => {
     const el = e.currentTarget
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < THRESHOLD
+    sticking.current = el.scrollHeight - el.scrollTop - el.clientHeight < THRESHOLD
   }
-  return { ref, onScroll }
+  const stick = () => {
+    sticking.current = true
+  }
+  return { ref, onScroll, stick }
 }

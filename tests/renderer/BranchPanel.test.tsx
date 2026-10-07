@@ -12,6 +12,7 @@ import { BranchPanel } from '@renderer/components/BranchPanel'
 import { resetStoreInternals, useStore } from '@renderer/store'
 import { msg } from '@shared/protocol'
 import type { Branch, TimelineEvent } from '@shared/types'
+import { holdNextCall } from '../fixtures/hold'
 import { makeTask } from '../fixtures/task'
 
 const concluded: Branch = {
@@ -114,4 +115,55 @@ test('唯讀時不能送出或帶回', () => {
   render(<BranchPanel task={{ ...task, branches: [open] }} events={talk} readOnly />)
   expect(screen.queryByRole('textbox', { name: '分岔訊息' })).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: '帶回主線' })).not.toBeInTheDocument()
+})
+
+test('帶回主線進行中停用，連點只送一次', async () => {
+  const release = holdNextCall(vi.mocked(call))
+  render(<BranchPanel task={{ ...task, branches: [open] }} events={talk} />)
+  const button = screen.getByRole('button', { name: '帶回主線' })
+  await userEvent.dblClick(button)
+  expect(call).toHaveBeenCalledTimes(1)
+  expect(button).toBeDisabled()
+  await release()
+  expect(button).toBeEnabled()
+})
+
+test('確認並帶回主線、重新整理結論進行中都停用，連點只送一次', async () => {
+  const release = holdNextCall(vi.mocked(call))
+  render(<BranchPanel task={task} events={[]} />)
+  const confirm = screen.getByRole('button', { name: '確認並帶回主線' })
+  const again = screen.getByRole('button', { name: '重新整理結論' })
+  await userEvent.dblClick(confirm)
+  expect(call).toHaveBeenCalledTimes(1)
+  expect(confirm).toBeDisabled()
+  expect(again).toBeDisabled()
+  await release()
+  expect(confirm).toBeEnabled()
+  const release2 = holdNextCall(vi.mocked(call))
+  await userEvent.dblClick(again)
+  expect(call).toHaveBeenCalledTimes(2)
+  expect(call).toHaveBeenLastCalledWith('branch:conclude', 't1', 'b2')
+  await release2()
+})
+
+test('分岔的執行錯誤顯示在分岔面板', () => {
+  render(
+    <BranchPanel task={{ ...task, branches: [{ ...open, error: '分岔執行失敗' }] }} events={talk} />
+  )
+  expect(screen.getByRole('alert')).toHaveTextContent('分岔執行失敗')
+})
+
+test('分岔裡的工具錯誤以錯誤樣式顯示；處理中在常駐的 live region', () => {
+  const { rerender } = render(
+    <BranchPanel
+      task={{ ...task, branches: [open] }}
+      events={[...talk, ev('e4', { kind: 'tool_result', text: 'EACCES' })]}
+    />
+  )
+  expect(screen.getByText('工具錯誤：EACCES')).toHaveClass('text-danger')
+  const status = screen.getByRole('status')
+  expect(status).toHaveTextContent('')
+  rerender(<BranchPanel task={{ ...task, branches: [{ ...open, running: true }] }} events={talk} />)
+  expect(screen.getByRole('status')).toBe(status)
+  expect(status).toHaveTextContent('Claude 正在回覆…')
 })

@@ -11,6 +11,7 @@ import { call } from '@renderer/api'
 import { AnsweredQuestionRow, QuestionCard } from '@renderer/components/QuestionCard'
 import { resetStoreInternals, useStore } from '@renderer/store'
 import type { Question } from '@shared/types'
+import { holdNextCall } from '../fixtures/hold'
 import { makeTask } from '../fixtures/task'
 
 const q: Question = {
@@ -63,15 +64,58 @@ describe('QuestionCard', () => {
     })
   })
 
-  test('Claude 更新卡片後原本選的選項不見了，就回到建議選項', () => {
+  test('選了的選項被 Claude 更新卡片時拿掉，就回到建議選項', async () => {
     const { rerender } = render(<QuestionCard task={task} question={q} />)
+    await userEvent.click(screen.getByRole('radio', { name: /email/ }))
+    expect(screen.getByRole('radio', { name: /email/ })).toBeChecked()
     const updated: Question = {
       ...q,
-      options: [{ id: 'captcha', label: '改要求驗證碼' }, ...q.options.slice(0, 1)],
+      options: [{ id: 'captcha', label: '改要求驗證碼' }, q.options[0]],
       recommendedOptionId: 'captcha'
     }
     rerender(<QuestionCard task={makeTask({ questions: [updated] })} question={updated} />)
     expect(screen.getByRole('radio', { name: /改要求驗證碼/ })).toBeChecked()
+    expect(screen.queryByRole('radio', { name: /email/ })).not.toBeInTheDocument()
+  })
+
+  test('選一般選項時可附補充說明，與「其他」的描述分開', async () => {
+    render(<QuestionCard task={task} question={q} />)
+    expect(screen.queryByRole('textbox', { name: '自己描述' })).not.toBeInTheDocument()
+    await userEvent.type(screen.getByRole('textbox', { name: '補充說明' }), '要寫稽核日誌')
+    await userEvent.click(screen.getByRole('radio', { name: /其他/ }))
+    expect(screen.queryByRole('textbox', { name: '補充說明' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '自己描述' })).toHaveValue('')
+    await userEvent.click(screen.getByRole('radio', { name: /鎖定 15 分鐘/ }))
+    await userEvent.click(screen.getByRole('button', { name: '確認答案' }))
+    expect(call).toHaveBeenCalledWith('tasks:answer', 't1', 'q3', {
+      optionId: 'lock15',
+      text: '要寫稽核日誌'
+    })
+  })
+
+  test('Claude 改成不允許自由文字後，不送出之前打的補充說明', async () => {
+    const { rerender } = render(<QuestionCard task={task} question={q} />)
+    await userEvent.type(screen.getByRole('textbox', { name: '補充說明' }), '要寫稽核日誌')
+    const strict: Question = { ...q, allowFreeText: false }
+    rerender(<QuestionCard task={makeTask({ questions: [strict] })} question={strict} />)
+    expect(screen.queryByRole('textbox', { name: '補充說明' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /其他/ })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '確認答案' }))
+    expect(call).toHaveBeenCalledWith('tasks:answer', 't1', 'q3', {
+      optionId: 'lock15',
+      text: undefined
+    })
+  })
+
+  test('確認答案送出中停用，連點只送一次', async () => {
+    const release = holdNextCall(vi.mocked(call))
+    render(<QuestionCard task={task} question={q} />)
+    const confirm = screen.getByRole('button', { name: '確認答案' })
+    await userEvent.dblClick(confirm)
+    expect(call).toHaveBeenCalledTimes(1)
+    expect(confirm).toBeDisabled()
+    await release()
+    expect(confirm).toBeEnabled()
   })
 
   test('顯示反問紀錄並可再次反問', async () => {
@@ -83,13 +127,18 @@ describe('QuestionCard', () => {
     expect(screen.getByRole('textbox', { name: '反問' })).toHaveValue('')
   })
 
-  test('反問送出後等待回答時顯示處理中', () => {
+  test('反問送出後等待回答時，在常駐的 live region 顯示處理中', () => {
     const waiting: Question = {
       ...q,
       followups: [...q.followups, { role: 'user', text: '那 IP 呢？' }]
     }
-    render(<QuestionCard task={{ ...task, runState: 'running' }} question={waiting} />)
-    expect(screen.getByText('Claude 正在回答…')).toBeInTheDocument()
+    const { rerender } = render(<QuestionCard task={task} question={waiting} />)
+    const status = screen.getByRole('status')
+    expect(status).toHaveAttribute('aria-live', 'polite')
+    expect(status).toHaveTextContent('')
+    rerender(<QuestionCard task={{ ...task, runState: 'running' }} question={waiting} />)
+    expect(screen.getByRole('status')).toBe(status)
+    expect(status).toHaveTextContent('Claude 正在回答…')
     expect(screen.getByRole('textbox', { name: '反問' })).toBeDisabled()
   })
 
@@ -101,6 +150,39 @@ describe('QuestionCard', () => {
       fromQuestionId: 'q3'
     })
     expect(useStore.getState().activeBranch.t1).toBe('b1')
+  })
+
+  test('升級成分岔進行中停用，連點只開一個', async () => {
+    const release = holdNextCall(vi.mocked(call))
+    render(<QuestionCard task={task} question={q} />)
+    const upgrade = screen.getByRole('button', { name: '升級成分岔' })
+    await userEvent.dblClick(upgrade)
+    expect(call).toHaveBeenCalledTimes(1)
+    expect(upgrade).toBeDisabled()
+    await release({ id: 'b9' })
+    expect(useStore.getState().activeBranch.t1).toBe('b9')
+    expect(upgrade).toBeEnabled()
+  })
+
+  test('已經從這個問題分出分岔時，改成查看分岔', async () => {
+    const withBranch = makeTask({
+      questions: [q],
+      branches: [
+        {
+          id: 'b4',
+          title: '上限處理',
+          fromQuestionId: 'q3',
+          status: 'open',
+          running: false,
+          createdAt: ''
+        }
+      ]
+    })
+    render(<QuestionCard task={withBranch} question={q} />)
+    expect(screen.queryByRole('button', { name: '升級成分岔' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '查看分岔' }))
+    expect(useStore.getState().activeBranch.t1).toBe('b4')
+    expect(call).not.toHaveBeenCalled()
   })
 
   test('Claude 執行中時停用操作', () => {
@@ -118,6 +200,15 @@ describe('QuestionCard', () => {
 })
 
 describe('AnsweredQuestionRow', () => {
+  test('只有自由文字的答案', () => {
+    render(
+      <AnsweredQuestionRow
+        question={{ ...q, status: 'answered', answer: { text: '鎖 30 分鐘' } }}
+      />
+    )
+    expect(screen.getByText('鎖 30 分鐘')).toBeInTheDocument()
+  })
+
   test('顯示問題與答案（選項加補充）', () => {
     render(
       <AnsweredQuestionRow

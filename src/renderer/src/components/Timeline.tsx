@@ -1,10 +1,10 @@
 // src/renderer/src/components/Timeline.tsx
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { Channel, Task, TimelineEvent } from '@shared/types'
 import { type ToolCall, toolLabel, toolSummary, userTextDisplay } from '../lib/timeline'
 import { Markdown } from './Markdown'
 import { AnsweredQuestionRow, QuestionCard } from './QuestionCard'
-import { Avatar, Icons, Spinner } from './ui'
+import { Avatar, Icons, LiveStatus } from './ui'
 
 type ToolEvent = TimelineEvent & { tool: ToolCall }
 type Item = { kind: 'event'; e: TimelineEvent } | { kind: 'tools'; events: ToolEvent[] }
@@ -38,7 +38,8 @@ function ToolGroup({ events }: { events: ToolEvent[] }) {
         onClick={() => setOpen(!open)}
         className="cursor-pointer self-start hover:text-ink"
       >
-        {[...counts].map(([l, n]) => `${l} ${n} 次`).join(' · ')} {open ? '▴' : '▾'}
+        {[...counts].map(([l, n]) => `${l} ${n} 次`).join(' · ')}{' '}
+        <span aria-hidden>{open ? '▴' : '▾'}</span>
       </button>
       {open &&
         events.map((e) => (
@@ -64,6 +65,7 @@ export function Timeline({
   events,
   readOnly,
   onBranchFrom,
+  branchPending,
   onOpenStage
 }: {
   task: Task
@@ -71,9 +73,11 @@ export function Timeline({
   events: TimelineEvent[]
   readOnly?: boolean
   onBranchFrom?: (text: string) => void
+  /** 正在開分岔：停用所有「從這則訊息分岔」按鈕，避免重複開 */
+  branchPending?: boolean
   onOpenStage?: (stage: 'spec' | 'report') => void
 }) {
-  const items = group(events.filter((e) => e.channel === channel))
+  const items = useMemo(() => group(events.filter((e) => e.channel === channel)), [events, channel])
   return (
     <div className="flex flex-col gap-5">
       {items.map((it) => {
@@ -94,8 +98,9 @@ export function Timeline({
                     type="button"
                     aria-label="從這則訊息分岔"
                     title="從這則訊息分岔"
+                    disabled={branchPending}
                     onClick={() => onBranchFrom(e.text ?? '')}
-                    className="flex h-7 flex-none cursor-pointer items-center rounded-lg px-2 text-muted opacity-0 group-hover:opacity-100 hover:bg-fill focus-visible:opacity-100"
+                    className="flex h-7 flex-none cursor-pointer items-center rounded-lg px-2 text-muted opacity-0 group-hover:opacity-100 hover:bg-fill focus-visible:opacity-100 disabled:cursor-default disabled:opacity-40"
                   >
                     <Icons.Branch width={14} height={14} />
                   </button>
@@ -189,38 +194,50 @@ export function Timeline({
   )
 }
 
-export function RunStatus({ task, onResume }: { task: Task; onResume: () => void }) {
-  if (task.runState === 'running')
-    return (
-      <div className="ml-10 flex items-center gap-2 text-[13px] text-muted">
-        <Spinner />
-        Claude 正在處理…
-      </div>
-    )
-  if (task.runState === 'finalizing')
-    return (
-      <div className="ml-10 flex items-center gap-2 text-[13px] text-muted">
-        <Spinner />
-        正在整理 diff 並執行驗證指令…
-      </div>
-    )
-  if (task.runState === 'interrupted' || task.runState === 'error' || task.error) {
-    const canResume = task.runState === 'interrupted' || task.runState === 'error'
-    return (
-      <div
-        role="alert"
-        className="flex items-center gap-3 rounded-xl bg-danger-soft px-3.5 py-3 text-[13px] text-danger"
-      >
-        <span className="flex-1">
-          {task.runState === 'interrupted' ? '上一次執行被中斷了。' : (task.error ?? '發生錯誤')}
-        </span>
-        {canResume && (
-          <button type="button" onClick={onResume} className="cursor-pointer font-medium underline">
-            繼續
-          </button>
-        )}
-      </div>
-    )
-  }
-  return null
+/**
+ * 主線的執行狀態：常駐的 live region 顯示處理中，錯誤另外用 alert。
+ * 只看主線（task.runState / task.error）；分岔的錯誤記在 Branch.error，由分岔面板顯示。
+ * quiet：問題卡片已經在顯示「Claude 正在回答…」時不再重複顯示處理中。
+ */
+export function RunStatus({
+  task,
+  onResume,
+  quiet
+}: {
+  task: Task
+  onResume: () => void
+  quiet?: boolean
+}) {
+  const progress =
+    task.runState === 'running'
+      ? 'Claude 正在處理…'
+      : task.runState === 'finalizing'
+        ? '正在整理 diff 並執行驗證指令…'
+        : undefined
+  const failed = task.runState === 'interrupted' || task.runState === 'error' || !!task.error
+  const canResume = task.runState === 'interrupted' || task.runState === 'error'
+  return (
+    <>
+      <LiveStatus text={!quiet && progress} className="ml-10 text-[13px]" />
+      {failed && (
+        <div
+          role="alert"
+          className="flex items-center gap-3 rounded-xl bg-danger-soft px-3.5 py-3 text-[13px] text-danger"
+        >
+          <span className="flex-1">
+            {task.runState === 'interrupted' ? '上一次執行被中斷了。' : (task.error ?? '發生錯誤')}
+          </span>
+          {canResume && (
+            <button
+              type="button"
+              onClick={onResume}
+              className="cursor-pointer font-medium underline"
+            >
+              繼續
+            </button>
+          )}
+        </div>
+      )}
+    </>
+  )
 }

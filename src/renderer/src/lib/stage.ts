@@ -1,5 +1,5 @@
 // src/renderer/src/lib/stage.ts
-import type { Task } from '@shared/types'
+import type { Question, Task } from '@shared/types'
 import type { Tone } from '../components/ui'
 
 export type Stage = 'clarify' | 'spec' | 'implement' | 'report'
@@ -69,9 +69,18 @@ export function taskStatusLabel(t: Task): { text: string; tone: Tone } {
   }
 }
 
-/** 主線在這些狀態下不能作答、反問或分岔（主程序也會拒絕） */
+/**
+ * 主線正在執行（含等待核准、整理報告）。此時 UI 停用作答、反問與分岔：
+ * 主程序在主線執行中會拒絕開分岔；作答與反問雖然會被當成插話送進這一輪，
+ * 但等這一輪停下來再開放，回答才不會和 Claude 正在進行的回覆交錯。
+ */
 export function isBusy(t: Task): boolean {
   return (
     t.runState === 'running' || t.runState === 'waiting_permission' || t.runState === 'finalizing'
   )
+}
+
+/** 使用者反問後正在等 Claude 回答（問題卡片自己會顯示等待中） */
+export function awaitingCounterReply(t: Task, q: Question): boolean {
+  return isBusy(t) && q.status === 'open' && q.followups.at(-1)?.role === 'user'
 }

@@ -51,6 +51,17 @@ describe('userTextDisplay', () => {
     ).toBe('帶回分岔結論\n決策：用 Redis\n原因：共享')
   })
 
+  test('缺必要屬性的協定訊息照原文顯示', () => {
+    expect(userTextDisplay('[answer] Redis')).toBe('[answer] Redis')
+    expect(userTextDisplay('[counter_question] 會洩漏嗎？')).toBe('[counter_question] 會洩漏嗎？')
+    expect(userTextDisplay('[branch_conclusion] 決策：x')).toBe('[branch_conclusion] 決策：x')
+  })
+
+  test('任何文字裡的分岔規則都不顯示', () => {
+    expect(userTextDisplay(`${BRANCH_RULES}\n\n請比較 Redis 與 DB`)).toBe('請比較 Redis 與 DB')
+    expect(userTextDisplay(`[todo] ${BRANCH_RULES}`)).not.toContain('Harness 規則')
+  })
+
   test('不認得的標籤照原文顯示', () => {
     expect(userTextDisplay('[todo] 記得寫測試')).toBe('[todo] 記得寫測試')
   })
@@ -110,7 +121,7 @@ describe('Timeline', () => {
     render(<Timeline task={task} channel="main" events={events} onOpenStage={onOpenStage} />)
     expect(screen.getByText('登入 API 要加上失敗次數限制')).toBeInTheDocument()
     expect(screen.queryByText('分岔裡的回覆')).not.toBeInTheDocument()
-    const tools = screen.getByRole('button', { name: /讀取 2 次 · 搜尋內容 1 次/ })
+    const tools = screen.getByRole('button', { name: '讀取 2 次 · 搜尋內容 1 次' })
     expect(tools).toHaveAttribute('aria-expanded', 'false')
     await userEvent.click(tools)
     expect(screen.getByText('讀取 src/auth/login.ts')).toBeInTheDocument()
@@ -120,6 +131,34 @@ describe('Timeline', () => {
     expect(screen.getByText('原因：多台機器要共享狀態')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /規格草稿 v1/ }))
     expect(onOpenStage).toHaveBeenCalledWith('spec')
+  })
+
+  test('工具錯誤、系統訊息、報告與非分岔決策', async () => {
+    const onOpenStage = vi.fn()
+    const t = makeTask({
+      decisions: [
+        { id: 'd2', text: '沿用既有錯誤碼', source: { type: 'implementation', ref: 's1' } }
+      ]
+    })
+    render(
+      <Timeline
+        task={t}
+        channel="main"
+        onOpenStage={onOpenStage}
+        events={[
+          ev({ kind: 'tool_result', text: 'ENOENT: no such file' }),
+          ev({ kind: 'system', text: '已切換到 Sonnet 5.5' }),
+          ev({ kind: 'decision', ref: 'd2' }),
+          ev({ kind: 'report', ref: '2' })
+        ]}
+      />
+    )
+    expect(screen.getByText('工具錯誤：ENOENT: no such file')).toBeInTheDocument()
+    expect(screen.getByText('已切換到 Sonnet 5.5')).toBeInTheDocument()
+    expect(screen.getByText('決策')).toBeInTheDocument()
+    expect(screen.getByText('沿用既有錯誤碼')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /變更報告 v2/ }))
+    expect(onOpenStage).toHaveBeenCalledWith('report')
   })
 
   test('開放中的問題顯示成卡片', () => {
@@ -148,6 +187,19 @@ describe('Timeline', () => {
     expect(onBranchFrom).toHaveBeenCalledWith('有幾件事要先確認。')
   })
 
+  test('正在開分岔時停用分岔按鈕', () => {
+    render(
+      <Timeline
+        task={task}
+        channel="main"
+        events={[ev({ kind: 'assistant_text', text: '有幾件事要先確認。' })]}
+        onBranchFrom={() => {}}
+        branchPending
+      />
+    )
+    expect(screen.getByRole('button', { name: '從這則訊息分岔' })).toBeDisabled()
+  })
+
   test('使用者訊息若是協定訊息，顯示可讀文字', () => {
     render(
       <Timeline
@@ -170,8 +222,28 @@ describe('RunStatus', () => {
     expect(onResume).toHaveBeenCalled()
   })
 
-  test('執行中顯示處理中', () => {
-    render(<RunStatus task={makeTask({ runState: 'running' })} onResume={() => {}} />)
-    expect(screen.getByText('Claude 正在處理…')).toBeInTheDocument()
+  test('執行中在常駐的 live region 顯示處理中；quiet 時不顯示', () => {
+    const { rerender } = render(<RunStatus task={makeTask()} onResume={() => {}} />)
+    const status = screen.getByRole('status')
+    expect(status).toHaveAttribute('aria-live', 'polite')
+    expect(status).toHaveTextContent('')
+    rerender(<RunStatus task={makeTask({ runState: 'running' })} onResume={() => {}} />)
+    expect(screen.getByRole('status')).toBe(status)
+    expect(status).toHaveTextContent('Claude 正在處理…')
+    rerender(<RunStatus task={makeTask({ runState: 'running' })} onResume={() => {}} quiet />)
+    expect(status).toHaveTextContent('')
+  })
+
+  test('只反映主線的錯誤，分岔的錯誤不出現在這裡', () => {
+    const branchFailed = makeTask({
+      branches: [
+        { id: 'b1', title: 'x', status: 'open', running: false, createdAt: '', error: '分岔失敗' }
+      ]
+    })
+    const { rerender } = render(<RunStatus task={branchFailed} onResume={() => {}} />)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    rerender(<RunStatus task={{ ...branchFailed, error: '主線失敗' }} onResume={() => {}} />)
+    expect(screen.getByRole('alert')).toHaveTextContent('主線失敗')
+    expect(screen.queryByRole('button', { name: '繼續' })).not.toBeInTheDocument()
   })
 })

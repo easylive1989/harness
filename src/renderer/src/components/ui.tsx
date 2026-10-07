@@ -89,16 +89,37 @@ export function Pill({
   )
 }
 
-export function Spinner({ className }: { className?: string }) {
+/** decorative：旁邊已有文字說明（例如放在 LiveStatus 裡）時不再自己宣告狀態 */
+export function Spinner({ className, decorative }: { className?: string; decorative?: boolean }) {
   return (
     <span
-      role="status"
-      aria-label="處理中"
+      {...(decorative ? { 'aria-hidden': true } : { role: 'status', 'aria-label': '處理中' })}
       className={cx(
-        'inline-block size-3.5 animate-spin rounded-full border-2 border-brand border-t-transparent',
+        'inline-block size-3.5 flex-none animate-spin rounded-full border-2 border-brand border-t-transparent',
         className
       )}
     />
+  )
+}
+
+/**
+ * 常駐的 live region：有 text 時顯示轉圈與文字，沒有時保持空的但不移除，
+ * 讓螢幕閱讀器在狀態出現或改變時唸出來。
+ */
+export function LiveStatus({ text, className }: { text?: string | false; className?: string }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={cx('flex items-center gap-2 text-muted', className)}
+    >
+      {text && (
+        <>
+          <Spinner decorative />
+          {text}
+        </>
+      )}
+    </div>
   )
 }
 

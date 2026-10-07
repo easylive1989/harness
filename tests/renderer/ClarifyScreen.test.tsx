@@ -1,5 +1,5 @@
 // tests/renderer/ClarifyScreen.test.tsx
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
@@ -12,6 +12,7 @@ import { ClarifyScreen } from '@renderer/screens/ClarifyScreen'
 import { TaskScreen } from '@renderer/screens/TaskScreen'
 import { resetStoreInternals, useStore } from '@renderer/store'
 import type { TimelineEvent } from '@shared/types'
+import { holdNextCall } from '../fixtures/hold'
 import { makeTask } from '../fixtures/task'
 
 const events: TimelineEvent[] = [
@@ -44,6 +45,56 @@ test('從 Claude 的訊息開分岔並切過去', async () => {
     seed: '針對這段內容深入討論：\n有幾件事要先確認。'
   })
   expect(useStore.getState().activeBranch.t1).toBe('b1')
+})
+
+test('開分岔進行中停用分岔按鈕，連點只開一個', async () => {
+  const release = holdNextCall(vi.mocked(call))
+  render(<ClarifyScreen task={makeTask()} nav={null} readOnly={false} onOpenStage={() => {}} />)
+  const button = screen.getByRole('button', { name: '從這則訊息分岔' })
+  await userEvent.dblClick(button)
+  expect(call).toHaveBeenCalledTimes(1)
+  expect(button).toBeDisabled()
+  await release({ id: 'b3' })
+  expect(useStore.getState().activeBranch.t1).toBe('b3')
+  expect(button).toBeEnabled()
+})
+
+test('等反問的回答時只在卡片顯示處理中，不重複顯示', () => {
+  const task = makeTask({
+    runState: 'running',
+    questions: [
+      {
+        id: 'q1',
+        text: '要鎖多久？',
+        status: 'open',
+        allowFreeText: true,
+        askedAt: '',
+        options: [{ id: 'a', label: '15 分鐘' }],
+        followups: [{ role: 'user', text: '可以依帳號調整嗎？' }]
+      }
+    ]
+  })
+  useStore.setState({
+    timelines: {
+      t1: [...events, { id: 'e3', ts: '', channel: 'main', kind: 'question', ref: 'q1' }]
+    }
+  })
+  render(<ClarifyScreen task={task} nav={null} readOnly={false} onOpenStage={() => {}} />)
+  expect(screen.getByText('Claude 正在回答…')).toBeInTheDocument()
+  expect(screen.queryByText('Claude 正在處理…')).not.toBeInTheDocument()
+})
+
+test('分岔的錯誤只出現在分岔面板，不在主線', () => {
+  const task = makeTask({
+    branches: [
+      { id: 'b1', title: '通知', status: 'open', running: false, createdAt: '', error: '分岔失敗' }
+    ]
+  })
+  render(<ClarifyScreen task={task} nav={null} readOnly={false} onOpenStage={() => {}} />)
+  expect(within(screen.getByRole('main')).queryByRole('alert')).not.toBeInTheDocument()
+  expect(
+    within(screen.getByRole('complementary', { name: '分岔討論' })).getByRole('alert')
+  ).toHaveTextContent('分岔失敗')
 })
 
 test('Claude 執行中不能從訊息分岔，但仍可插話', () => {
