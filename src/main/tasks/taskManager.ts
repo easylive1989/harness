@@ -6,6 +6,8 @@ import type { AppEvent, CreateTaskInput } from '@shared/ipc'
 import { msg } from '@shared/protocol'
 import type { ReportInput } from '@shared/report'
 import type {
+  Branch,
+  BranchConclusion,
   Channel,
   PermissionDecision,
   Task,
@@ -460,7 +462,18 @@ export class TaskManager {
             t.plan = a.steps
           })
         }),
-      concludeBranch: () => this.enqueue(taskId, async () => undefined),
+      concludeBranch: (a) =>
+        this.enqueue(taskId, async () => {
+          const branchId = branchIdOf(channel)
+          if (!branchId) throw new Error('conclude_branch 只能在分岔中使用')
+          await this.update(taskId, (t) => {
+            const b = t.branches.find((x) => x.id === branchId)
+            if (!b) throw new Error(`找不到分岔 ${branchId}`)
+            if (b.status === 'concluded') throw new Error('這個分岔已經帶回主線')
+            b.conclusion = { decision: a.decision, rationale: a.rationale, deferred: a.deferred }
+            b.status = 'concluding'
+          })
+        }),
       submitReport: (input) =>
         this.enqueue(taskId, async () => {
           if (this.get(taskId).status !== 'implementing')
@@ -512,6 +525,81 @@ export class TaskManager {
     })
     this.pendingCounter.set(taskId, questionId)
     await this.send(taskId, 'main', msg.counterQuestion(questionId, body), { silent: true })
+  }
+
+  // ───────── 分岔 ─────────
+
+  async openBranch(
+    taskId: string,
+    input: { title: string; fromQuestionId?: string; seed?: string }
+  ): Promise<Branch> {
+    const t = this.get(taskId)
+    if (t.status === 'done' || t.status === 'discarded') throw new Error('任務已結束')
+    if (!t.mainSessionId) throw new Error('請等 Claude 在主線回覆至少一次後再分岔')
+    // 主線在執行中時 session 還在變動，fork 出來的內容不確定
+    if (this.runs.get(runKey(taskId, 'main'))?.active)
+      throw new Error('主線正在執行，請等它停下來再分岔')
+    const q = input.fromQuestionId
+      ? t.questions.find((x) => x.id === input.fromQuestionId)
+      : undefined
+    if (input.fromQuestionId && !q) throw new Error(`找不到問題 ${input.fromQuestionId}`)
+    const seed = [
+      input.seed?.trim(),
+      q && `來源問題：${q.text}`,
+      q?.followups.length
+        ? `之前的反問：\n${q.followups.map((f) => `${f.role === 'user' ? '使用者' : 'Claude'}：${f.text}`).join('\n')}`
+        : undefined
+    ]
+      .filter(Boolean)
+      .join('\n')
+    const branch: Branch = {
+      id: `b${t.branches.length + 1}`,
+      title: input.title.trim() || '分岔討論',
+      fromQuestionId: input.fromQuestionId,
+      status: 'open',
+      running: false,
+      createdAt: this.now()
+    }
+    await this.update(taskId, (x) => {
+      x.branches.push(branch)
+    })
+    await this.send(taskId, `branch:${branch.id}`, msg.branchOpen(branch.title, seed), {
+      display: input.seed?.trim() || `開始討論：${branch.title}`
+    })
+    return structuredClone(branch)
+  }
+
+  async concludeBranch(taskId: string, branchId: string) {
+    const b = this.get(taskId).branches.find((x) => x.id === branchId)
+    if (!b) throw new Error(`找不到分岔 ${branchId}`)
+    if (b.status === 'concluded') throw new Error('這個分岔已經帶回主線')
+    await this.send(taskId, `branch:${branchId}`, msg.conclude(), { silent: true })
+  }
+
+  /** 使用者確認（可編輯過的）結論：記成決策並送回主線 */
+  async confirmBranch(taskId: string, branchId: string, edited?: BranchConclusion) {
+    const t = this.get(taskId)
+    const b = t.branches.find((x) => x.id === branchId)
+    if (!b) throw new Error(`找不到分岔 ${branchId}`)
+    if (b.status === 'concluded') throw new Error('這個分岔已經帶回主線')
+    const c = edited ?? b.conclusion
+    if (!c) throw new Error('分岔還沒有結論')
+    if (t.status === 'done' || t.status === 'discarded') throw new Error('任務已結束')
+    const decisionId = `d${t.decisions.length + 1}`
+    await this.update(taskId, (x) => {
+      const bb = x.branches.find((y) => y.id === branchId)!
+      bb.conclusion = c
+      bb.status = 'concluded'
+      x.decisions.push({
+        id: decisionId,
+        text: c.decision,
+        rationale: c.rationale,
+        deferred: c.deferred,
+        source: { type: 'branch', ref: branchId }
+      })
+    })
+    await this.addTimeline(taskId, { channel: 'main', kind: 'decision', ref: decisionId })
+    await this.send(taskId, 'main', msg.branchConclusion(branchId, c), { silent: true })
   }
 
   // ───────── 暫時的 stub（Task 23、24 取代） ─────────

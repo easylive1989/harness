@@ -166,3 +166,99 @@ describe('TaskManager：建立任務與釐清', () => {
     expect(tm.get(id)).toMatchObject({ runState: 'error', error: 'CLI crashed' })
   })
 })
+
+describe('TaskManager：分岔', () => {
+  test('從主線 fork、續接分岔、整理結論並帶回主線', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser(askQ1)
+    }
+    const id = await create()
+    await tm.counterQuestion(id, 'q1', '差在哪？')
+    await tm.whenIdle(id)
+
+    claude.script = async () => [assistantText('Redis 可以共享狀態')]
+    const b = await tm.openBranch(id, {
+      title: '計數存放位置',
+      fromQuestionId: 'q1',
+      seed: 'Redis 和 in-memory 差在哪？'
+    })
+    await tm.whenIdle(id)
+    const forkCall = claude.calls.at(-1)!
+    expect(forkCall.options).toMatchObject({ resume: 'sess-0', forkSession: true })
+    expect(forkCall.tools).toEqual(['conclude_branch'])
+    expect(forkCall.prompt).toContain('[branch_open]')
+    expect(forkCall.prompt).toContain('來源問題：計數單位？')
+    expect(forkCall.prompt).toContain('使用者：差在哪？')
+    expect(tm.get(id).branches[0]).toMatchObject({
+      id: b.id,
+      sessionId: expect.stringMatching(/^fork-/),
+      running: false
+    })
+    expect(tm.get(id).mainSessionId).toBe('sess-0')
+    const tl = await tm.timeline(id)
+    expect(tl.filter((e) => e.channel === `branch:${b.id}`).map((e) => e.kind)).toEqual([
+      'user_text',
+      'assistant_text'
+    ])
+
+    claude.script = async ({ sink }) => {
+      await sink.concludeBranch({ decision: '用 Redis', rationale: '多台機器', deferred: [] })
+    }
+    await tm.concludeBranch(id, b.id)
+    await tm.whenIdle(id)
+    expect(claude.calls.at(-1)!.options).toMatchObject({
+      resume: tm.get(id).branches[0].sessionId
+    })
+    expect(claude.calls.at(-1)!.options.forkSession).toBeUndefined()
+    expect(tm.get(id).branches[0]).toMatchObject({
+      status: 'concluding',
+      conclusion: { decision: '用 Redis' }
+    })
+
+    claude.script = async () => []
+    await tm.confirmBranch(id, b.id)
+    await tm.whenIdle(id)
+    const t = tm.get(id)
+    expect(t.branches[0].status).toBe('concluded')
+    expect(t.decisions[0]).toMatchObject({
+      id: 'd1',
+      text: '用 Redis',
+      source: { type: 'branch', ref: b.id }
+    })
+    expect(claude.calls.at(-1)!.prompt).toBe(
+      `[branch_conclusion branch=${b.id}] 決策：用 Redis\n原因：多台機器`
+    )
+    expect(claude.calls.at(-1)!.options.resume).toBe('sess-0')
+    expect((await tm.timeline(id)).at(-1)).toMatchObject({
+      channel: 'main',
+      kind: 'decision',
+      ref: 'd1'
+    })
+    await expect(tm.confirmBranch(id, b.id)).rejects.toThrow('已經帶回主線')
+  })
+
+  test('主線還沒有 session 時不能分岔', async () => {
+    const { tm, repo } = await setup()
+    const { makeTask } = await import('../fixtures/task')
+    await repo.saveTask(makeTask({ id: 'x' }))
+    await tm.init()
+    await expect(tm.openBranch('x', { title: 't' })).rejects.toThrow('回覆至少一次')
+  })
+
+  test('主線不能呼叫 conclude_branch', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    let error: unknown
+    claude.script = async ({ sink }) => {
+      try {
+        await sink.concludeBranch({ decision: 'x', rationale: 'y', deferred: [] })
+      } catch (e) {
+        error = e
+      }
+    }
+    await tm.send(id, 'main', '結束')
+    await tm.whenIdle(id)
+    expect(String(error)).toContain('只能在分岔中使用')
+  })
+})
