@@ -4,6 +4,7 @@ import { StageNav } from '../components/StageNav'
 import { currentStage, type Stage } from '../lib/stage'
 import { useStore } from '../store'
 import { ClarifyScreen } from './ClarifyScreen'
+import { ImplementScreen } from './ImplementScreen'
 import { SpecScreen } from './SpecScreen'
 
 export function TaskScreen({ taskId }: { taskId: string }) {
@@ -24,8 +25,10 @@ export function TaskScreen({ taskId }: { taskId: string }) {
       return <ClarifyScreen task={task} nav={nav} readOnly={readOnly} onOpenStage={openStage} />
     case 'spec':
       return <SpecScreen task={task} nav={nav} readOnly={readOnly} onOpenStage={openStage} />
+    case 'implement':
+      return <ImplementScreen task={task} nav={nav} readOnly={readOnly} />
     default:
-      // Task 32–33 補上實作與報告
+      // Task 33 補上報告
       return <ClarifyScreen task={task} nav={nav} readOnly onOpenStage={openStage} />
   }
 }

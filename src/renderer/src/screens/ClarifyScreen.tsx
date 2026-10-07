@@ -4,6 +4,7 @@ import type { Task } from '@shared/types'
 import { call } from '../api'
 import { BranchPanel } from '../components/BranchPanel'
 import { Composer } from '../components/Composer'
+import { PendingPermission } from '../components/PermissionDialog'
 import { RunStatus, Timeline } from '../components/Timeline'
 import { awaitingCounterReply, isBusy } from '../lib/stage'
 import { useTimeline } from '../lib/timeline'
@@ -53,7 +54,7 @@ export function ClarifyScreen({
     })
   return (
     <>
-      <main className="flex min-w-0 flex-1 flex-col rounded-2xl bg-surface shadow-card">
+      <main className="relative flex min-w-0 flex-1 flex-col rounded-2xl bg-surface shadow-card">
         <div className="flex flex-wrap items-center gap-4 px-7 py-[18px]">
           <span className="text-lg font-bold">{task.title}</span>
           {nav}
@@ -93,6 +94,8 @@ export function ClarifyScreen({
             </div>
           </div>
         )}
+        {/* 釐清中 Claude（主線或分岔）要讀網頁、搜尋網路時也要核准 */}
+        <PendingPermission task={task} />
       </main>
       <BranchPanel task={task} events={events} readOnly={readOnly} />
     </>

@@ -220,3 +220,22 @@ test('TaskScreen：已丟棄的任務停在規格時唯讀', () => {
   expect(screen.queryByRole('button', { name: '核准並開始實作' })).not.toBeInTheDocument()
   expect(screen.getByText(/規格草稿/)).toBeInTheDocument()
 })
+
+test('回看規格時有等待中的核准請求也會顯示', () => {
+  renderSpec(
+    specTask({
+      status: 'implementing',
+      runState: 'waiting_permission',
+      pendingPermission: {
+        id: 'p1',
+        taskId: 't1',
+        toolName: 'Bash',
+        input: { command: 'npm test' },
+        suggestedPattern: 'npm test *',
+        createdAt: ''
+      }
+    }),
+    true
+  )
+  expect(screen.getByRole('dialog', { name: 'Claude 想執行這個指令' })).toBeInTheDocument()
+})

@@ -3,6 +3,7 @@ import { type FormEvent, type ReactNode, useId, useState } from 'react'
 import type { DecisionSource, Spec, Task } from '@shared/types'
 import { call } from '../api'
 import { InlineCode } from '../components/Markdown'
+import { PendingPermission } from '../components/PermissionDialog'
 import { Button, cx, inputClass, LiveStatus, Pill } from '../components/ui'
 import { currentStage, isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
@@ -306,6 +307,7 @@ export function SpecScreen({
             />
           </div>
         )}
+        <PendingPermission task={task} />
       </main>
 
       <ClarifyLog task={task} spec={spec} onOpenClarify={() => onOpenStage('clarify')} />

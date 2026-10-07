@@ -50,6 +50,23 @@ export const msg = {
   resume: () => tag('resume', {}, '上一次執行被中斷，請從中斷的地方繼續。')
 }
 
+/**
+ * 上面幾則訊息在時間軸上給人看的文字（主程序寫入 user_text 時用）。
+ * 實作畫面靠 startsImplementation 從時間軸找出這一段實作從哪裡開始，兩邊共用這裡的定義。
+ */
+export const msgDisplay = {
+  specApproved: '核准規格，開始實作',
+  specFeedback: (text: string) => `要求修改規格：${text}`,
+  reportFeedback: (count: number, withOverall: boolean) =>
+    `送出 ${count} 則報告回饋${withOverall ? '與整體意見' : ''}`,
+  resume: '繼續執行'
+}
+
+/** 時間軸上的使用者訊息是否標記一段實作的開始（核准規格、送出報告回饋） */
+export function startsImplementation(text: string): boolean {
+  return text === msgDisplay.specApproved || /^送出 \d+ 則報告回饋(與整體意見)?$/.test(text)
+}
+
 export function parseTagged(s: string): Tagged | null {
   const m = /^\[([a-z_]+)((?:\s+[a-z_]+=[^\s\]]+)*)\](?:\s([\s\S]*))?$/.exec(s)
   if (!m) return null

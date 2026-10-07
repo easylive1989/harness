@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { msg, parseTagged } from '@shared/protocol'
+import { msg, msgDisplay, parseTagged, startsImplementation } from '@shared/protocol'
 
 describe('protocol', () => {
   test('answer 含選項與補充文字', () => {
@@ -42,5 +42,20 @@ describe('protocol', () => {
 
   test('一般文字不是 tagged', () => {
     expect(parseTagged('你好')).toBeNull()
+  })
+})
+
+describe('msgDisplay / startsImplementation', () => {
+  test('核准規格與送出報告回饋標記一段實作的開始', () => {
+    expect(startsImplementation(msgDisplay.specApproved)).toBe(true)
+    expect(startsImplementation(msgDisplay.reportFeedback(3, false))).toBe(true)
+    expect(startsImplementation(msgDisplay.reportFeedback(0, true))).toBe(true)
+  })
+
+  test('其他訊息不算', () => {
+    expect(startsImplementation(msgDisplay.resume)).toBe(false)
+    expect(startsImplementation(msgDisplay.specFeedback('上限改 10 次'))).toBe(false)
+    expect(startsImplementation('核准規格之前想再問一下')).toBe(false)
+    expect(startsImplementation('送出 3 則報告回饋，然後呢？')).toBe(false)
   })
 })

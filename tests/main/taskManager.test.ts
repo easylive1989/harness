@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AppEvent } from '@shared/ipc'
+import { msgDisplay, startsImplementation } from '@shared/protocol'
 import { Repository } from '../../src/main/store/repository'
 import { Store } from '../../src/main/store/store'
 import { TaskManager, type TaskManagerDeps } from '../../src/main/tasks/taskManager'
@@ -311,6 +312,10 @@ describe('TaskManager：規格與實作', () => {
     await tm.whenIdle(id)
     expect(claude.calls.at(-1)!.prompt).toContain('[spec_approved]')
     expect(tm.get(id).status).toBe('implementing')
+    // 實作畫面靠這則訊息找出實作從哪裡開始
+    const userTexts = (await tm.timeline(id)).filter((e) => e.kind === 'user_text')
+    expect(userTexts.map((e) => e.text)).toContain(msgDisplay.specFeedback('上限改 10 次'))
+    expect(startsImplementation(userTexts.at(-1)!.text!)).toBe(true)
     expect(tm.get(id).plan).toEqual([{ id: 's1', title: '寫程式', status: 'running' }])
     await expect(tm.approveSpec(id)).rejects.toThrow()
   })
@@ -536,6 +541,9 @@ describe('TaskManager：報告與收尾', () => {
     await tm.submitReportFeedback(id, [{ anchor: 'diff:a.ts:3', label: 'a.ts:3', text: '改常數' }])
     await tm.whenIdle(id)
     expect(claude.calls.at(-1)!.prompt).toBe('[report_feedback] - (diff:a.ts:3) 改常數')
+    const feedback = (await tm.timeline(id)).filter((e) => e.kind === 'user_text').at(-1)!
+    expect(feedback.text).toBe(msgDisplay.reportFeedback(1, false))
+    expect(startsImplementation(feedback.text!)).toBe(true)
     expect(tm.get(id).reportVersions).toEqual([1, 2])
     expect(tm.get(id).status).toBe('reviewing')
   })

@@ -45,6 +45,7 @@
   --color-note-ink: #713f12;
   --color-code: #1c2430;
   --color-code-ink: #e7ecef;
+  --color-code-muted: #a9b3bf;
 
   --shadow-card: 0 1px 3px rgba(16, 24, 40, 0.06);
   --shadow-raised: 0 1px 2px rgba(16, 24, 40, 0.06), 0 2px 8px rgba(16, 24, 40, 0.05);

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { Options } from '@anthropic-ai/claude-agent-sdk'
 import type { AppEvent, CreateTaskInput } from '@shared/ipc'
-import { msg } from '@shared/protocol'
+import { msg, msgDisplay } from '@shared/protocol'
 import type { ReportInput } from '@shared/report'
 import type {
   Branch,
@@ -834,7 +834,7 @@ export class TaskManager {
 
   approveSpec(taskId: string) {
     return this.transitionAndSend(taskId, 'SPEC_APPROVED', () =>
-      this.send(taskId, 'main', msg.specApproved(), { display: '核准規格，開始實作' })
+      this.send(taskId, 'main', msg.specApproved(), { display: msgDisplay.specApproved })
     )
   }
 
@@ -842,7 +842,7 @@ export class TaskManager {
     const body = text.trim()
     if (!body) throw new Error('請說明要修改的地方')
     await this.transitionAndSend(taskId, 'SPEC_CHANGES_REQUESTED', () =>
-      this.send(taskId, 'main', msg.specFeedback(body), { display: `要求修改規格：${body}` })
+      this.send(taskId, 'main', msg.specFeedback(body), { display: msgDisplay.specFeedback(body) })
     )
   }
 
@@ -967,10 +967,10 @@ export class TaskManager {
     const t = this.task(taskId)
     // 第一輪還沒拿到 session 就中斷：沒有可續接的對話，重新送出需求
     if (!t.mainSessionId) {
-      await this.send(taskId, 'main', t.request, { display: '繼續執行' })
+      await this.send(taskId, 'main', t.request, { display: msgDisplay.resume })
       return
     }
-    await this.send(taskId, 'main', msg.resume(), { display: '繼續執行' })
+    await this.send(taskId, 'main', msg.resume(), { display: msgDisplay.resume })
   }
 
   // ───────── 報告 ─────────
@@ -1054,7 +1054,7 @@ export class TaskManager {
     if (!items.length && !note) throw new Error('請至少留一則回饋')
     await this.transitionAndSend(taskId, 'REPORT_FEEDBACK', () =>
       this.send(taskId, 'main', msg.reportFeedback(items, note), {
-        display: `送出 ${items.length} 則報告回饋${note ? '與整體意見' : ''}`
+        display: msgDisplay.reportFeedback(items.length, !!note)
       })
     )
   }

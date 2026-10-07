@@ -123,11 +123,14 @@ export function LiveStatus({ text, className }: { text?: string | false; classNa
   )
 }
 
-export function Avatar() {
+export function Avatar({ className }: { className?: string }) {
   return (
     <span
       aria-hidden
-      className="flex size-7 flex-none items-center justify-center rounded-full bg-brand-soft text-xs font-bold text-brand"
+      className={cx(
+        'flex size-7 flex-none items-center justify-center rounded-full bg-brand-soft text-xs font-bold text-brand',
+        className
+      )}
     >
       C
     </span>

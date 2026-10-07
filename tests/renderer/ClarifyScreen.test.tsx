@@ -134,3 +134,20 @@ test('TaskScreen：已丟棄的任務即使停在釐清也唯讀', () => {
   expect(screen.getByText('加上登入失敗鎖定')).toBeInTheDocument()
   expect(screen.queryByRole('textbox', { name: '訊息' })).not.toBeInTheDocument()
 })
+
+test('釐清中 Claude 要讀網頁時也顯示核准對話框', () => {
+  const task = makeTask({
+    runState: 'waiting_permission',
+    pendingPermission: {
+      id: 'p1',
+      taskId: 't1',
+      toolName: 'WebFetch',
+      input: { url: 'https://example.com/docs', prompt: '查 API 限制' },
+      createdAt: ''
+    }
+  })
+  render(<ClarifyScreen task={task} nav={null} readOnly={false} onOpenStage={() => {}} />)
+  expect(
+    within(screen.getByRole('main')).getByRole('dialog', { name: 'Claude 想讀取這個網頁' })
+  ).toBeInTheDocument()
+})
