@@ -20,6 +20,7 @@
   --color-fill: #f1f3f6;
   --color-fill-2: #f6f8f9;
   --color-chip: #e6e9ee;
+  --color-line-strong: #b8c0cc;
 
   --color-brand: #0f766e;
   --color-brand-hover: #115e59;
@@ -28,6 +29,7 @@
   --color-brand-soft: #d5ebe8;
   --color-brand-ring: #cfe3e0;
   --color-brand-muted: #3f5f5b;
+  --color-brand-halo: #b9dcd7;
 
   --color-decision: #fdf6e7;
   --color-decision-ink: #8a5300;
@@ -35,7 +37,9 @@
   --color-progress: #9a5b00;
   --color-progress-bar: #c27c0e;
   --color-review: #2563eb;
+  --color-review-soft: #e0ecff;
   --color-danger: #b42318;
+  --color-danger-soft: #fef3f2;
   --color-ok: #15803d;
   --color-note: #fef9c3;
   --color-note-ink: #713f12;

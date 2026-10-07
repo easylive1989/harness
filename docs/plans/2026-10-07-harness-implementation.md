@@ -188,6 +188,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   --color-fill: #f1f3f6;
   --color-fill-2: #f6f8f9;
   --color-chip: #e6e9ee;
+  --color-line-strong: #b8c0cc;
 
   --color-brand: #0f766e;
   --color-brand-hover: #115e59;
@@ -196,6 +197,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   --color-brand-soft: #d5ebe8;
   --color-brand-ring: #cfe3e0;
   --color-brand-muted: #3f5f5b;
+  --color-brand-halo: #b9dcd7;
 
   --color-decision: #fdf6e7;
   --color-decision-ink: #8a5300;
@@ -203,7 +205,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   --color-progress: #9a5b00;
   --color-progress-bar: #c27c0e;
   --color-review: #2563eb;
+  --color-review-soft: #e0ecff;
   --color-danger: #b42318;
+  --color-danger-soft: #fef3f2;
   --color-ok: #15803d;
   --color-note: #fef9c3;
   --color-note-ink: #713f12;
@@ -8354,7 +8358,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `src/renderer/src/store.ts`
 - Create: `src/renderer/src/lib/stage.ts`
 - Create: `src/renderer/src/components/ui.tsx`
-- Test: `tests/renderer/stage.test.ts`、`tests/renderer/store.test.ts`
+- Modify: `src/renderer/src/styles/app.css`（補 `line-strong`、`brand-halo`、`review-soft`、`danger-soft` 四個 token，取代 Tailwind 預設色）
+- Test: `tests/renderer/stage.test.ts`、`tests/renderer/store.test.ts`、`tests/renderer/api.test.ts`
 
 **Step 1: 寫失敗測試**
 
@@ -8382,9 +8387,46 @@ describe('stage', () => {
 
   test('側欄狀態文字', () => {
     expect(taskStatusLabel(makeTask({ runState: 'waiting_permission' })).text).toBe('等你核准指令')
-    expect(taskStatusLabel(makeTask({ status: 'implementing', plan: [{ id: 's1', title: 'a', status: 'done' }, { id: 's2', title: 'b', status: 'running' }] })).text).toBe('實作中 · 1/2')
-    expect(taskStatusLabel(makeTask({ status: 'reviewing', reportVersions: [1, 2] })).text).toBe('待審閱報告 · v2')
-    expect(taskStatusLabel(makeTask({ questions: [{ id: 'q1', text: '?', options: [], allowFreeText: true, status: 'answered', followups: [], askedAt: '' }, { id: 'q2', text: '?', options: [], allowFreeText: true, status: 'open', followups: [], askedAt: '' }] })).text).toBe('釐清中 · 問題 2')
+    expect(
+      taskStatusLabel(
+        makeTask({
+          status: 'implementing',
+          plan: [
+            { id: 's1', title: 'a', status: 'done' },
+            { id: 's2', title: 'b', status: 'running' }
+          ]
+        })
+      ).text
+    ).toBe('實作中 · 1/2')
+    expect(taskStatusLabel(makeTask({ status: 'reviewing', reportVersions: [1, 2] })).text).toBe(
+      '待審閱報告 · v2'
+    )
+    expect(
+      taskStatusLabel(
+        makeTask({
+          questions: [
+            {
+              id: 'q1',
+              text: '?',
+              options: [],
+              allowFreeText: true,
+              status: 'answered',
+              followups: [],
+              askedAt: ''
+            },
+            {
+              id: 'q2',
+              text: '?',
+              options: [],
+              allowFreeText: true,
+              status: 'open',
+              followups: [],
+              askedAt: ''
+            }
+          ]
+        })
+      ).text
+    ).toBe('釐清中 · 問題 2')
   })
 })
 ```
@@ -8392,11 +8434,26 @@ describe('stage', () => {
 ```ts
 // tests/renderer/store.test.ts
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-vi.mock('@renderer/api', () => ({ call: vi.fn(), onEvent: vi.fn(() => () => {}) }))
+vi.mock('@renderer/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@renderer/api')>()),
+  call: vi.fn(),
+  onEvent: vi.fn(() => () => {})
+}))
+import { call, onEvent } from '@renderer/api'
 import { useStore } from '@renderer/store'
 import { makeTask } from '../fixtures/task'
 
-beforeEach(() => useStore.setState({ tasks: {}, timelines: {}, feedback: {} }))
+beforeEach(() => {
+  vi.mocked(call).mockReset()
+  useStore.setState({
+    ready: false,
+    tasks: {},
+    timelines: {},
+    feedback: {},
+    view: { kind: 'new' },
+    toast: undefined
+  })
+})
 
 describe('store.apply', () => {
   test('task 事件 upsert', () => {
@@ -8416,9 +8473,80 @@ describe('store.apply', () => {
     const s = useStore.getState()
     s.addFeedback('a', { anchor: 'diff:a.ts:3', label: 'a.ts:3', text: 'x' })
     s.addFeedback('a', { anchor: 'diff:a.ts:3', label: 'a.ts:3', text: 'y' })
-    expect(useStore.getState().feedback.a).toEqual([{ anchor: 'diff:a.ts:3', label: 'a.ts:3', text: 'y' }])
+    expect(useStore.getState().feedback.a).toEqual([
+      { anchor: 'diff:a.ts:3', label: 'a.ts:3', text: 'y' }
+    ])
     s.removeFeedback('a', 'diff:a.ts:3')
     expect(useStore.getState().feedback.a).toEqual([])
+  })
+})
+
+const ipcError = (channel: string, msg: string) =>
+  new Error(`Error invoking remote method '${channel}': Error: ${msg}`)
+
+describe('store.init / open / act', () => {
+  test('載入初始資料並打開第一個進行中的任務；回傳取消訂閱', async () => {
+    const off = vi.fn()
+    vi.mocked(onEvent).mockReturnValueOnce(off)
+    const tasks = [makeTask({ id: 'd', status: 'done' }), makeTask({ id: 'b' })]
+    const replies: Record<string, unknown> = {
+      'claude:status': { found: true, loggedIn: true },
+      'settings:get': { defaultModel: 'claude-opus-5-5' },
+      'repos:list': [],
+      'tasks:list': tasks,
+      'tasks:timeline': []
+    }
+    vi.mocked(call).mockImplementation((async (ch: string) => replies[ch]) as typeof call)
+    const unsubscribe = useStore.getState().init()
+    await vi.waitFor(() => expect(useStore.getState().timelines.b).toEqual([]))
+    const s = useStore.getState()
+    expect(s.ready).toBe(true)
+    expect(Object.keys(s.tasks)).toEqual(['d', 'b'])
+    expect(s.view).toEqual({ kind: 'task', taskId: 'b' })
+    unsubscribe()
+    expect(off).toHaveBeenCalled()
+  })
+
+  test('載入失敗時仍進入畫面並顯示錯誤', async () => {
+    vi.mocked(call).mockRejectedValue(ipcError('repos:list', '讀取失敗'))
+    useStore.getState().init()
+    await vi.waitFor(() => expect(useStore.getState().ready).toBe(true))
+    expect(useStore.getState().toast).toBe('讀取失敗')
+  })
+
+  test('時間軸讀取失敗時顯示 toast，不丟出未處理的錯誤', async () => {
+    vi.mocked(call).mockRejectedValue(ipcError('tasks:timeline', '找不到任務'))
+    await useStore.getState().open({ kind: 'task', taskId: 'x' })
+    expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 'x' })
+    expect(useStore.getState().timelines.x).toBeUndefined()
+    expect(useStore.getState().toast).toBe('找不到任務')
+  })
+
+  test('act 回傳結果；失敗時只留主程序的訊息', async () => {
+    expect(await useStore.getState().act(async () => 1)).toBe(1)
+    const r = await useStore.getState().act(async () => {
+      throw ipcError('tasks:create', '尚未登入')
+    })
+    expect(r).toBeUndefined()
+    expect(useStore.getState().toast).toBe('尚未登入')
+    useStore.getState().dismissToast()
+    expect(useStore.getState().toast).toBeUndefined()
+  })
+})
+```
+
+```ts
+// tests/renderer/api.test.ts
+import { describe, expect, test } from 'vitest'
+import { errorText } from '@renderer/api'
+
+describe('errorText', () => {
+  test('去掉 Electron 加上的 remote method 前綴', () => {
+    expect(
+      errorText(new Error("Error invoking remote method 'tasks:create': Error: 無效的需求"))
+    ).toBe('無效的需求')
+    expect(errorText(new Error('一般錯誤'))).toBe('一般錯誤')
+    expect(errorText('字串')).toBe('字串')
   })
 })
 ```
@@ -8439,6 +8567,7 @@ export function onEvent(cb: (e: AppEvent) => void) {
   return window.harness.onEvent(cb)
 }
 
+/** 主程序丟出的錯誤會被包成 `Error invoking remote method '<channel>': Error: <訊息>`，只留訊息 */
 export function errorText(e: unknown): string {
   const raw = e instanceof Error ? e.message : String(e)
   return raw.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
@@ -8467,7 +8596,8 @@ interface State {
   activeBranch: Record<string, string | undefined>
   feedback: Record<string, FeedbackItem[]>
   toast?: string
-  init(): Promise<void>
+  /** 訂閱主程序事件並載入初始資料；回傳取消訂閱（給 useEffect 的 cleanup 用） */
+  init(): () => void
   apply(e: AppEvent): void
   open(view: View): Promise<void>
   act<T>(fn: () => Promise<T>): Promise<T | undefined>
@@ -8487,14 +8617,33 @@ export const useStore = create<State>((set, get) => ({
   activeBranch: {},
   feedback: {},
 
-  async init() {
-    onEvent((e) => get().apply(e))
-    const [claude, settings, repos, tasks] = await Promise.all([
-      call('claude:status'), call('settings:get'), call('repos:list'), call('tasks:list')
-    ])
-    set({ claude, settings, repos, tasks: Object.fromEntries(tasks.map((t) => [t.id, t])), ready: true })
-    const first = tasks.find((t) => t.status !== 'discarded' && t.status !== 'done')
-    if (first) await get().open({ kind: 'task', taskId: first.id })
+  init() {
+    const off = onEvent((e) => get().apply(e))
+    void (async () => {
+      try {
+        const [claude, settings, repos, tasks] = await Promise.all([
+          call('claude:status'),
+          call('settings:get'),
+          call('repos:list'),
+          call('tasks:list')
+        ])
+        const first = get().ready
+        set({
+          claude,
+          settings,
+          repos,
+          tasks: Object.fromEntries(tasks.map((t) => [t.id, t])),
+          ready: true
+        })
+        // StrictMode 會讓 init 跑兩次：只有第一次載入時自動打開進行中的任務
+        const active = tasks.find((t) => t.status !== 'discarded' && t.status !== 'done')
+        if (!first && active && get().view.kind === 'new')
+          await get().open({ kind: 'task', taskId: active.id })
+      } catch (e) {
+        set({ toast: errorText(e), ready: true })
+      }
+    })()
+    return off
   },
 
   apply(e) {
@@ -8512,8 +8661,12 @@ export const useStore = create<State>((set, get) => ({
   async open(view) {
     set({ view })
     if (view.kind === 'task' && !get().timelines[view.taskId]) {
-      const events = await call('tasks:timeline', view.taskId)
-      set((s) => ({ timelines: { ...s.timelines, [view.taskId]: events } }))
+      const events = await get().act(() => call('tasks:timeline', view.taskId))
+      if (!events) return
+      // 同時打開兩次時，先回來的那份已經在接收即時事件，保留它
+      set((s) =>
+        s.timelines[view.taskId] ? {} : { timelines: { ...s.timelines, [view.taskId]: events } }
+      )
     }
   },
 
@@ -8526,15 +8679,28 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  setActiveBranch: (taskId, branchId) => set((s) => ({ activeBranch: { ...s.activeBranch, [taskId]: branchId } })),
-  addFeedback: (taskId, item) => set((s) => ({
-    feedback: { ...s.feedback, [taskId]: [...(s.feedback[taskId] ?? []).filter((f) => f.anchor !== item.anchor), item] }
-  })),
-  removeFeedback: (taskId, anchor) => set((s) => ({ feedback: { ...s.feedback, [taskId]: (s.feedback[taskId] ?? []).filter((f) => f.anchor !== anchor) } })),
+  setActiveBranch: (taskId, branchId) =>
+    set((s) => ({ activeBranch: { ...s.activeBranch, [taskId]: branchId } })),
+  addFeedback: (taskId, item) =>
+    set((s) => ({
+      feedback: {
+        ...s.feedback,
+        [taskId]: [...(s.feedback[taskId] ?? []).filter((f) => f.anchor !== item.anchor), item]
+      }
+    })),
+  removeFeedback: (taskId, anchor) =>
+    set((s) => ({
+      feedback: {
+        ...s.feedback,
+        [taskId]: (s.feedback[taskId] ?? []).filter((f) => f.anchor !== anchor)
+      }
+    })),
   clearFeedback: (taskId) => set((s) => ({ feedback: { ...s.feedback, [taskId]: [] } })),
   dismissToast: () => set({ toast: undefined })
 }))
 ```
+
+`store.init()` 同步訂閱事件、回傳取消訂閱函式，資料在背景載入（App 的 `useEffect` 直接回傳它當 cleanup，StrictMode 重跑時不會重複訂閱）；載入失敗時仍設 `ready` 並顯示 toast。`open()` 讀時間軸失敗時走 `act` 顯示 toast。
 
 **Step 5: lib/stage.ts**
 
@@ -8545,18 +8711,32 @@ import type { Tone } from '../components/ui'
 
 export type Stage = 'clarify' | 'spec' | 'implement' | 'report'
 export const STAGES: { id: Stage; label: string }[] = [
-  { id: 'clarify', label: '釐清' }, { id: 'spec', label: '規格' }, { id: 'implement', label: '實作' }, { id: 'report', label: '報告' }
+  { id: 'clarify', label: '釐清' },
+  { id: 'spec', label: '規格' },
+  { id: 'implement', label: '實作' },
+  { id: 'report', label: '報告' }
 ]
 const ORDER: Stage[] = ['clarify', 'spec', 'implement', 'report']
 
 export function currentStage(t: Task): Stage {
   switch (t.status) {
-    case 'clarifying': return 'clarify'
-    case 'spec_review': return 'spec'
-    case 'implementing': return 'implement'
+    case 'clarifying':
+      return 'clarify'
+    case 'spec_review':
+      return 'spec'
+    case 'implementing':
+      return 'implement'
     case 'reviewing':
-    case 'done': return 'report'
-    case 'discarded': return t.reportVersions.length ? 'report' : t.plan.length ? 'implement' : t.specs.length ? 'spec' : 'clarify'
+    case 'done':
+      return 'report'
+    case 'discarded':
+      return t.reportVersions.length
+        ? 'report'
+        : t.plan.length
+          ? 'implement'
+          : t.specs.length
+            ? 'spec'
+            : 'clarify'
   }
 }
 
@@ -8572,17 +8752,27 @@ export function taskStatusLabel(t: Task): { text: string; tone: Tone } {
   switch (t.status) {
     case 'clarifying': {
       const idx = t.questions.findIndex((q) => q.status === 'open')
-      return { text: `釐清中 · 問題 ${idx >= 0 ? idx + 1 : Math.max(1, t.questions.length)}`, tone: 'brand' }
+      return {
+        text: `釐清中 · 問題 ${idx >= 0 ? idx + 1 : Math.max(1, t.questions.length)}`,
+        tone: 'brand'
+      }
     }
-    case 'spec_review': return { text: '規格待核准', tone: 'brand' }
+    case 'spec_review':
+      return { text: '規格待核准', tone: 'brand' }
     case 'implementing': {
       if (t.runState === 'finalizing') return { text: '整理報告中', tone: 'progress' }
       const done = t.plan.filter((s) => s.status === 'done').length
-      return { text: t.plan.length ? `實作中 · ${done}/${t.plan.length}` : '實作中', tone: 'progress' }
+      return {
+        text: t.plan.length ? `實作中 · ${done}/${t.plan.length}` : '實作中',
+        tone: 'progress'
+      }
     }
-    case 'reviewing': return { text: `待審閱報告 · v${t.reportVersions.at(-1)}`, tone: 'review' }
-    case 'done': return { text: t.prUrl ? '已開 PR' : '已合併', tone: 'muted' }
-    case 'discarded': return { text: '已丟棄', tone: 'muted' }
+    case 'reviewing':
+      return { text: `待審閱報告 · v${t.reportVersions.at(-1)}`, tone: 'review' }
+    case 'done':
+      return { text: t.prUrl ? '已開 PR' : '已合併', tone: 'muted' }
+    case 'discarded':
+      return { text: '已丟棄', tone: 'muted' }
   }
 }
 ```
@@ -8591,6 +8781,9 @@ export function taskStatusLabel(t: Task): { text: string; tone: Tone } {
 
 ```tsx
 // src/renderer/src/components/ui.tsx
+// 共用的 UI 元件與樣式常數。這裡同時匯出 cx／TONE_TEXT／Icons 等非元件，
+// 改這個檔時 Vite 會整頁重新載入而不是 fast refresh，換來各畫面只需一個 import 來源。
+/* eslint-disable react-refresh/only-export-components */
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode, SVGProps } from 'react'
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ')
@@ -8599,20 +8792,26 @@ type Variant = 'primary' | 'secondary' | 'dark' | 'ghost' | 'danger'
 const VARIANTS: Record<Variant, string> = {
   primary: 'bg-brand text-white font-medium hover:bg-brand-hover',
   secondary: 'bg-fill text-ink-2 hover:bg-chip',
-  dark: 'bg-ink text-white font-medium hover:bg-black',
+  dark: 'bg-ink text-white font-medium hover:bg-ink-2',
   ghost: 'bg-transparent text-ink-2 hover:bg-fill',
-  danger: 'bg-transparent text-danger hover:bg-red-50'
+  danger: 'bg-transparent text-danger hover:bg-danger-soft'
 }
 
-export function Button({ variant = 'secondary', size = 'md', className, type = 'button', ...p }:
-  ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: 'sm' | 'md' }) {
+export function Button({
+  variant = 'secondary',
+  size = 'md',
+  className,
+  type = 'button',
+  ...p
+}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: 'sm' | 'md' }) {
   return (
     <button
       type={type}
       className={cx(
-        'inline-flex items-center justify-center gap-2 whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+        'inline-flex cursor-pointer items-center justify-center gap-2 whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-50',
         size === 'sm' ? 'h-9 rounded-[10px] px-3 text-xs' : 'h-11 rounded-xl px-4 text-[13px]',
-        VARIANTS[variant], className
+        VARIANTS[variant],
+        className
       )}
       {...p}
     />
@@ -8625,44 +8824,122 @@ export function Panel({ className, ...p }: HTMLAttributes<HTMLElement>) {
 
 export type Tone = 'neutral' | 'brand' | 'decision' | 'progress' | 'review' | 'danger' | 'muted'
 const TONES: Record<Tone, string> = {
-  neutral: 'bg-fill text-ink-2', brand: 'bg-brand-soft text-brand-ink', decision: 'bg-decision text-decision-ink',
-  progress: 'bg-decision text-progress', review: 'bg-blue-50 text-review', danger: 'bg-red-50 text-danger', muted: 'bg-fill text-muted'
+  neutral: 'bg-fill text-ink-2',
+  brand: 'bg-brand-soft text-brand-ink',
+  decision: 'bg-decision text-decision-ink',
+  progress: 'bg-decision text-progress',
+  review: 'bg-review-soft text-review',
+  danger: 'bg-danger-soft text-danger',
+  muted: 'bg-fill text-muted'
 }
 export const TONE_TEXT: Record<Tone, string> = {
-  neutral: 'text-ink-2', brand: 'text-brand', decision: 'text-decision-ink', progress: 'text-progress',
-  review: 'text-review', danger: 'text-danger', muted: 'text-muted'
+  neutral: 'text-ink-2',
+  brand: 'text-brand',
+  decision: 'text-decision-ink',
+  progress: 'text-progress',
+  review: 'text-review',
+  danger: 'text-danger',
+  muted: 'text-muted'
 }
 
-export function Pill({ tone = 'neutral', className, children }: { tone?: Tone; className?: string; children: ReactNode }) {
-  return <span className={cx('inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs', TONES[tone], className)}>{children}</span>
+export function Pill({
+  tone = 'neutral',
+  className,
+  children
+}: {
+  tone?: Tone
+  className?: string
+  children: ReactNode
+}) {
+  return (
+    <span
+      className={cx(
+        'inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs',
+        TONES[tone],
+        className
+      )}
+    >
+      {children}
+    </span>
+  )
 }
 
 export function Spinner({ className }: { className?: string }) {
-  return <span role="status" aria-label="處理中" className={cx('inline-block size-3.5 animate-spin rounded-full border-2 border-brand border-t-transparent', className)} />
+  return (
+    <span
+      role="status"
+      aria-label="處理中"
+      className={cx(
+        'inline-block size-3.5 animate-spin rounded-full border-2 border-brand border-t-transparent',
+        className
+      )}
+    />
+  )
 }
 
 export function Avatar() {
-  return <span aria-hidden className="flex size-7 flex-none items-center justify-center rounded-full bg-brand-soft text-xs font-bold text-brand">C</span>
+  return (
+    <span
+      aria-hidden
+      className="flex size-7 flex-none items-center justify-center rounded-full bg-brand-soft text-xs font-bold text-brand"
+    >
+      C
+    </span>
+  )
 }
 
-export const inputClass = 'h-[42px] rounded-xl border border-line bg-surface px-3.5 text-[13px] text-ink outline-none placeholder:text-muted-2 focus:border-brand'
-export const textareaClass = 'rounded-xl border border-line bg-surface px-3.5 py-2.5 text-[13px] leading-relaxed text-ink outline-none placeholder:text-muted-2 focus:border-brand'
+export const inputClass =
+  'h-[42px] rounded-xl border border-line bg-surface px-3.5 text-[13px] text-ink outline-none placeholder:text-muted-2 focus:border-brand'
+export const textareaClass =
+  'rounded-xl border border-line bg-surface px-3.5 py-2.5 text-[13px] leading-relaxed text-ink outline-none placeholder:text-muted-2 focus:border-brand'
 
 type IconProps = SVGProps<SVGSVGElement>
 const svg = (p: IconProps, children: ReactNode) => (
-  <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden {...p}>{children}</svg>
+  <svg
+    width={16}
+    height={16}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden
+    {...p}
+  >
+    {children}
+  </svg>
 )
 export const Icons = {
   Plus: (p: IconProps) => svg(p, <path d="M12 5v14M5 12h14" />),
   Check: (p: IconProps) => svg(p, <path d="M5 12l5 5L20 7" />),
-  Branch: (p: IconProps) => svg(p, <><circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="7" r="2" /><path d="M6 7v10M18 9c0 5-6 4-12 8" /></>),
+  Branch: (p: IconProps) =>
+    svg(
+      p,
+      <>
+        <circle cx="6" cy="5" r="2" />
+        <circle cx="6" cy="19" r="2" />
+        <circle cx="18" cy="7" r="2" />
+        <path d="M6 7v10M18 9c0 5-6 4-12 8" />
+      </>
+    ),
   Send: (p: IconProps) => svg(p, <path d="M12 19V5M5 12l7-7 7 7" />),
-  Stop: (p: IconProps) => svg(p, <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />),
+  Stop: (p: IconProps) =>
+    svg(p, <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />),
   Arrow: (p: IconProps) => svg(p, <path d="M5 12h14M13 6l6 6-6 6" />),
   Back: (p: IconProps) => svg(p, <path d="M15 6l-6 6 6 6" />),
-  Folder: (p: IconProps) => svg(p, <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />),
-  Info: (p: IconProps) => svg(p, <><circle cx="12" cy="12" r="9" /><path d="M12 8v5M12 16h.01" /></>),
-  Comment: (p: IconProps) => svg(p, <path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12z" />),
+  Folder: (p: IconProps) =>
+    svg(p, <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />),
+  Info: (p: IconProps) =>
+    svg(
+      p,
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 8v5M12 16h.01" />
+      </>
+    ),
+  Comment: (p: IconProps) =>
+    svg(p, <path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12z" />),
   X: (p: IconProps) => svg(p, <path d="M6 6l12 12M18 6L6 18" />)
 }
 ```
