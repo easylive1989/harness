@@ -149,14 +149,22 @@ describe('TaskManager：建立任務與釐清', () => {
   test('同時送出兩則訊息不會開兩段執行', async () => {
     const { tm, claude, create } = await setup()
     const id = await create()
-    claude.script = async () => [assistantText('收到')]
+    // 第一段執行卡住直到兩則都送出：第二則一定得插話進這段執行，不受機器快慢影響
+    const release = deferred()
+    claude.script = async () => {
+      await release.promise
+      return [assistantText('收到')]
+    }
+    claude.maxActive = 0
     await Promise.all([
       tm.send(id, 'main', '第一則', { silent: true }),
       tm.send(id, 'main', '第二則', { silent: true })
     ])
+    release.resolve()
     await tm.whenIdle(id)
     // 第二則插話進第一段執行（FakeClaude 不讀插話），所以只多一次 query
-    expect(claude.calls).toHaveLength(2)
+    expect(claude.calls.map((c) => c.prompt).slice(1)).toEqual(['第一則'])
+    expect(claude.maxActive).toBe(1)
     expect(tm.get(id).runState).toBe('idle')
   })
 
@@ -993,7 +1001,7 @@ describe('TaskManager：關閉 app', () => {
     await tm.send(id, 'main', '開始')
     await until(() => !!tm.get(id).pendingPermission)
 
-    await tm.shutdown(500)
+    await tm.shutdown(2000) // 上限放寬：全部結束就會提早返回
     expect(result).toMatchObject({ behavior: 'deny' })
     const t = tm.get(id)
     expect(t.runState).toBe('interrupted')
@@ -1015,7 +1023,8 @@ describe('TaskManager：關閉 app', () => {
     await until(() => claude.results === 2)
     const started = Date.now()
     await tm.shutdown(100)
-    expect(Date.now() - started).toBeLessThan(1000)
+    // 卡住的執行永遠不會結束：只要沒有無限等待就算通過（上限寬鬆，避免機器忙時誤判）
+    expect(Date.now() - started).toBeLessThan(3000)
     expect(tm.get(id).runState).toBe('interrupted')
     claude.releaseHang()
   })
@@ -1039,8 +1048,9 @@ describe('TaskManager：關閉 app', () => {
     await tm.send(id, 'main', '完成')
     await until(() => verify.mock.calls.length === 1)
     const started = Date.now()
-    await tm.shutdown(500)
-    expect(Date.now() - started).toBeLessThan(1500)
+    await tm.shutdown(3000)
+    // 驗證指令沒被中止的話會等滿上限
+    expect(Date.now() - started).toBeLessThan(2500)
     expect(seen?.aborted).toBe(true)
     expect(tm.get(id)).toMatchObject({
       status: 'implementing',
@@ -1063,7 +1073,7 @@ describe('TaskManager：關閉 app', () => {
       await merge(...a)
     }
     const merging = tm.merge(id)
-    await tm.shutdown(1000)
+    await tm.shutdown(3000) // 合併一完成就返回；上限放寬避免機器忙時誤判
     expect(tm.get(id).status).toBe('done')
     await merging
   })

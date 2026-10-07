@@ -33,6 +33,9 @@ export class FakeClaude {
    * 兩者都可用 releaseHang() 放行
    */
   afterResult?: 'hang' | 'hang_ignoring_abort'
+  /** 正在迭代中的 query() 數，與曾經同時進行的最大值（檢查同一 channel 不會同時有兩段執行） */
+  active = 0
+  maxActive = 0
   /** 已被 AgentRun 處理完的 result 數（yield 之後才加，代表消費端已讀過） */
   results = 0
   private hangRelease = new Set<() => void>()
@@ -72,32 +75,42 @@ export class FakeClaude {
     })
     const record = (c: FakeClaude['calls'][number]) => this.calls.push(c)
     const resultConsumed = () => this.results++
+    const started = () => {
+      this.active++
+      this.maxActive = Math.max(this.maxActive, this.active)
+    }
+    const ended = () => this.active--
     const run = (ctx: ScriptCtx) => this.script(ctx)
     const gen = (async function* () {
-      const it = prompt[Symbol.asyncIterator]()
-      const first = await it.next()
-      const text = String((first.value as SDKUserMessage).message.content)
-      record({ prompt: text, options, tools })
-      const sessionId = options.forkSession ? `fork-${call}` : (options.resume ?? `sess-${call}`)
-      yield { type: 'system', subtype: 'init', session_id: sessionId } as unknown as SDKMessage
-      const outcome = await Promise.race([
-        run({ call, prompt: text, options, sink }),
-        interrupted,
-        aborted
-      ])
-      if (outcome === 'aborted') throw new Error('aborted')
-      if (outcome !== 'interrupted') {
-        for (const m of outcome ?? []) yield m as SDKMessage
-        // 讓 script 裡用 setTimeout 延後的工具呼叫落在同一輪內
-        await Promise.race([new Promise((r) => setTimeout(r, 40)), interrupted, aborted])
-      }
-      if (signal?.aborted) throw new Error('aborted')
-      yield { type: 'result', subtype: 'success', is_error: false } as unknown as SDKMessage
-      resultConsumed()
-      if (afterResult === 'hang') {
-        if ((await Promise.race([hang, aborted])) === 'aborted') throw new Error('aborted')
-      } else if (afterResult === 'hang_ignoring_abort') {
-        await hang
+      started()
+      try {
+        const it = prompt[Symbol.asyncIterator]()
+        const first = await it.next()
+        const text = String((first.value as SDKUserMessage).message.content)
+        record({ prompt: text, options, tools })
+        const sessionId = options.forkSession ? `fork-${call}` : (options.resume ?? `sess-${call}`)
+        yield { type: 'system', subtype: 'init', session_id: sessionId } as unknown as SDKMessage
+        const outcome = await Promise.race([
+          run({ call, prompt: text, options, sink }),
+          interrupted,
+          aborted
+        ])
+        if (outcome === 'aborted') throw new Error('aborted')
+        if (outcome !== 'interrupted') {
+          for (const m of outcome ?? []) yield m as SDKMessage
+          // 讓 script 裡用 setTimeout 延後的工具呼叫落在同一輪內
+          await Promise.race([new Promise((r) => setTimeout(r, 40)), interrupted, aborted])
+        }
+        if (signal?.aborted) throw new Error('aborted')
+        yield { type: 'result', subtype: 'success', is_error: false } as unknown as SDKMessage
+        resultConsumed()
+        if (afterResult === 'hang') {
+          if ((await Promise.race([hang, aborted])) === 'aborted') throw new Error('aborted')
+        } else if (afterResult === 'hang_ignoring_abort') {
+          await hang
+        }
+      } finally {
+        ended()
       }
     })()
     return Object.assign(gen, {

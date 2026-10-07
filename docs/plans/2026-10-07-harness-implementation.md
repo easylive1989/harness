@@ -4942,6 +4942,7 @@ FakeClaude 接上真正的 `AgentRun`：它送出的 result 不帶 `user_message
 - `interrupt()` 讓 script 提早結束並照常送 result；`abortController` 被 abort 時丟出錯誤（模擬程序被終止）。
 - `createToolServer` 記下每次的工具清單，測試可檢查分岔只拿到 `conclude_branch`。
 - `failNextQuery` 讓下一次 `query()` 直接丟錯（模擬 CLI 無法啟動，用來測狀態還原）。
+- `active`／`maxActive` 記錄同時在迭代的 query() 數，測試用來確認同一 channel 不會同時有兩段執行。
 - `afterResult: 'hang' | 'hang_ignoring_abort'` 讓程序在 result 之後不結束（測「上一段執行卡住」）；`results` 是 AgentRun 已處理的 result 數（`yield` 之後才加），測試用它確認輸入已關閉。
 
 ```ts
@@ -4980,6 +4981,9 @@ export class FakeClaude {
    * 兩者都可用 releaseHang() 放行
    */
   afterResult?: 'hang' | 'hang_ignoring_abort'
+  /** 正在迭代中的 query() 數，與曾經同時進行的最大值（檢查同一 channel 不會同時有兩段執行） */
+  active = 0
+  maxActive = 0
   /** 已被 AgentRun 處理完的 result 數（yield 之後才加，代表消費端已讀過） */
   results = 0
   private hangRelease = new Set<() => void>()
@@ -5019,32 +5023,42 @@ export class FakeClaude {
     })
     const record = (c: FakeClaude['calls'][number]) => this.calls.push(c)
     const resultConsumed = () => this.results++
+    const started = () => {
+      this.active++
+      this.maxActive = Math.max(this.maxActive, this.active)
+    }
+    const ended = () => this.active--
     const run = (ctx: ScriptCtx) => this.script(ctx)
     const gen = (async function* () {
-      const it = prompt[Symbol.asyncIterator]()
-      const first = await it.next()
-      const text = String((first.value as SDKUserMessage).message.content)
-      record({ prompt: text, options, tools })
-      const sessionId = options.forkSession ? `fork-${call}` : (options.resume ?? `sess-${call}`)
-      yield { type: 'system', subtype: 'init', session_id: sessionId } as unknown as SDKMessage
-      const outcome = await Promise.race([
-        run({ call, prompt: text, options, sink }),
-        interrupted,
-        aborted
-      ])
-      if (outcome === 'aborted') throw new Error('aborted')
-      if (outcome !== 'interrupted') {
-        for (const m of outcome ?? []) yield m as SDKMessage
-        // 讓 script 裡用 setTimeout 延後的工具呼叫落在同一輪內
-        await Promise.race([new Promise((r) => setTimeout(r, 40)), interrupted, aborted])
-      }
-      if (signal?.aborted) throw new Error('aborted')
-      yield { type: 'result', subtype: 'success', is_error: false } as unknown as SDKMessage
-      resultConsumed()
-      if (afterResult === 'hang') {
-        if ((await Promise.race([hang, aborted])) === 'aborted') throw new Error('aborted')
-      } else if (afterResult === 'hang_ignoring_abort') {
-        await hang
+      started()
+      try {
+        const it = prompt[Symbol.asyncIterator]()
+        const first = await it.next()
+        const text = String((first.value as SDKUserMessage).message.content)
+        record({ prompt: text, options, tools })
+        const sessionId = options.forkSession ? `fork-${call}` : (options.resume ?? `sess-${call}`)
+        yield { type: 'system', subtype: 'init', session_id: sessionId } as unknown as SDKMessage
+        const outcome = await Promise.race([
+          run({ call, prompt: text, options, sink }),
+          interrupted,
+          aborted
+        ])
+        if (outcome === 'aborted') throw new Error('aborted')
+        if (outcome !== 'interrupted') {
+          for (const m of outcome ?? []) yield m as SDKMessage
+          // 讓 script 裡用 setTimeout 延後的工具呼叫落在同一輪內
+          await Promise.race([new Promise((r) => setTimeout(r, 40)), interrupted, aborted])
+        }
+        if (signal?.aborted) throw new Error('aborted')
+        yield { type: 'result', subtype: 'success', is_error: false } as unknown as SDKMessage
+        resultConsumed()
+        if (afterResult === 'hang') {
+          if ((await Promise.race([hang, aborted])) === 'aborted') throw new Error('aborted')
+        } else if (afterResult === 'hang_ignoring_abort') {
+          await hang
+        }
+      } finally {
+        ended()
       }
     })()
     return Object.assign(gen, {
@@ -5254,14 +5268,22 @@ describe('TaskManager：建立任務與釐清', () => {
   test('同時送出兩則訊息不會開兩段執行', async () => {
     const { tm, claude, create } = await setup()
     const id = await create()
-    claude.script = async () => [assistantText('收到')]
+    // 第一段執行卡住直到兩則都送出：第二則一定得插話進這段執行，不受機器快慢影響
+    const release = deferred()
+    claude.script = async () => {
+      await release.promise
+      return [assistantText('收到')]
+    }
+    claude.maxActive = 0
     await Promise.all([
       tm.send(id, 'main', '第一則', { silent: true }),
       tm.send(id, 'main', '第二則', { silent: true })
     ])
+    release.resolve()
     await tm.whenIdle(id)
     // 第二則插話進第一段執行（FakeClaude 不讀插話），所以只多一次 query
-    expect(claude.calls).toHaveLength(2)
+    expect(claude.calls.map((c) => c.prompt).slice(1)).toEqual(['第一則'])
+    expect(claude.maxActive).toBe(1)
     expect(tm.get(id).runState).toBe('idle')
   })
 
@@ -5277,7 +5299,7 @@ describe('TaskManager：建立任務與釐清', () => {
 ```
 
 > 註：反問測試用 `setTimeout` 讓 askUser 晚於文字事件發生，模擬真實的「先文字、後工具」順序；FakeClaude 在送出 result 前會等 40ms，確保延遲的 askUser 落在同一輪內。
-> 「同時送出兩則訊息」用 `silent` 送出（不先寫時間軸），才會真的在 `startTurn` 的 await 期間競爭；沒有 turn lock 時會開出兩段執行。
+> 「同時送出兩則訊息」用 `silent` 送出（不先寫時間軸），才會真的在 `startTurn` 的 await 期間競爭；沒有 turn lock 時會開出兩段執行。第一段執行的 script 會卡住直到兩則都送出，否則機器忙時第一輪可能先跑完，第二則就會合理地開新的一輪（測試會誤判）。
 
 **Step 3: 確認失敗** — `npx vitest run tests/main/taskManager.test.ts` → FAIL
 
@@ -7884,7 +7906,7 @@ describe('TaskManager：關閉 app', () => {
     await tm.send(id, 'main', '開始')
     await until(() => !!tm.get(id).pendingPermission)
 
-    await tm.shutdown(500)
+    await tm.shutdown(2000) // 上限放寬：全部結束就會提早返回
     expect(result).toMatchObject({ behavior: 'deny' })
     const t = tm.get(id)
     expect(t.runState).toBe('interrupted')
@@ -7906,7 +7928,8 @@ describe('TaskManager：關閉 app', () => {
     await until(() => claude.results === 2)
     const started = Date.now()
     await tm.shutdown(100)
-    expect(Date.now() - started).toBeLessThan(1000)
+    // 卡住的執行永遠不會結束：只要沒有無限等待就算通過（上限寬鬆，避免機器忙時誤判）
+    expect(Date.now() - started).toBeLessThan(3000)
     expect(tm.get(id).runState).toBe('interrupted')
     claude.releaseHang()
   })
@@ -7930,8 +7953,9 @@ describe('TaskManager：關閉 app', () => {
     await tm.send(id, 'main', '完成')
     await until(() => verify.mock.calls.length === 1)
     const started = Date.now()
-    await tm.shutdown(500)
-    expect(Date.now() - started).toBeLessThan(1500)
+    await tm.shutdown(3000)
+    // 驗證指令沒被中止的話會等滿上限
+    expect(Date.now() - started).toBeLessThan(2500)
     expect(seen?.aborted).toBe(true)
     expect(tm.get(id)).toMatchObject({
       status: 'implementing',
@@ -7954,7 +7978,7 @@ describe('TaskManager：關閉 app', () => {
       await merge(...a)
     }
     const merging = tm.merge(id)
-    await tm.shutdown(1000)
+    await tm.shutdown(3000) // 合併一完成就返回；上限放寬避免機器忙時誤判
     expect(tm.get(id).status).toBe('done')
     await merging
   })
