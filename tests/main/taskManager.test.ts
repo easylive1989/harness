@@ -8,6 +8,7 @@ import type { AppEvent } from '@shared/ipc'
 import { Repository } from '../../src/main/store/repository'
 import { Store } from '../../src/main/store/store'
 import { TaskManager, type TaskManagerDeps } from '../../src/main/tasks/taskManager'
+import { sampleReport } from '../fixtures/report'
 import { assistantText, FakeClaude, fakeGit, until } from './fakeClaude'
 
 async function setup() {
@@ -438,5 +439,133 @@ describe('TaskManager：規格與實作', () => {
       options: { resume: 's9' }
     })
     expect(tm.get('x').runState).toBe('idle')
+  })
+})
+
+async function toImplementing() {
+  const ctx = await setup()
+  ctx.claude.script = async ({ call, sink }) => {
+    if (call === 0) await sink.proposeSpec(spec)
+  }
+  const id = await ctx.create()
+  ctx.claude.script = async () => []
+  await ctx.tm.approveSpec(id)
+  await ctx.tm.whenIdle(id)
+  return { ...ctx, id }
+}
+
+describe('TaskManager：報告與收尾', () => {
+  test('submit_report → commit、diff、驗證、存報告、進入 reviewing', async () => {
+    const { tm, claude, verify, repo, id } = await toImplementing()
+    tm.get(id).approvedCommands.push('npm test') // get() 回傳內部物件，模擬實作中核准過 npm test
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成了嗎？')
+    await tm.whenIdle(id)
+    const t = tm.get(id)
+    expect(t).toMatchObject({ status: 'reviewing', runState: 'idle', reportVersions: [1] })
+    const r = await repo.getReport(id, 1)
+    expect(r).toMatchObject({ version: 1, commit: 'abc123', stats: { files: 1 } })
+    expect(await tm.getReport(id, 1)).toEqual(r)
+    expect(verify).toHaveBeenCalledWith(t.worktreePath, ['npm test'], expect.any(Function))
+    const isAllowed = verify.mock.calls[0][2]
+    expect(isAllowed('npm test')).toBe(true)
+    expect(isAllowed('git status')).toBe(true) // 全域允許清單
+    expect(isAllowed('rm -rf /')).toBe(false)
+    expect(isAllowed('ls && rm -rf /')).toBe(false) // 串接的指令不套用樣式（ls * 在允許清單中）
+    expect((await tm.timeline(id)).at(-1)).toMatchObject({ kind: 'report', ref: '1' })
+  })
+
+  test('同一輪重複提交報告會被拒絕', async () => {
+    const { tm, claude, id } = await toImplementing()
+    let error: unknown
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+      await Promise.resolve(sink.submitReport(sampleReport)).catch((e: unknown) => {
+        error = e
+      })
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    expect(String(error)).toContain('正在整理')
+    expect(tm.get(id).reportVersions).toEqual([1])
+  })
+
+  test('整理報告失敗時記錄錯誤', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    git.commitAll = async () => {
+      throw new Error('pre-commit hook failed')
+    }
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({
+      status: 'implementing',
+      runState: 'error',
+      error: '整理報告失敗：pre-commit hook failed'
+    })
+  })
+
+  test('回饋 → implementing，送出 [report_feedback]；再次提交產生 v2', async () => {
+    const { tm, claude, id } = await toImplementing()
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    await tm.submitReportFeedback(id, [{ anchor: 'diff:a.ts:3', label: 'a.ts:3', text: '改常數' }])
+    await tm.whenIdle(id)
+    expect(claude.calls.at(-1)!.prompt).toBe('[report_feedback] - (diff:a.ts:3) 改常數')
+    expect(tm.get(id).reportVersions).toEqual([1, 2])
+    expect(tm.get(id).status).toBe('reviewing')
+  })
+
+  test('開 PR 與合併都會結束任務', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    expect(await tm.createPullRequest(id)).toBe('https://github.com/me/shop-api/pull/1')
+    expect(git.calls.at(-1)).toBe(`pr ${tm.get(id).branch} main 帳號鎖定`)
+    expect(tm.get(id)).toMatchObject({
+      status: 'done',
+      prUrl: 'https://github.com/me/shop-api/pull/1'
+    })
+    await expect(tm.merge(id)).rejects.toThrow()
+    expect(git.calls.some((c) => c.startsWith('merge'))).toBe(false)
+  })
+
+  test('合併到 base branch', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    await tm.merge(id)
+    expect(git.calls.at(-1)).toBe(`merge ${tm.get(id).branch} main`)
+    expect(tm.get(id).status).toBe('done')
+  })
+
+  test('丟棄會停止執行並移除 worktree', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    claude.script = async () => {
+      await new Promise(() => undefined) // 卡住，直到被中止
+    }
+    await tm.send(id, 'main', '繼續')
+    await until(() => tm.get(id).runState === 'running')
+    await tm.discard(id)
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({ status: 'discarded', runState: 'idle' })
+    expect(tm.get(id).error).toBeUndefined()
+    expect(git.calls.at(-1)).toBe(`remove ${tm.get(id).worktreePath} ${tm.get(id).branch}`)
+    await expect(tm.send(id, 'main', 'hi')).rejects.toThrow('任務已結束')
+    await tm.discard(id) // 再丟棄一次也不會出錯
+    expect(tm.get(id).status).toBe('discarded')
   })
 })

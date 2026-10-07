@@ -9,8 +9,10 @@ import type {
   Branch,
   BranchConclusion,
   Channel,
+  FeedbackItem,
   PermissionDecision,
   PermissionRequest,
+  Report,
   Task,
   TimelineEvent,
   VerificationResult
@@ -18,6 +20,7 @@ import type {
 import { AgentRun, type QueryFn, type RunnerEvent } from '../agent/agentRun'
 import { MAIN_SYSTEM_APPEND } from '../agent/prompts'
 import type { GitLike } from '../git/gitService'
+import { hasShellOperators, matchesPattern } from '../permissions/commandPattern'
 import {
   type ApprovalRequest,
   createPermissionGate,
@@ -26,6 +29,7 @@ import {
 } from '../permissions/gate'
 import type { Repository } from '../store/repository'
 import type { HarnessToolName, ToolSink } from '../tools/harnessTools'
+import { prBody } from './prBody'
 import { phaseOf, transition } from './stateMachine'
 
 type McpServer = NonNullable<Options['mcpServers']>[string]
@@ -76,6 +80,8 @@ export class TaskManager {
   /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
   private finalizing = new Map<string, Promise<void>>()
+  /** 正在開 PR／合併／丟棄的任務 */
+  private finishing = new Set<string>()
   private readonly now: () => string
   private readonly newId: () => string
 
@@ -711,9 +717,156 @@ export class TaskManager {
     await this.send(taskId, 'main', msg.resume(), { display: '繼續執行' })
   }
 
-  // ───────── 暫時的 stub（Task 24 取代） ─────────
+  // ───────── 報告 ─────────
 
+  /** 等提交報告的那段執行結束後：commit、算 diff、實跑驗證指令、存報告 */
   private async finalizeReport(taskId: string, input: ReportInput, run?: AgentRun) {
-    void [taskId, input, run]
+    try {
+      await run?.done.catch(() => undefined)
+      const t = this.get(taskId)
+      const version = t.reportVersions.length + 1
+      const commit =
+        (await this.d.git.commitAll(t.worktreePath, `${t.title}（Harness 報告 v${version}）`)) ??
+        undefined
+      const [diff, stats] = await Promise.all([
+        this.d.git.diff(t.worktreePath, t.baseBranch),
+        this.d.git.diffStats(t.worktreePath, t.baseBranch)
+      ])
+      const settings = await this.d.repo.getSettings()
+      // 只自動執行本任務核准過或在允許清單中的指令（串接的指令只認完整核准過的）
+      const isAllowed = (c: string) => {
+        const x = this.get(taskId)
+        if (x.approvedCommands.includes(c)) return true
+        if (hasShellOperators(c)) return false
+        return [...settings.alwaysAllowedCommands, ...x.allowedCommands].some((p) =>
+          matchesPattern(c, p)
+        )
+      }
+      const verification = await this.d.verify(
+        t.worktreePath,
+        input.verification.map((v) => v.command),
+        isAllowed
+      )
+      const report: Report = {
+        version,
+        taskId,
+        input,
+        diff,
+        stats,
+        verification,
+        commit,
+        createdAt: this.now()
+      }
+      await this.d.repo.saveReport(report)
+      await this.update(taskId, (x) => {
+        const next = transition(x.status, 'REPORT_SUBMITTED')
+        x.reportVersions.push(version)
+        x.status = next
+        x.runState = 'idle'
+      })
+      await this.addTimeline(taskId, { channel: 'main', kind: 'report', ref: String(version) })
+    } catch (e) {
+      await this.update(taskId, (x) => {
+        x.runState = 'error'
+        x.error = `整理報告失敗：${errorMessage(e)}`
+      }).catch((err: unknown) => console.error('[TaskManager] 儲存任務失敗', err))
+    }
+  }
+
+  getReport(taskId: string, version: number) {
+    return this.d.repo.getReport(taskId, version)
+  }
+
+  async submitReportFeedback(taskId: string, items: FeedbackItem[], overall?: string) {
+    const note = overall?.trim() || undefined
+    if (!items.length && !note) throw new Error('請至少留一則回饋')
+    await this.update(taskId, (t) => {
+      t.status = transition(t.status, 'REPORT_FEEDBACK')
+    })
+    await this.send(taskId, 'main', msg.reportFeedback(items, note), {
+      display: `送出 ${items.length} 則報告回饋${note ? '與整體意見' : ''}`
+    })
+  }
+
+  // ───────── 收尾 ─────────
+
+  private async repoOf(t: Task) {
+    const repo = (await this.d.repo.listRepos()).find((r) => r.id === t.repoId)
+    if (!repo) throw new Error('找不到 repo')
+    return repo
+  }
+
+  /** 開 PR／合併／丟棄同一時間只做一個，避免重複點擊推兩次或邊合併邊刪 worktree */
+  private async exclusive<T>(taskId: string, fn: () => Promise<T>): Promise<T> {
+    if (this.finishing.has(taskId)) throw new Error('另一個收尾操作正在進行，請稍候')
+    this.finishing.add(taskId)
+    try {
+      return await fn()
+    } finally {
+      this.finishing.delete(taskId)
+    }
+  }
+
+  private assertReviewable(t: Task, what: string) {
+    if (t.status !== 'reviewing') throw new Error(`只有待審閱的任務可以${what}`)
+    if (this.runs.get(runKey(t.id, 'main'))?.active)
+      throw new Error(`Claude 正在執行，請等它停下來再${what}`)
+  }
+
+  createPullRequest(taskId: string): Promise<string> {
+    return this.exclusive(taskId, async () => {
+      const t = this.get(taskId)
+      this.assertReviewable(t, '開 PR')
+      const report = await this.d.repo.getReport(taskId, t.reportVersions.at(-1)!)
+      const url = await this.d.git.pushAndOpenPr(
+        t.worktreePath,
+        t.branch,
+        t.baseBranch,
+        t.specs.at(-1)?.title ?? t.title,
+        prBody(report)
+      )
+      await this.update(taskId, (x) => {
+        x.prUrl = url
+        x.status = transition(x.status, 'FINISHED')
+      })
+      return url
+    })
+  }
+
+  merge(taskId: string): Promise<void> {
+    return this.exclusive(taskId, async () => {
+      const t = this.get(taskId)
+      this.assertReviewable(t, '合併')
+      await this.d.git.merge((await this.repoOf(t)).path, t.branch, t.baseBranch)
+      await this.update(taskId, (x) => {
+        x.status = transition(x.status, 'FINISHED')
+      })
+    })
+  }
+
+  /** 中止所有執行、移除 worktree 與分支；已完成（開過 PR／合併）的任務只清掉 worktree */
+  discard(taskId: string): Promise<void> {
+    return this.exclusive(taskId, async () => {
+      const t = this.get(taskId)
+      if (this.finalizing.has(taskId)) throw new Error('正在整理報告，請稍候再丟棄')
+      for (const w of [...this.permissionWaiters.values()]) {
+        if (w.taskId === taskId) w.resolve({ allow: false, message: '任務已丟棄' })
+      }
+      const runs = this.runsOf(taskId).map(([, r]) => r)
+      runs.forEach((r) => r.abort())
+      await Promise.all(runs.map((r) => r.done.catch(() => undefined)))
+      await this.d.git.removeWorktree((await this.repoOf(t)).path, t.worktreePath, t.branch)
+      await this.update(taskId, (x) => {
+        if (x.status !== 'done' && x.status !== 'discarded')
+          x.status = transition(x.status, 'DISCARDED')
+        x.runState = 'idle'
+        x.pendingPermission = undefined
+      })
+    })
+  }
+
+  changedFiles(taskId: string) {
+    const t = this.get(taskId)
+    return this.d.git.workingStats(t.worktreePath, t.baseBranch)
   }
 }
