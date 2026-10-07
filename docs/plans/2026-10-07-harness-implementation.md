@@ -1767,6 +1767,9 @@ export interface GateContext {
   onApproved(command: string | undefined, rememberPattern?: string): void
 }
 
+/** 與 SDK 的 CanUseTool 相容，但永遠回傳結果（不回傳 null） */
+export type PermissionGate = (...args: Parameters<CanUseTool>) => Promise<PermissionResult>
+
 const READ = new Set(['Read', 'Glob', 'Grep', 'LS'])
 const WRITE = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const ALWAYS = new Set(['TodoWrite', 'Task', 'Agent'])
@@ -1787,7 +1790,7 @@ function targetPath(input: Record<string, unknown>): string | undefined {
   return typeof v === 'string' ? v : undefined
 }
 
-export function createPermissionGate(ctx: GateContext): CanUseTool {
+export function createPermissionGate(ctx: GateContext): PermissionGate {
   async function ask(toolName: string, input: Record<string, unknown>, signal: AbortSignal, command?: string, suggestedPattern?: string) {
     const d = await ctx.requestApproval({ toolName, input, suggestedPattern }, signal)
     if (!d.allow) return deny(d.message?.trim() || '使用者拒絕了這個操作')
