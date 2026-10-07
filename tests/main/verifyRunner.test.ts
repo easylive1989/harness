@@ -33,6 +33,30 @@ describe('verifyRunner', () => {
     expect(r.outputTail).not.toContain('done')
   })
 
+  test('逾時標記一定出現在輸出結尾，即使終止後還有大量輸出', async () => {
+    // 收到 TERM 後再印 10000 字元，舊做法會把標記擠出 tail
+    const r = await runShell(
+      tmpdir(),
+      `trap 'printf "%010000d" 0; exit 0' TERM; sleep 5 & wait`,
+      300
+    )
+    expect(r.outputTail.endsWith('[Harness] 執行逾時，已終止')).toBe(true)
+    expect(r.outputTail.length).toBeLessThanOrEqual(4000)
+  })
+
+  test('stdin 是空的，讀 stdin 的指令不會卡住', async () => {
+    const started = Date.now()
+    const r = await runShell(tmpdir(), 'cat', 3000)
+    expect(r.exitCode).toBe(0)
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
+
+  test('多位元組字元跨 chunk 也不會亂碼', async () => {
+    // 「中」= e4 b8 ad，拆成兩次寫入、中間停一下，確保落在不同 chunk
+    const r = await runShell(tmpdir(), `printf '\\xe4'; sleep 0.2; printf '\\xb8\\xad'`)
+    expect(r.outputTail).toBe('中')
+  })
+
   test('未核准的指令不執行', async () => {
     const r = await runVerification(tmpdir(), ['echo a', 'echo b'], (c) => c === 'echo a')
     expect(r[0].exitCode).toBe(0)

@@ -4,6 +4,8 @@ import type { VerificationResult } from '@shared/types'
 
 /** 逾時送出 SIGTERM 後，等這麼久還沒結束就送 SIGKILL */
 const KILL_GRACE_MS = 2000
+const TAIL_CHARS = 4000
+const TIMEOUT_MARKER = '\n[Harness] 執行逾時，已終止'
 
 export function runShell(
   cwd: string,
@@ -13,17 +15,21 @@ export function runShell(
   const started = Date.now()
   return new Promise((resolve) => {
     // detached：子程序自成 process group，逾時才能連同孫程序一起終止
+    // stdin 為空：讀 stdin 的指令立刻拿到 EOF，不會卡住
     const child = spawn(process.env.SHELL || '/bin/zsh', ['-lc', command], {
       cwd,
       env: process.env,
-      detached: true
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe']
     })
     let out = ''
-    const onData = (b: Buffer) => {
-      out = (out + b.toString()).slice(-8000)
+    let timedOut = false
+    // utf8 decoder 會保留跨 chunk 的多位元組字元
+    const onData = (s: string) => {
+      out = (out + s).slice(-2 * TAIL_CHARS)
     }
-    child.stdout.on('data', onData)
-    child.stderr.on('data', onData)
+    child.stdout.setEncoding('utf8').on('data', onData)
+    child.stderr.setEncoding('utf8').on('data', onData)
     // 只殺 shell 的話，孫程序會繼續佔住 stdout，close 要等它自己結束才會觸發
     const killGroup = (signal: NodeJS.Signals) => {
       try {
@@ -35,20 +41,20 @@ export function runShell(
     }
     let killTimer: NodeJS.Timeout | undefined
     const timer = setTimeout(() => {
-      out += '\n[Harness] 執行逾時，已終止'
+      timedOut = true
       killGroup('SIGTERM')
       // 忽略 SIGTERM 的程序在寬限期後強制終止
       killTimer = setTimeout(() => killGroup('SIGKILL'), KILL_GRACE_MS)
     }, timeoutMs)
+    /** 逾時標記在結算時才接上，確保一定留在 tail 裡 */
+    const tail = () =>
+      timedOut
+        ? out.slice(-(TAIL_CHARS - TIMEOUT_MARKER.length)) + TIMEOUT_MARKER
+        : out.slice(-TAIL_CHARS)
     child.on('close', (code) => {
       clearTimeout(timer)
       clearTimeout(killTimer)
-      resolve({
-        command,
-        exitCode: code,
-        durationMs: Date.now() - started,
-        outputTail: out.slice(-4000)
-      })
+      resolve({ command, exitCode: code, durationMs: Date.now() - started, outputTail: tail() })
     })
     child.on('error', (err) => {
       clearTimeout(timer)
