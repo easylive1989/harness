@@ -8416,6 +8416,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ---
 ## Phase 4：Renderer（src/renderer/src）
 
+**元件慣例：**
+- 元件以 selector 訂閱 store（`useStore((s) => s.x)`，要多個欄位時用 `useStore(useShallow((s) => ({ ... })))`，`useShallow` 來自 `zustand/react/shallow`）；action 個別選取（`const act = useStore((s) => s.act)`）。**不要呼叫沒有 selector 的 `useStore()`**，否則任何狀態變動都會讓元件重繪。
+- 不在 effect 裡同步 setState（react-hooks 7 的 `set-state-in-effect` 是 error）：需要「依某個值重置」的狀態，存成「選擇 + 它所屬的鍵」，畫面上的值在 render 時推導（例如 `picked?.key === key ? picked.value : 預設值`），或用 `key` 讓元件重建。
+
 畫面樣式以 `docs/design/*.dc.html` 為準：每個元件的間距、圓角、字級對照設計稿的 inline style，顏色只用 Task 2 的 tokens。下列程式碼已依設計稿換算成 Tailwind class。
 
 ### Task 26：API 封裝、全域 store、階段工具
@@ -10406,7 +10410,8 @@ import { Avatar, Button, cx, inputClass, Spinner, textareaClass } from './ui'
 const OTHER = '__other'
 
 export function QuestionCard({ task, question: q, readOnly }: { task: Task; question: Question; readOnly?: boolean }) {
-  const { act, setActiveBranch } = useStore()
+  const act = useStore((s) => s.act)
+  const setActiveBranch = useStore((s) => s.setActiveBranch)
   const [selected, setSelected] = useState<string>(q.recommendedOptionId ?? q.options[0]?.id ?? OTHER)
   const [freeText, setFreeText] = useState('')
   const [counter, setCounter] = useState('')
@@ -10754,9 +10759,11 @@ import { Markdown } from './Markdown'
 import { Button, cx, inputClass, Spinner } from './ui'
 
 export function BranchPanel({ task, events, readOnly }: { task: Task; events: TimelineEvent[]; readOnly?: boolean }) {
-  const { act, activeBranch, setActiveBranch } = useStore()
+  const act = useStore((s) => s.act)
+  const setActiveBranch = useStore((s) => s.setActiveBranch)
+  const picked = useStore((s) => s.activeBranch[task.id])
   const [text, setText] = useState('')
-  const activeId = activeBranch[task.id] ?? task.branches.find((b) => b.status !== 'concluded')?.id ?? task.branches.at(-1)?.id
+  const activeId = picked ?? task.branches.find((b) => b.status !== 'concluded')?.id ?? task.branches.at(-1)?.id
   const b = task.branches.find((x) => x.id === activeId)
   const channel = b ? (`branch:${b.id}` as const) : undefined
   const list = channel ? events.filter((e) => e.channel === channel) : []
@@ -10841,7 +10848,8 @@ import { RunStatus, Timeline, useTimeline } from '../components/Timeline'
 import { useStore } from '../store'
 
 export function ClarifyScreen({ task, nav, readOnly, onOpenStage }: { task: Task; nav: ReactNode; readOnly: boolean; onOpenStage: (s: 'spec' | 'report') => void }) {
-  const { act, setActiveBranch } = useStore()
+  const act = useStore((s) => s.act)
+  const setActiveBranch = useStore((s) => s.setActiveBranch)
   const events = useTimeline(task.id)
   const busy = task.runState === 'running'
   const branchFrom = async (text: string) => {
@@ -10882,8 +10890,8 @@ export function ClarifyScreen({ task, nav, readOnly, onOpenStage }: { task: Task
 把 TaskScreen 的 return 改為：
 
 ```tsx
-  const openStage = (s: Stage) => setStage(s)
-  if (shown === 'clarify') return <ClarifyScreen task={task} nav={nav} readOnly={currentStage(task) !== 'clarify'} onOpenStage={openStage} />
+  const openStage = (s: Stage) => setPicked(s === current ? null : { key, stage: s })
+  if (shown === 'clarify') return <ClarifyScreen task={task} nav={nav} readOnly={current !== 'clarify'} onOpenStage={openStage} />
   // Task 31–33 補上其他階段
   return <ClarifyScreen task={task} nav={nav} readOnly onOpenStage={openStage} />
 ```
@@ -10930,8 +10938,11 @@ function SourcePill({ task, source }: { task: Task; source: DecisionSource }) {
 }
 
 export function SpecScreen({ task, nav, readOnly }: { task: Task; nav: ReactNode; readOnly: boolean }) {
-  const { act } = useStore()
-  const [version, setVersion] = useState(task.specs.length)
+  const act = useStore((s) => s.act)
+  // 使用者選的版本只在「最新版本」沒變時有效；Claude 提出新版規格時自動顯示最新版
+  const latest = task.specs.length
+  const [picked, setPicked] = useState<{ latest: number; version: number }>()
+  const version = picked?.latest === latest ? picked.version : latest
   const [feedback, setFeedback] = useState('')
   const spec = task.specs[version - 1] ?? task.specs.at(-1)
   if (!spec) return <main className="flex-1 rounded-2xl bg-surface p-7 shadow-card">{nav}還沒有規格。</main>
@@ -10950,7 +10961,7 @@ export function SpecScreen({ task, nav, readOnly }: { task: Task; nav: ReactNode
               <span className="flex items-center gap-2 text-xs font-medium text-brand">
                 規格草稿
                 {task.specs.length > 1 ? (
-                  <select aria-label="規格版本" value={spec.version} onChange={(e) => setVersion(Number(e.target.value))} className="rounded-md bg-fill px-1.5 py-0.5">
+                  <select aria-label="規格版本" value={spec.version} onChange={(e) => setPicked({ latest, version: Number(e.target.value) })} className="rounded-md bg-fill px-1.5 py-0.5">
                     {task.specs.map((s) => <option key={s.version} value={s.version}>v{s.version}</option>)}
                   </select>
                 ) : ` v${spec.version}`}
@@ -11118,7 +11129,7 @@ import { useStore } from '../store'
 import { Button, textareaClass } from './ui'
 
 export function PermissionDialog({ request: r, cwd }: { request: PermissionRequest; cwd: string }) {
-  const { act } = useStore()
+  const act = useStore((s) => s.act)
   const [remember, setRemember] = useState(false)
   const [denying, setDenying] = useState(false)
   const [reason, setReason] = useState('')
@@ -11217,7 +11228,7 @@ function ChangedFiles({ task }: { task: Task }) {
 }
 
 export function ImplementScreen({ task, nav, readOnly }: { task: Task; nav: ReactNode; readOnly: boolean }) {
-  const { act } = useStore()
+  const act = useStore((s) => s.act)
   const events = sinceImplementStart(useTimeline(task.id))
   const done = task.plan.filter((s) => s.status === 'done').length
   const runningIdx = task.plan.findIndex((s) => s.status === 'running')
@@ -11522,8 +11533,8 @@ export function DiffView({ taskId, diff, perFile, notes, selected: controlled, o
   const select = (p: string) => { setOwn(p); onSelect?.(p) }
   const file = files.find((f) => f.path === selected) ?? files[0]
   const note = notes.find((n) => n.path === file?.path)
-  const { feedback, addFeedback } = useStore()
-  const items = feedback[taskId] ?? []
+  const addFeedback = useStore((s) => s.addFeedback)
+  const items = useStore((s) => s.feedback[taskId]) ?? []
   const [commenting, setCommenting] = useState<number>()
   const [text, setText] = useState('')
 
@@ -11611,7 +11622,7 @@ function Section({ id, title, tag, children, onComment, className }: { id: strin
 }
 
 function SectionComment({ taskId, anchor, label, onDone }: { taskId: string; anchor: string; label: string; onDone: () => void }) {
-  const { addFeedback } = useStore()
+  const addFeedback = useStore((s) => s.addFeedback)
   const [text, setText] = useState('')
   return (
     <form onSubmit={(e) => { e.preventDefault(); if (text.trim()) { addFeedback(taskId, { anchor, label, text: text.trim() }); onDone() } }} className="flex gap-2">
@@ -11747,8 +11758,10 @@ import { useStore } from '../store'
 import { Button, Icons, textareaClass } from '../components/ui'
 
 export function FeedbackPanel({ task, onExport }: { task: Task; onExport: () => void }) {
-  const { feedback, removeFeedback, clearFeedback, act } = useStore()
-  const items = feedback[task.id] ?? []
+  const items = useStore((s) => s.feedback[task.id]) ?? []
+  const removeFeedback = useStore((s) => s.removeFeedback)
+  const clearFeedback = useStore((s) => s.clearFeedback)
+  const act = useStore((s) => s.act)
   const [overall, setOverall] = useState('')
   const [confirmDiscard, setConfirmDiscard] = useState(false)
   const reviewing = task.status === 'reviewing'
@@ -11843,15 +11856,18 @@ import { Spinner } from '../components/ui'
 import { useStore } from '../store'
 
 export function ReportScreen({ task, nav, onOpenStage }: { task: Task; nav: ReactNode; onOpenStage: (s: 'clarify') => void }) {
-  const { act } = useStore()
+  const act = useStore((s) => s.act)
   const latest = task.reportVersions.at(-1) ?? 0
-  const [version, setVersion] = useState(latest)
-  const [report, setReport] = useState<Report>()
-  useEffect(() => setVersion(latest), [latest])
+  // 使用者選的版本只在「最新版本」沒變時有效；產生新版報告時自動切到最新版（不在 effect 裡 setState）
+  const [picked, setPicked] = useState<{ latest: number; version: number }>()
+  const version = picked?.latest === latest ? picked.version : latest
+  const [loaded, setLoaded] = useState<Report>()
+  // 只顯示目前版本的報告；切換版本、還在讀取時顯示載入中，而不是上一個版本
+  const report = loaded?.version === version ? loaded : undefined
   useEffect(() => {
     if (!version) return
     let alive = true
-    void act(async () => { const r = await call('report:get', task.id, version); if (alive) setReport(r) })
+    void act(async () => { const r = await call('report:get', task.id, version); if (alive) setLoaded(r) })
     return () => { alive = false }
   }, [task.id, version, act])
 
@@ -11865,7 +11881,7 @@ export function ReportScreen({ task, nav, onOpenStage }: { task: Task; nav: Reac
           {nav}
           {task.reportVersions.length > 1 && (
             <label className="flex items-center gap-1.5 text-xs text-muted">版本
-              <select value={version} onChange={(e) => setVersion(Number(e.target.value))} className="h-[34px] rounded-[10px] border border-line bg-surface px-2.5 text-xs text-ink">
+              <select value={version} onChange={(e) => setPicked({ latest, version: Number(e.target.value) })} className="h-[34px] rounded-[10px] border border-line bg-surface px-2.5 text-xs text-ink">
                 {task.reportVersions.map((v) => <option key={v} value={v}>v{v}</option>)}
               </select>
             </label>
@@ -11884,7 +11900,7 @@ export function ReportScreen({ task, nav, onOpenStage }: { task: Task; nav: Reac
 TaskScreen 最終版：
 
 ```tsx
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { StageNav } from '../components/StageNav'
 import { currentStage, type Stage } from '../lib/stage'
 import { useStore } from '../store'
@@ -11895,12 +11911,13 @@ import { SpecScreen } from './SpecScreen'
 
 export function TaskScreen({ taskId }: { taskId: string }) {
   const task = useStore((s) => s.tasks[taskId])
-  const [stage, setStage] = useState<Stage | null>(null)
-  useEffect(() => setStage(null), [taskId, task?.status])
+  // 使用者回看的階段，只對選它時的任務與狀態有效；換任務或狀態前進就回到目前階段
+  const [picked, setPicked] = useState<{ key: string; stage: Stage } | null>(null)
   if (!task) return null
+  const key = `${taskId}:${task.status}`
   const current = currentStage(task)
-  const shown = stage ?? current
-  const select = (s: Stage) => setStage(s === current ? null : s)
+  const shown = picked?.key === key ? picked.stage : current
+  const select = (s: Stage) => setPicked(s === current ? null : { key, stage: s })
   const nav = <StageNav task={task} shown={shown} onSelect={select} />
   switch (shown) {
     case 'clarify': return <ClarifyScreen task={task} nav={nav} readOnly={current !== 'clarify'} onOpenStage={select} />
@@ -11937,10 +11954,15 @@ import { useState } from 'react'
 import { MODELS, type Settings } from '@shared/types'
 import { call } from '../api'
 import { Button, cx, Icons, inputClass } from '../components/ui'
+import { useShallow } from 'zustand/react/shallow'
 import { useStore } from '../store'
 
 export function SettingsScreen() {
-  const { settings, claude, act, open } = useStore()
+  const { settings, claude } = useStore(
+    useShallow((s) => ({ settings: s.settings, claude: s.claude }))
+  )
+  const act = useStore((s) => s.act)
+  const open = useStore((s) => s.open)
   const [newCmd, setNewCmd] = useState('')
   if (!settings) return null
   const save = (patch: Partial<Settings>) => act(async () => useStore.setState({ settings: await call('settings:set', patch) }))
