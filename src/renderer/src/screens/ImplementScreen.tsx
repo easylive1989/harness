@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { msgDisplay } from '@shared/protocol'
 import type { DiffStats, PlanStep, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
-import { Composer } from '../components/Composer'
+import { Composer, StopButton } from '../components/Composer'
 import { InlineCode, Markdown } from '../components/Markdown'
 import { PendingPermission } from '../components/PermissionDialog'
 import { AnsweredQuestionRow, QuestionCard } from '../components/QuestionCard'
@@ -236,7 +236,6 @@ export function ImplementScreen({
     onScroll,
     stick
   } = useStickToBottom<HTMLDivElement>(`${events.length}:${task.updatedAt}`, task.id, events.length)
-  const [stopping, runStop] = usePending()
   const [showing, runShow] = usePending()
   const [, runResume] = usePending()
   const composerRef = useRef<HTMLInputElement>(null)
@@ -423,21 +422,7 @@ export function ImplementScreen({
                     stick()
                     void act(() => call('tasks:send', task.id, 'main', t))
                   }}
-                  extra={
-                    running && (
-                      <button
-                        type="button"
-                        disabled={stopping}
-                        onClick={() =>
-                          void runStop(() => act(() => call('run:stop', task.id, 'main')))
-                        }
-                        className="flex h-10 flex-none cursor-pointer items-center gap-1.5 rounded-full bg-surface px-4 text-[13px] text-danger disabled:cursor-default disabled:opacity-50"
-                      >
-                        <Icons.Stop width={12} height={12} />
-                        停止
-                      </button>
-                    )
-                  }
+                  extra={running && <StopButton taskId={task.id} channel="main" />}
                 />
               </div>
             </div>

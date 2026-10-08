@@ -109,6 +109,27 @@ test('Claude 還沒在分岔回覆前不能帶回主線；執行中停用輸入'
   expect(screen.getByText('Claude 正在回覆…')).toBeInTheDocument()
 })
 
+test('分岔執行中可以停止（只停這個分岔）；連點只送一次', async () => {
+  const { rerender } = render(<BranchPanel task={{ ...task, branches: [open] }} events={talk} />)
+  expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
+  rerender(<BranchPanel task={{ ...task, branches: [{ ...open, running: true }] }} events={talk} />)
+  const release = holdNextCall(vi.mocked(call))
+  const stop = screen.getByRole('button', { name: '停止' })
+  await userEvent.dblClick(stop)
+  expect(vi.mocked(call).mock.calls).toEqual([['run:stop', 't1', 'branch:b2']])
+  expect(stop).toBeDisabled()
+  await release()
+  expect(stop).toBeEnabled()
+  rerender(
+    <BranchPanel
+      task={{ ...task, branches: [{ ...open, running: true }] }}
+      events={talk}
+      readOnly
+    />
+  )
+  expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
+})
+
 test('切換分岔；已帶回的分岔只能看', async () => {
   render(<BranchPanel task={task} events={[]} />)
   const chip = screen.getByRole('button', { name: /計數存放位置 · 已帶回/ })

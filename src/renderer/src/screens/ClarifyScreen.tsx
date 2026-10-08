@@ -4,7 +4,7 @@ import { flushSync } from 'react-dom'
 import type { Task } from '@shared/types'
 import { call } from '../api'
 import { BranchPanel } from '../components/BranchPanel'
-import { Composer } from '../components/Composer'
+import { Composer, StopButton } from '../components/Composer'
 import { PendingPermission } from '../components/PermissionDialog'
 import { RunStatus, Timeline } from '../components/Timeline'
 import { branchSeed, branchTitle } from '../lib/branchDraft'
@@ -131,6 +131,12 @@ export function ClarifyScreen({
                     stick()
                     void act(() => call('tasks:send', task.id, 'main', t))
                   }}
+                  // 主線執行中（含等待核准）可以停止；整理報告不會在釐清時發生
+                  extra={
+                    (task.runState === 'running' || task.runState === 'waiting_permission') && (
+                      <StopButton taskId={task.id} channel="main" />
+                    )
+                  }
                 />
               </div>
             </div>

@@ -42,6 +42,43 @@ test('顯示主線時間軸，從輸入框送出訊息', async () => {
   expect(screen.getByRole('textbox', { name: '訊息' })).toHaveValue('')
 })
 
+test('主線執行中（含等待核准）可以停止；連點只送一次；停下來後不顯示', async () => {
+  const view = render(
+    <ClarifyScreen
+      task={makeTask({ runState: 'running' })}
+      nav={null}
+      readOnly={false}
+      onOpenStage={() => {}}
+    />
+  )
+  const release = holdNextCall(vi.mocked(call))
+  const stop = screen.getByRole('button', { name: '停止' })
+  await userEvent.dblClick(stop)
+  expect(vi.mocked(call).mock.calls.filter(([ch]) => ch === 'run:stop')).toEqual([
+    ['run:stop', 't1', 'main']
+  ])
+  expect(stop).toBeDisabled()
+  await release()
+  view.rerender(
+    <ClarifyScreen
+      task={makeTask({ runState: 'idle' })}
+      nav={null}
+      readOnly={false}
+      onOpenStage={() => {}}
+    />
+  )
+  expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
+  view.rerender(
+    <ClarifyScreen
+      task={makeTask({ runState: 'running' })}
+      nav={null}
+      readOnly
+      onOpenStage={() => {}}
+    />
+  )
+  expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
+})
+
 const clarify = (over: Parameters<typeof makeTask>[0] = {}) =>
   render(<ClarifyScreen task={makeTask(over)} nav={null} readOnly={false} onOpenStage={() => {}} />)
 const newBranchForm = () => screen.getByRole('form', { name: '新分岔' })

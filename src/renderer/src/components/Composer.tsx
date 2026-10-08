@@ -1,7 +1,42 @@
 // src/renderer/src/components/Composer.tsx
 import { type FormEvent, type ReactNode, type Ref, useState } from 'react'
+import type { Channel } from '@shared/types'
+import { call } from '../api'
 import { blockImeSubmit } from '../lib/ime'
-import { Icons } from './ui'
+import { usePending } from '../lib/usePending'
+import { useStore } from '../store'
+import { cx, Icons } from './ui'
+
+/**
+ * 停止 Claude 在這個 channel（主線或分岔）的這一輪（`run:stop`）。
+ * 停止進行中停用，連點只送一次；放在輸入列旁（Composer 的 extra 或分岔的輸入框旁）。
+ */
+export function StopButton({
+  taskId,
+  channel,
+  className
+}: {
+  taskId: string
+  channel: Channel
+  className?: string
+}) {
+  const act = useStore((s) => s.act)
+  const [stopping, run] = usePending()
+  return (
+    <button
+      type="button"
+      disabled={stopping}
+      onClick={() => void run(() => act(() => call('run:stop', taskId, channel)))}
+      className={cx(
+        'flex h-10 flex-none cursor-pointer items-center gap-1.5 rounded-full bg-surface px-4 text-[13px] text-danger disabled:cursor-default disabled:opacity-50',
+        className
+      )}
+    >
+      <Icons.Stop width={12} height={12} />
+      停止
+    </button>
+  )
+}
 
 /** 畫面底部的圓角輸入列（對照 `StyleB.dc.html` 底部的訊息框） */
 export function Composer({

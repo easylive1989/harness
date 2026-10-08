@@ -1,5 +1,12 @@
 // src/renderer/src/components/BranchPanel.tsx
-import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 'react'
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState
+} from 'react'
 import type { Branch, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
 import { parseBranchSeed, stripMarkdown } from '../lib/branchDraft'
@@ -9,6 +16,7 @@ import { isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
 import { useStickToBottom } from '../lib/useStickToBottom'
 import { useStore } from '../store'
+import { StopButton } from './Composer'
 import { Markdown } from './Markdown'
 import { Button, cx, inputClass, LiveStatus } from './ui'
 
@@ -19,8 +27,16 @@ function statusText(b: Branch) {
   return '進行中'
 }
 
-/** 分岔的輸入框：打字的狀態留在這裡，不會讓整個面板（訊息列表）跟著重繪 */
-function BranchInput({ disabled, onSend }: { disabled: boolean; onSend: (text: string) => void }) {
+/** 分岔的輸入框：打字的狀態留在這裡，不會讓整個面板（訊息列表）跟著重繪；extra 放在輸入框右邊 */
+function BranchInput({
+  disabled,
+  onSend,
+  extra
+}: {
+  disabled: boolean
+  onSend: (text: string) => void
+  extra?: ReactNode
+}) {
   const [text, setText] = useState('')
   const submit = (e: FormEvent) => {
     e.preventDefault()
@@ -30,8 +46,8 @@ function BranchInput({ disabled, onSend }: { disabled: boolean; onSend: (text: s
     onSend(t)
   }
   return (
-    <form onSubmit={submit} className="flex">
-      <label className="flex flex-1">
+    <form onSubmit={submit} className="flex gap-2">
+      <label className="flex min-w-0 flex-1">
         <span className="sr-only">分岔訊息</span>
         <input
           value={text}
@@ -39,9 +55,10 @@ function BranchInput({ disabled, onSend }: { disabled: boolean; onSend: (text: s
           onKeyDown={blockImeSubmit}
           disabled={disabled}
           placeholder="繼續在分岔裡討論…"
-          className={cx(inputClass, 'flex-1')}
+          className={cx(inputClass, 'min-w-0 flex-1')}
         />
       </label>
+      {extra}
     </form>
   )
 }
@@ -319,7 +336,16 @@ export function BranchPanel({
 
           {!readOnly && b.status !== 'concluded' && (
             <div className="flex flex-col gap-2.5 px-5 pt-3.5 pb-5">
-              <BranchInput disabled={b.running} onSend={send} />
+              <BranchInput
+                disabled={b.running}
+                onSend={send}
+                // 只停這個分岔，不影響主線
+                extra={
+                  b.running && (
+                    <StopButton taskId={task.id} channel={`branch:${b.id}`} className="bg-fill" />
+                  )
+                }
+              />
               {b.status === 'concluding' ? (
                 // 看過預覽後可能又討論了幾句：可以請 Claude 重新整理結論
                 <div className="flex gap-2">
