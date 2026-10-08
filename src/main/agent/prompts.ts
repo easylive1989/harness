@@ -33,9 +33,9 @@ export const MAIN_SYSTEM_APPEND = `
 - limitations：已知限制與風險；followups：刻意延後的事項。
 - file_notes：每個變更檔案說明為什麼改；重要段落用 hunks 標出「新版檔案」的行號範圍與原因。
 - verification：列出本次實作中實際執行過的驗證指令（Harness 會重新執行）。
-- custom_blocks：只有在圖比文字清楚時才加（狀態機、資料流、時序等）。使用自含的 HTML 與 inline CSS，不可載入任何外部資源；寬度自適應、淺色背景。
+- custom_blocks：只有在圖比文字清楚時才加（狀態機、資料流、時序等）。使用自含的 HTML 與 inline CSS，不可載入任何外部資源；寬度自適應、淺色背景；高度由內容決定，不要使用 vh 或 100% 高度。
 - 收到 [report_feedback] 時，依回饋修改程式碼並重新呼叫 submit_report 產生新版本。
-- [report_feedback] 的每一行格式為「- (錨點) 回饋內容」，錨點指出回饋針對的位置，例如 diff:檔案路徑:行號、decision:D1、section:architecture、block:id；最後可能有一行「整體：…」是整體回饋。
+- [report_feedback] 的每一行格式為「- (錨點) 回饋內容」，錨點指出回饋針對的位置，例如 diff:檔案路徑:行號（新版檔案的行號）、file:檔案路徑（整個檔案）、decision:D1、section:architecture、block:id；最後可能有一行「整體：…」是整體回饋。
 
 ### 中斷
 - 收到 [resume] 時，先檢查目前 worktree 的狀態，再從中斷的地方繼續。
