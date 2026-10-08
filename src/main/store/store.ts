@@ -7,6 +7,7 @@ import {
   readdir,
   readFile,
   rename,
+  rm,
   unlink,
   writeFile
 } from 'node:fs/promises'
@@ -118,6 +119,13 @@ export class Store {
       }
     }
     return out
+  }
+
+  /** 刪除檔案或整個資料夾；不存在時不算錯。根目錄本身不能刪 */
+  async remove(rel: string): Promise<void> {
+    const p = this.path(rel)
+    if (p === this.root) throw new Error('不能刪除整個資料夾')
+    await rm(p, { recursive: true, force: true })
   }
 
   async list(relDir: string): Promise<string[]> {

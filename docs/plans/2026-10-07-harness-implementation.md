@@ -1417,6 +1417,8 @@ export interface IpcApi {
   'settings:set': (patch: Partial<Settings>) => Settings
   'repos:list': () => Repo[]
   'repos:pick': () => Repo | null
+  /** 從 Harness 移除 repo（資料夾本身不動）；leftWorktrees 是 repo 資料夾已不存在而沒刪掉的 worktree */
+  'repos:remove': (repoId: string) => { leftWorktrees: string[] }
   'repos:branches': (repoId: string) => { branches: string[]; current: string }
   'tasks:list': () => Task[]
   'tasks:create': (input: CreateTaskInput) => Task
@@ -1448,6 +1450,8 @@ export type AppEvent =
   | { type: 'task'; task: Task }
   | { type: 'timeline'; taskId: string; event: TimelineEvent }
   | { type: 'repos'; repos: Repo[] }
+  /** 任務的紀錄已刪除（移除 repo 時） */
+  | { type: 'task_removed'; taskId: string }
 
 export interface HarnessBridge {
   invoke<C extends IpcChannel>(channel: C, ...args: Parameters<IpcApi[C]>): Promise<Awaited<ReturnType<IpcApi[C]>>>
@@ -1553,6 +1557,23 @@ describe('Store', () => {
     await expect(store.writeJson('a/../../evil.json', {})).rejects.toThrow('超出')
     await expect(store.appendJsonl('/etc/x.jsonl', {})).rejects.toThrow('超出')
     await expect(store.list('..')).rejects.toThrow('超出')
+    await expect(store.remove('..')).rejects.toThrow('超出')
+  })
+
+  test('remove 刪掉整個資料夾；不存在時不算錯', async () => {
+    await store.writeJson('tasks/a/task.json', { id: 'a' })
+    await store.appendJsonl('tasks/a/timeline.jsonl', { n: 1 })
+    await store.writeJson('tasks/b/task.json', { id: 'b' })
+    await store.remove('tasks/a')
+    expect(await store.list('tasks')).toEqual(['b'])
+    await expect(store.remove('tasks/a')).resolves.toBeUndefined()
+  })
+
+  test('remove 不能刪 store 根目錄本身', async () => {
+    await store.writeJson('repos.json', [])
+    await expect(store.remove('.')).rejects.toThrow('不能刪除')
+    await expect(store.remove('tasks/..')).rejects.toThrow('不能刪除')
+    expect(await store.readJson('repos.json', null)).toEqual([])
   })
 })
 ```
@@ -1571,6 +1592,7 @@ import {
   readdir,
   readFile,
   rename,
+  rm,
   unlink,
   writeFile
 } from 'node:fs/promises'
@@ -1664,6 +1686,13 @@ export class Store {
       }
     }
     return out
+  }
+
+  /** 刪除檔案或整個資料夾；不存在時不算錯。根目錄本身不能刪 */
+  async remove(rel: string): Promise<void> {
+    const p = this.path(rel)
+    if (p === this.root) throw new Error('不能刪除整個資料夾')
+    await rm(p, { recursive: true, force: true })
   }
 
   async list(relDir: string): Promise<string[]> {
@@ -1838,6 +1867,31 @@ describe('Repository', () => {
     warn.mockRestore()
   })
 
+  test('deleteTask 刪掉任務的資料夾（task.json、時間軸、報告），其他任務不受影響', async () => {
+    await repo.saveTask(makeTask({ id: 'a' }))
+    await repo.saveTask(makeTask({ id: 'b' }))
+    await repo.appendTimeline('a', {
+      id: 'e1',
+      ts: 'x',
+      channel: 'main',
+      kind: 'user_text',
+      text: 'hi'
+    })
+    await repo.saveReport({
+      version: 1,
+      taskId: 'a',
+      input: sampleReport,
+      diff: '',
+      stats: { files: 0, additions: 0, deletions: 0, perFile: [] },
+      verification: [],
+      createdAt: 'x'
+    })
+    await repo.deleteTask('a')
+    expect((await repo.listTasks()).map((t) => t.id)).toEqual(['b'])
+    expect(await repo.readTimeline('a')).toEqual([])
+    await expect(repo.getReport('a', 1)).rejects.toThrow('找不到報告')
+  })
+
   test('時間軸 append 與讀取', async () => {
     await repo.appendTimeline('a', {
       id: 'e1',
@@ -1987,6 +2041,10 @@ export class Repository {
   }
   saveTask(t: Task) {
     return this.store.writeJson(`tasks/${t.id}/task.json`, t)
+  }
+  /** 刪除任務的所有紀錄（task.json、時間軸、報告） */
+  deleteTask(taskId: string) {
+    return this.store.remove(`tasks/${taskId}`)
   }
 
   appendTimeline(taskId: string, e: TimelineEvent) {
@@ -5136,7 +5194,7 @@ export const MAIN_SYSTEM_APPEND = `
 - 選項要具體、互斥，附簡短說明與取捨；有建議就設定 recommended_option_id。
 - 使用者回覆格式：
   - [answer question_id=… option=…] 補充 → 該題已回答（option 可能省略，表示自由作答）。
-  - [counter_question question_id=…] 問題 → 先用文字簡短回答這個反問（回答反問時可以引用選項，這不算重述；回答會顯示在問題卡片裡），再用同一個 question_id 再呼叫一次 ask_user（依反問更新選項、說明或建議），然後結束這一輪。
+  - [counter_question question_id=…] 問題 → 一定要先輸出文字回答這個反問（簡短即可；回答反問時可以引用選項，這不算重述；只有文字回答會顯示在使用者的反問下面，不要只把回答寫進 ask_user 的 context），再用同一個 question_id 再呼叫一次 ask_user（依反問更新選項、說明或建議），然後結束這一輪。
   - [branch_conclusion branch=…] → 使用者在分岔討論中做出的決策，直接採納；之後的規格中 source 用 {type:"branch", ref:分岔 id}。
 - 對需求有足夠把握（約 95%）時，呼叫 mcp__harness__propose_spec。decisions 的 source 指出來源：question（ref=question_id）、branch（ref=分岔 id），或使用者在 [spec_feedback] 或訊息中直接給的指示 {type:"user", ref:指示的簡短摘錄}（介面上顯示「你的指示」）。
 - 收到 [spec_feedback] 時修正並重新呼叫 propose_spec；若需要再問，繼續用 ask_user。
@@ -6527,6 +6585,10 @@ function nextId(prefix: string, ids: string[]): string {
   }, 0)
   return `${prefix}${max + 1}`
 }
+/** 使用者停止這一輪後記在時間軸：畫面不會停在 Claude 最後一句話，看起來像沒反應 */
+const STOPPED_NOTICE = '已停止。輸入訊息就能繼續。'
+/** Claude 回答反問時沒寫文字、說明也沒變：卡片裡仍給反問一則回覆 */
+const COUNTER_UPDATED_NOTE = '已依你的反問更新上面的問題與選項。'
 const logError = (what: string) => (e: unknown) => console.error(`[TaskManager] ${what}`, e)
 
 /** p 在 ms 內結束（成功或失敗）回傳 true，逾時回傳 false */
@@ -6567,6 +6629,10 @@ export class TaskManager {
   private blockedToolUses = new Map<string, { run?: AgentRun; reason: string }>()
   /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
+  /** 使用者按停止的執行：結束時在時間軸記一筆 */
+  private stoppedRuns = new WeakSet<AgentRun>()
+  /** 正在移除的 repo：期間不能為它建立任務 */
+  private removingRepos = new Set<string>()
   /** 報告整理中（邏輯狀態）：進入 reviewing 的同一步就清除 */
   private finalizing = new Set<string>()
   /** 報告整理的 promise，整個流程（含之後的時間軸寫入）結束才移除；whenIdle 用 */
@@ -6626,7 +6692,7 @@ export class TaskManager {
     return this.d.repo.readTimeline(taskId)
   }
 
-  /** 等這個任務的所有執行、事件與報告整理結束（測試用，也用於關閉 app 前） */
+  /** 等這個任務的所有執行、事件與報告整理結束（測試用，也用於關閉 app 前與刪除任務的紀錄前） */
   async whenIdle(taskId: string) {
     const ofTask = (m: Map<string, Promise<unknown>>) =>
       [...m.entries()].filter(([k]) => k.startsWith(`${taskId}|`)).map(([, p]) => p)
@@ -6746,6 +6812,7 @@ export class TaskManager {
     const settings = await this.d.repo.getSettings()
     const repo = (await this.d.repo.listRepos()).find((r) => r.id === input.repoId)
     if (!repo) throw new Error('找不到 repo')
+    if (this.removingRepos.has(repo.id)) throw new Error('正在移除這個 repo')
     const request = input.request.trim()
     if (!request) throw new Error('請描述需求')
     const id = this.newId()
@@ -6965,6 +7032,9 @@ export class TaskManager {
       this.forgetDenied(run)
       const branchId = branchIdOf(channel)
       if (current && !branchId) this.pendingCounter.delete(taskId)
+      // 排在這段執行的所有事件之後
+      if (this.stoppedRuns.delete(run))
+        await this.addTimeline(taskId, { channel, kind: 'system', text: STOPPED_NOTICE })
       await this.update(taskId, (t) => {
         if (current) {
           if (branchId) {
@@ -7097,6 +7167,14 @@ export class TaskManager {
             }
             const q = t.questions.find((x) => x.id === a.question_id)
             if (q) {
+              // 回答反問卻沒寫文字（例如只把回答放進 context）：補一則回覆，反問底下才不會是空的
+              if (counterReply && q.followups.at(-1)?.role === 'user') {
+                const context = a.context?.trim()
+                q.followups.push({
+                  role: 'assistant',
+                  text: context && context !== q.context?.trim() ? context : COUNTER_UPDATED_NOTE
+                })
+              }
               Object.assign(q, fields, { status: 'open' as const, answer: undefined })
             } else {
               added = true
@@ -7893,7 +7971,10 @@ describe('TaskManager：規格與實作', () => {
       if (w.taskId === taskId && w.channel === channel)
         w.resolve({ allow: false, message: '使用者停止了執行' })
     }
-    await this.runs.get(runKey(taskId, channel))?.interrupt()
+    const run = this.runs.get(runKey(taskId, channel))
+    // 這一輪還在進行才算停止（輸入已關閉的執行只是還沒結束）
+    if (run?.active) this.stoppedRuns.add(run)
+    await run?.interrupt()
   }
 
   async resume(taskId: string) {
@@ -8916,18 +8997,7 @@ describe('TaskManager：審查補強', () => {
     return this.exclusive(taskId, async () => {
       const t = this.task(taskId)
       if (this.finalizing.has(taskId)) throw new Error('正在整理報告，請稍候再丟棄')
-      for (const w of [...this.permissionWaiters.values()]) {
-        if (w.taskId === taskId) w.resolve({ allow: false, message: '任務已丟棄' })
-      }
-      const runs = this.runsOf(taskId)
-      runs.forEach(([, r]) => r.abort())
-      // abort 後仍不結束的程序不要卡住丟棄：不再追蹤它
-      await Promise.all(
-        runs.map(async ([key, r]) => {
-          if (await settlesWithin(r.done, this.abortGraceMs)) return
-          this.dropStuckRun(taskId, key.slice(taskId.length + 1) as Channel, r)
-        })
-      )
+      await this.stopAll(taskId, '任務已丟棄')
       await this.d.git.removeWorktree((await this.repoOf(t)).path, t.worktreePath, t.branch)
       await this.update(taskId, (x) => {
         if (x.status !== 'done' && x.status !== 'discarded')
@@ -8936,6 +9006,67 @@ describe('TaskManager：審查補強', () => {
         x.pendingPermission = undefined
       })
     })
+  }
+
+  /**
+   * 從 Harness 移除 repo（repo 資料夾本身不動）：它的任務（含已丟棄的）依序停止 Claude、刪除 worktree 與分支、
+   * 刪除紀錄，全部完成才移除 repo。中途失敗就停下：已刪除的任務不會回來，再移除一次會接著處理剩下的
+   */
+  async removeRepo(repoId: string): Promise<{ leftWorktrees: string[] }> {
+    if (this.shuttingDown) throw new Error('Harness 正在關閉')
+    if (this.removingRepos.has(repoId)) throw new Error('正在移除這個 repo')
+    this.removingRepos.add(repoId)
+    try {
+      const repo = (await this.d.repo.listRepos()).find((r) => r.id === repoId)
+      if (!repo) throw new Error('找不到 repo')
+      const ids = [...this.tasks.values()].filter((t) => t.repoId === repoId).map((t) => t.id)
+      const busy = (id: string) => this.finalizing.has(id) || this.finishing.has(id)
+      if (ids.some(busy)) throw new Error('有任務正在整理報告或收尾，請稍候再移除')
+      // repo 資料夾已不在（搬走或刪掉）時 git 無法清理：worktree 資料夾留著，任務紀錄照樣刪除
+      const gitOk = await this.d.git.isRepo(repo.path)
+      const leftWorktrees: string[] = []
+      for (const id of ids) {
+        await this.exclusive(id, async () => {
+          if (this.finalizing.has(id)) throw new Error('有任務正在整理報告或收尾，請稍候再移除')
+          await this.stopAll(id, '任務已刪除')
+          const t = this.task(id)
+          if (t.status !== 'discarded') {
+            if (gitOk) await this.d.git.removeWorktree(repo.path, t.worktreePath, t.branch)
+            else leftWorktrees.push(t.worktreePath)
+          }
+          await this.forget(id)
+        })
+      }
+      const repos = (await this.d.repo.listRepos()).filter((r) => r.id !== repoId)
+      await this.d.repo.saveRepos(repos)
+      this.d.emit({ type: 'repos', repos })
+      return { leftWorktrees }
+    } finally {
+      this.removingRepos.delete(repoId)
+    }
+  }
+
+  /** 拒絕這個任務等待中的核准、中止它所有的執行；abort 後仍不結束的程序不要卡住呼叫端：不再追蹤它 */
+  private async stopAll(taskId: string, message: string) {
+    for (const w of [...this.permissionWaiters.values()]) {
+      if (w.taskId === taskId) w.resolve({ allow: false, message })
+    }
+    const runs = this.runsOf(taskId)
+    runs.forEach(([, r]) => r.abort())
+    await Promise.all(
+      runs.map(async ([key, r]) => {
+        if (await settlesWithin(r.done, this.abortGraceMs)) return
+        this.dropStuckRun(taskId, key.slice(taskId.length + 1) as Channel, r)
+      })
+    )
+  }
+
+  /** 刪除任務的紀錄：先等它排隊中的事件與寫入都結束，之後不會再有寫入讓資料夾又出現 */
+  private async forget(taskId: string) {
+    await this.whenIdle(taskId)
+    await this.d.repo.deleteTask(taskId)
+    this.tasks.delete(taskId)
+    this.d.emit({ type: 'task_removed', taskId })
   }
 
   changedFiles(taskId: string) {
@@ -9769,6 +9900,7 @@ export function registerIpc(d: IpcDeps) {
       d.emitRepos([...repos, repo])
       return repo
     },
+    'repos:remove': (repoId) => d.tasks.removeRepo(assertId(repoId, 'repo')),
     'repos:branches': async (repoId) => {
       assertId(repoId, 'repo')
       const r = (await d.repo.listRepos()).find((x) => x.id === repoId)
@@ -10211,6 +10343,29 @@ describe('store.apply', () => {
   test('task 事件 upsert', () => {
     useStore.getState().apply({ type: 'task', task: makeTask({ id: 'a' }) })
     expect(useStore.getState().tasks.a.id).toBe('a')
+  })
+  test('task_removed 移除任務與它的時間軸、分岔狀態與回饋；正在看它時回到新任務', () => {
+    useStore.setState({
+      tasks: { a: makeTask({ id: 'a' }), b: makeTask({ id: 'b' }) },
+      timelines: { a: [], b: [] },
+      activeBranch: { a: 'b1' },
+      branchDrafts: { a: { excerpt: '引用', seq: 1 } },
+      feedback: { a: [{ anchor: 'section:tests', label: '新增的測試', text: '補測試' }] },
+      view: { kind: 'task', taskId: 'a' }
+    })
+    useStore.getState().apply({ type: 'task_removed', taskId: 'a' })
+    const s = useStore.getState()
+    expect(Object.keys(s.tasks)).toEqual(['b'])
+    expect(Object.keys(s.timelines)).toEqual(['b'])
+    expect(s.activeBranch.a).toBeUndefined()
+    expect(s.branchDrafts.a).toBeUndefined()
+    expect(s.feedback.a).toBeUndefined()
+    expect(s.view).toEqual({ kind: 'new' })
+    // 沒在看的任務被移除：畫面不動
+    useStore.setState({ view: { kind: 'settings' } })
+    useStore.getState().apply({ type: 'task_removed', taskId: 'b' })
+    expect(useStore.getState().tasks).toEqual({})
+    expect(useStore.getState().view).toEqual({ kind: 'settings' })
   })
   test('timeline 事件只附加到已載入的時間軸，並去重', () => {
     const e = { id: 'e1', ts: '', channel: 'main' as const, kind: 'user_text' as const, text: 'hi' }
@@ -10675,7 +10830,19 @@ export const useStore = create<State>((set, get) => ({
   apply(e) {
     if (e.type === 'task') set((s) => ({ tasks: { ...s.tasks, [e.task.id]: e.task } }))
     else if (e.type === 'repos') set({ repos: e.repos })
-    else if (e.type === 'timeline') {
+    else if (e.type === 'task_removed') {
+      // 移除 repo 時一併刪除的任務：正在看它就回到新任務
+      const drop = <T>(m: Record<string, T>) =>
+        Object.fromEntries(Object.entries(m).filter(([id]) => id !== e.taskId))
+      set((s) => ({
+        tasks: drop(s.tasks),
+        timelines: drop(s.timelines),
+        activeBranch: drop(s.activeBranch),
+        branchDrafts: drop(s.branchDrafts),
+        feedback: drop(s.feedback),
+        view: s.view.kind === 'task' && s.view.taskId === e.taskId ? { kind: 'new' } : s.view
+      }))
+    } else if (e.type === 'timeline') {
       const buffer = loadingTimelines.get(e.taskId)
       if (buffer) {
         buffer.push(e.event)
@@ -11174,8 +11341,8 @@ describe('Sidebar', () => {
   test('展開目前任務所在的 repo，其他 repo 收合只顯示數量', () => {
     useStore.setState({ tasks, view: { kind: 'task', taskId: 'a' } })
     render(<Sidebar />)
-    const shop = screen.getByRole('button', { name: /shop-api/ })
-    const web = screen.getByRole('button', { name: /web-dashboard/ })
+    const shop = screen.getByRole('button', { name: /^shop-api/ })
+    const web = screen.getByRole('button', { name: /^web-dashboard/ })
     expect(shop).toHaveAttribute('aria-expanded', 'true')
     expect(web).toHaveAttribute('aria-expanded', 'false')
     expect(web).toHaveTextContent('2')
@@ -11191,7 +11358,7 @@ describe('Sidebar', () => {
   test('點 repo 標題展開，點任務切換畫面', async () => {
     useStore.setState({ tasks, view: { kind: 'task', taskId: 'a' } })
     render(<Sidebar />)
-    await userEvent.click(screen.getByRole('button', { name: /web-dashboard/ }))
+    await userEvent.click(screen.getByRole('button', { name: /^web-dashboard/ }))
     expect(screen.getByText('待審閱報告 · v1')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /匯出 CSV/ }))
     expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 'b' })
@@ -11228,12 +11395,12 @@ describe('Sidebar 焦點', () => {
       view: { kind: 'task', taskId: 'a' }
     })
     render(<Sidebar />)
-    const web = screen.getByRole('button', { name: /web-dashboard/ })
+    const web = screen.getByRole('button', { name: /^web-dashboard/ })
     await userEvent.click(web) // 展開 r2
     await userEvent.click(web) // 再手動收合 r2
     expect(web).toHaveAttribute('aria-expanded', 'false')
     act(() => useStore.setState({ view: { kind: 'task', taskId: 'b' } }))
-    expect(screen.getByRole('button', { name: /web-dashboard/ })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: /^web-dashboard/ })).toHaveAttribute(
       'aria-expanded',
       'true'
     )
@@ -11387,6 +11554,7 @@ import { call } from '../api'
 import { taskStatusLabel } from '../lib/stage'
 import { useShallow } from 'zustand/react/shallow'
 import { useStore } from '../store'
+import { RepoMenu } from './RepoMenu'
 import { Button, cx, Icons, TONE_TEXT } from './ui'
 
 function RepoBadge({ name, active }: { name: string; active: boolean }) {
@@ -11479,21 +11647,23 @@ export function Sidebar() {
           const expanded = toggled[r.id] ?? r.id === focusRepo
           return (
             <div key={r.id} className="flex flex-col gap-1">
-              <button
-                type="button"
-                aria-expanded={expanded}
-                onClick={() => setToggled((s) => ({ ...s, [r.id]: !expanded }))}
-                className={cx(
-                  'flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1 text-left text-[13px]',
-                  expanded ? 'font-bold text-ink' : 'text-ink-2'
-                )}
-              >
-                <RepoBadge name={r.name} active={expanded} />
-                <span className="min-w-0 truncate">{r.name}</span>
-                {!expanded && ts.length > 0 && (
-                  <span className="ml-auto text-xs text-muted-2">{ts.length}</span>
-                )}
-              </button>
+              <RepoMenu repo={r} tasks={Object.values(tasks).filter((t) => t.repoId === r.id)}>
+                <button
+                  type="button"
+                  aria-expanded={expanded}
+                  onClick={() => setToggled((s) => ({ ...s, [r.id]: !expanded }))}
+                  className={cx(
+                    'flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1 text-left text-[13px]',
+                    expanded ? 'font-bold text-ink' : 'text-ink-2'
+                  )}
+                >
+                  <RepoBadge name={r.name} active={expanded} />
+                  <span className="min-w-0 truncate">{r.name}</span>
+                  {!expanded && ts.length > 0 && (
+                    <span className="ml-auto text-xs text-muted-2">{ts.length}</span>
+                  )}
+                </button>
+              </RepoMenu>
               {expanded &&
                 ts.map((t) => (
                   <TaskItem
@@ -25635,6 +25805,675 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 # docs: add a README
 git add docs
 git commit -m "docs: record the final review fixes in the plan (Task 39)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 40：使用中發現的停止與反問問題
+
+實際使用時遇到兩個「Claude 沒反應」的情況，依 TDD 修正（程式與設計文件一個 commit，本計畫的紀錄另一個 docs commit）：
+- **停止沒有留下痕跡**：主線執行中按了「停止」，`interrupt()` 讓這一輪以 `interrupted` 結束、回到 `idle`，不算錯誤，時間軸也不寫任何東西：畫面停在 Claude 最後一句話（例如「Now the pendingCounter consumption.」），看起來像卡住。
+- **反問沒有回覆**：收到 `[counter_question …]` 時，Claude 沒先輸出文字，直接以同一個 `question_id` 再呼叫 `ask_user`，把回答寫進 `context`。只有文字會接在使用者的反問下面，所以卡片裡的反問底下是空的；回答變成標題下方的灰字，取代了原本的說明。
+
+**Files:**
+- Modify（程式碼區塊已更新為最終版本）：Task 21–23 的 `src/main/tasks/taskManager.ts`（`STOPPED_NOTICE`、`COUNTER_UPDATED_NOTE`、`stoppedRuns`；`onRunDone`、`askUser`、`stop`）、Task 19 的 `src/main/agent/prompts.ts`（反問的規則）
+- Modify: `tests/main/taskManager.test.ts`、`tests/main/prompts.test.ts`、`docs/plans/2026-10-07-harness-design.md`（§3.3 的 `ask_user` 與階段指示、§5 的停止）
+
+**行為重點：**
+- `stop()` 在這一輪還在進行（`run.active`）時把它記進 `stoppedRuns`（輸入已關閉的執行只是還沒結束，不算停止）；`onRunDone` 在這段執行的所有事件之後，於被停止的 channel（主線或分岔）寫入 `system` 事件「已停止。輸入訊息就能繼續。」。interrupt 逾時改用 abort 時一樣會寫（`done` 仍會結束）。
+- `askUser` 是在回答反問（`counterReply`）而卡片最後一則仍是使用者的反問時，先補一則 Claude 的回覆再更新卡片：新的 `context` 有內容且和原本不同就用它，否則用「已依你的反問更新上面的問題與選項。」。Claude 有先寫文字時照舊（文字已經是最後一則）。
+- 提示：反問的規則改成「一定要先輸出文字回答這個反問（…只有文字回答會顯示在使用者的反問下面，不要只把回答寫進 ask_user 的 context）」。
+
+**Step 1: 寫失敗測試**
+
+`tests/main/taskManager.test.ts`：
+- 「回答反問時沒寫文字、只把回答放進說明：卡片裡以新的說明當作回覆」
+- 「回答反問時沒寫文字、說明也沒變：卡片裡提示問題已更新，不讓反問沒有回覆」
+- 「停止後時間軸留下「已停止」，畫面不會看起來像 Claude 沒反應」（沒有執行中的一輪時再按停止，不多記一筆）
+- 「停止分岔不影響主線」加上：「已停止」記在分岔自己的時間軸
+
+```ts
+  test('回答反問時沒寫文字、只把回答放進說明：卡片裡以新的說明當作回覆', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser({ ...askQ1, context: '連續失敗 5 次就鎖定。' })
+    }
+    const id = await create()
+    // 第二輪：沒有輸出文字，直接以同一 question_id 更新卡片，回答寫在 context
+    claude.script = async ({ call, sink }) => {
+      if (call === 1) await sink.askUser({ ...askQ1, context: 'IP＝登入請求的來源位址。' })
+    }
+    await tm.counterQuestion(id, 'q1', 'IP 是指什麼？')
+    await tm.whenIdle(id)
+    const q = tm.get(id).questions[0]
+    expect(q.followups).toEqual([
+      { role: 'user', text: 'IP 是指什麼？' },
+      { role: 'assistant', text: 'IP＝登入請求的來源位址。' }
+    ])
+    expect(q.context).toBe('IP＝登入請求的來源位址。')
+  })
+
+  test('回答反問時沒寫文字、說明也沒變：卡片裡提示問題已更新，不讓反問沒有回覆', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser(askQ1)
+    }
+    const id = await create()
+    claude.script = async ({ call, sink }) => {
+      if (call === 1) await sink.askUser({ ...askQ1, recommended_option_id: 'acct_ip' })
+    }
+    await tm.counterQuestion(id, 'q1', '哪個比較好？')
+    await tm.whenIdle(id)
+    expect(tm.get(id).questions[0].followups).toEqual([
+      { role: 'user', text: '哪個比較好？' },
+      { role: 'assistant', text: '已依你的反問更新上面的問題與選項。' }
+    ])
+  })
+
+  test('停止後時間軸留下「已停止」，畫面不會看起來像 Claude 沒反應', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => {
+      await new Promise(() => undefined) // 卡住，直到被停止
+    }
+    await tm.send(id, 'main', '再看一下 /login')
+    await tm.stop(id, 'main')
+    await tm.whenIdle(id)
+    expect((await tm.timeline(id)).at(-1)).toMatchObject({
+      channel: 'main',
+      kind: 'system',
+      text: '已停止。輸入訊息就能繼續。'
+    })
+    // 沒有執行中的這一輪時按停止：不再多記一筆
+    await tm.stop(id, 'main')
+    await tm.whenIdle(id)
+    expect((await tm.timeline(id)).filter((e) => e.kind === 'system')).toHaveLength(1)
+  })
+```
+
+「停止分岔不影響主線」最後加上：
+
+```ts
+    // 「已停止」記在分岔自己的時間軸
+    const stopped = (await tm.timeline(id)).filter((e) => e.kind === 'system')
+    expect(stopped.map((e) => e.channel)).toEqual([`branch:${b.id}`])
+```
+
+`tests/main/prompts.test.ts` 的「回答反問時可以引用選項：這不算重述」加上：
+
+```ts
+  // 只有文字回覆會顯示在使用者的反問下面：回答只放在 context 時，使用者看起來像沒有得到回覆
+  expect(rule).toContain('一定要先輸出文字回答')
+  expect(rule).toContain('不要只把回答寫進 ask_user 的 context')
+```
+
+**Step 2: 確認失敗** — `npx vitest run tests/main/taskManager.test.ts tests/main/prompts.test.ts` → 5 failed（卡片裡沒有回覆、時間軸最後一筆是 `user_text`、分岔沒有 `system` 事件、提示沒有新的字句）
+
+**Step 3: 實作** — 見上面列出的 Task 區塊。
+
+**Step 4: 確認通過** — `npm test`（51 個檔案、747 個測試）、`npm run typecheck`、`npm run lint` 通過。
+
+**Commit**
+
+```bash
+git commit -m "fix(main): mark a stopped turn in the timeline; never leave a counter-question unanswered
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git add docs/plans/2026-10-07-harness-implementation.md
+git commit -m "docs: record the stop and counter-question fixes in the plan (Task 40)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 41：移除 repo
+
+使用中加上（設計 §3.9）：側欄的 repo 列在滑鼠移過或鍵盤聚焦時出現「⋯」，可以從 Harness 移除 repo，它的任務一併刪除（停止 Claude、刪除 worktree、分支與紀錄），repo 資料夾本身不動。單一任務仍只有「丟棄」（使用者確認過不需要另外的刪除）。設計一個 commit，程式一個 commit，本計畫的紀錄另一個 docs commit。
+
+**Files:**
+- Create: `src/renderer/src/components/RepoMenu.tsx`、`tests/renderer/RepoMenu.test.tsx`
+- Modify（程式碼區塊已更新為最終版本）：
+  - Task 8：`src/shared/ipc.ts`（`repos:remove`、`task_removed` 事件）
+  - Task 9：`src/main/store/store.ts`（`remove`）、`tests/main/store.test.ts`
+  - Task 10：`src/main/store/repository.ts`（`deleteTask`）、`tests/main/repository.test.ts`
+  - Task 21：`src/main/tasks/taskManager.ts`（`removingRepos`；`createTask` 拒絕正在移除的 repo；`whenIdle` 的註解）；Task 24：`discard` 改用 `stopAll`，新增 `removeRepo`、`stopAll`、`forget`
+  - Task 25：`src/main/ipc.ts`（`repos:remove`）
+  - Task 26：`src/renderer/src/store.ts`（`task_removed`）、`tests/renderer/store.test.ts`
+  - Task 27：`src/renderer/src/components/Sidebar.tsx`（repo 列包在 `RepoMenu` 裡）、`tests/renderer/shell.test.tsx`（repo 按鈕的名稱改用 `/^shop-api/`：「⋯」的名稱「「shop-api」的動作」也含有 repo 名稱）
+- Modify（程式碼在本 Task 的區塊）：`tests/main/taskManager.test.ts`
+- Modify: `docs/plans/2026-10-07-harness-design.md`（§3.9）
+
+**行為重點：**
+- `Store.remove(rel)`：`rm -rf`，不存在時不算錯；路徑一樣不能跳出根目錄，也不能是根目錄本身。`Repository.deleteTask(id)` 刪掉 `tasks/<id>/`。
+- `TaskManager.removeRepo(repoId)`：同一個 repo 同時只能移除一次（`removingRepos`，期間 `createTask` 也拒絕）；有任務在整理報告或收尾時拒絕。repo 資料夾已不是 git repo（`isRepo` 為 false，例如搬走或刪掉）時跳過 git 清理，回傳 `leftWorktrees`。每個任務（含已丟棄的）在 `exclusive` 裡：`stopAll`（拒絕等待中的核准、abort 所有執行，abort 後仍不結束的不再追蹤）→ `removeWorktree`（已丟棄的跳過）→ `forget`（`whenIdle` 等排隊中的事件與寫入結束 → `deleteTask` → 從記憶體移除 → 推送 `task_removed`）。全部完成才更新 `repos.json` 並推送 `repos`。中途失敗就丟出錯誤，repo 留著，再移除一次會接著處理剩下的。
+- renderer 的 store 收到 `task_removed`：移除任務、時間軸、分岔狀態、草稿與回饋；正在看它就回到新任務。
+- `RepoMenu`：和任務的「⋯」選單同樣的兩段式確認與焦點處理（打開時焦點在「移除 repo」，確認時在「取消」，失敗時在原因；Esc 與點外面關閉，進行中不關）。確認文字的任務數只算側欄看得到的（不含已丟棄）；有 Claude 在執行（主線或分岔）時加「Claude 正在執行，會先停止。」；有任務在整理報告時「移除 repo」停用。成功後提示「已移除 repo「X」」，有 `leftWorktrees` 時加上「repo 資料夾已不存在，N 個 worktree 資料夾沒有刪除：…」。
+
+**Step 1: 寫失敗測試**
+
+`tests/main/store.test.ts`（「remove 刪掉整個資料夾；不存在時不算錯」「remove 不能刪 store 根目錄本身」，「路徑不能跳出 store 根目錄」加上 `remove('..')`）、`tests/main/repository.test.ts`（「deleteTask 刪掉任務的資料夾…」）、`tests/renderer/store.test.ts`（「task_removed 移除任務…」）的程式碼見上面列出的 Task 區塊。
+
+`tests/main/taskManager.test.ts` 最後加上：
+
+```ts
+describe('TaskManager：移除 repo', () => {
+  const twoRepos = [
+    { id: 'r1', name: 'shop-api', path: '/repos/shop-api', addedAt: 'x' },
+    { id: 'r2', name: 'web', path: '/repos/web', addedAt: 'x' }
+  ]
+  const hang = () => new Promise<never>(() => undefined)
+
+  test('刪除它的任務（含已丟棄的）、worktree 與紀錄，其他 repo 不受影響', async () => {
+    const { tm, git, events, repo, create } = await setup()
+    await repo.saveRepos(twoRepos)
+    const a = await create()
+    const gone = await create()
+    await tm.discard(gone)
+    const other = (
+      await tm.createTask({
+        repoId: 'r2',
+        request: '匯出 CSV',
+        baseBranch: 'main',
+        model: 'claude-opus-5-5'
+      })
+    ).id
+    await tm.whenIdle(other)
+    const { worktreePath, branch } = tm.get(a)
+    git.calls.length = 0
+    events.length = 0
+    expect(await tm.removeRepo('r1')).toEqual({ leftWorktrees: [] })
+    expect(tm.list().map((t) => t.id)).toEqual([other])
+    expect(() => tm.get(a)).toThrow('找不到任務')
+    expect((await repo.listTasks()).map((t) => t.id)).toEqual([other])
+    expect(await repo.readTimeline(a)).toEqual([])
+    // 已丟棄的任務 worktree 早就刪了，不再呼叫 git
+    expect(git.calls).toEqual([`remove ${worktreePath} ${branch}`])
+    expect((await repo.listRepos()).map((r) => r.id)).toEqual(['r2'])
+    expect(events.filter((e) => e.type === 'task_removed')).toEqual([
+      { type: 'task_removed', taskId: a },
+      { type: 'task_removed', taskId: gone }
+    ])
+    // repo 在所有任務都刪掉之後才移除
+    expect(events.at(-1)).toEqual({ type: 'repos', repos: [twoRepos[1]] })
+  })
+
+  test('先停止執行中的 Claude（主線與分岔）並拒絕等待中的核准', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    const withBranch = await create()
+    let result: PermissionResult | null | undefined
+    claude.script = async ({ options }) => {
+      result = await options.canUseTool!('WebFetch', { url: 'https://example.com' }, signalOf())
+      return hang()
+    }
+    await tm.send(id, 'main', '查一下文件')
+    await until(() => !!tm.get(id).pendingPermission)
+    claude.script = hang
+    await tm.openBranch(withBranch, { title: '討論' })
+    await until(() => tm.get(withBranch).branches[0].running)
+    expect(claude.active).toBe(2)
+    await tm.removeRepo('r1')
+    expect(result).toMatchObject({ behavior: 'deny', message: '任務已刪除' })
+    expect(claude.active).toBe(0)
+    expect(tm.list()).toEqual([])
+  })
+
+  test('有任務在整理報告時拒絕移除，什麼都不動', async () => {
+    const verifying = deferred()
+    const { tm, claude, verify, repo, git, id } = await toImplementing()
+    verify.mockImplementationOnce(async () => {
+      await verifying.promise
+      return []
+    })
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await until(() => tm.get(id).runState === 'finalizing' && verify.mock.calls.length > 0)
+    git.calls.length = 0
+    await expect(tm.removeRepo('r1')).rejects.toThrow('有任務正在整理報告或收尾')
+    expect(tm.get(id).runState).toBe('finalizing')
+    expect((await repo.listRepos()).map((r) => r.id)).toEqual(['r1'])
+    expect(git.calls).toEqual([])
+    verifying.resolve()
+    await tm.whenIdle(id)
+  })
+
+  test('repo 資料夾已不存在時跳過 git 清理，照樣移除並回報留下的 worktree', async () => {
+    const { tm, git, repo, create } = await setup()
+    const id = await create()
+    const { worktreePath } = tm.get(id)
+    git.isRepo = async () => false
+    git.calls.length = 0
+    expect(await tm.removeRepo('r1')).toEqual({ leftWorktrees: [worktreePath] })
+    expect(git.calls).toEqual([])
+    expect(tm.list()).toEqual([])
+    expect(await repo.listTasks()).toEqual([])
+    expect(await repo.listRepos()).toEqual([])
+  })
+
+  test('中途失敗就停下並回報，repo 留著；再移除一次接著處理剩下的', async () => {
+    const { tm, git, repo, create } = await setup()
+    await create()
+    const second = await create()
+    const remove = git.removeWorktree
+    let n = 0
+    git.removeWorktree = async (...args: Parameters<typeof remove>) => {
+      if (++n === 2) throw new Error('worktree 有檔案被鎖住')
+      return remove(...args)
+    }
+    await expect(tm.removeRepo('r1')).rejects.toThrow('worktree 有檔案被鎖住')
+    expect(tm.list().map((t) => t.id)).toEqual([second])
+    expect(tm.get(second).status).toBe('clarifying')
+    expect((await repo.listRepos()).map((r) => r.id)).toEqual(['r1'])
+    await expect(tm.removeRepo('r1')).resolves.toEqual({ leftWorktrees: [] })
+    expect(tm.list()).toEqual([])
+    expect(await repo.listRepos()).toEqual([])
+  })
+
+  test('移除進行中不能為這個 repo 建立任務或再移除一次；移除後找不到 repo', async () => {
+    const { tm, git, create } = await setup()
+    await create()
+    const removing = deferred()
+    const remove = git.removeWorktree
+    let started = false
+    git.removeWorktree = async (...args: Parameters<typeof remove>) => {
+      started = true
+      await removing.promise
+      return remove(...args)
+    }
+    const done = tm.removeRepo('r1')
+    await until(() => started)
+    await expect(
+      tm.createTask({
+        repoId: 'r1',
+        request: '另一個需求',
+        baseBranch: 'main',
+        model: 'claude-opus-5-5'
+      })
+    ).rejects.toThrow('正在移除這個 repo')
+    await expect(tm.removeRepo('r1')).rejects.toThrow('正在移除這個 repo')
+    removing.resolve()
+    await done
+    await expect(tm.removeRepo('r1')).rejects.toThrow('找不到 repo')
+  })
+})
+```
+
+`tests/renderer/RepoMenu.test.tsx`：
+
+```tsx
+// tests/renderer/RepoMenu.test.tsx
+// 側欄 repo 列的「⋯」：從 Harness 移除 repo，它的任務一併刪除（兩段式確認）
+import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { beforeEach, expect, test, vi } from 'vitest'
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(),
+  onEvent: vi.fn(() => () => {}),
+  errorText: (e: unknown) => (e instanceof Error ? e.message : String(e))
+}))
+import { call } from '@renderer/api'
+import { Sidebar } from '@renderer/components/Sidebar'
+import { resetStoreInternals, useStore } from '@renderer/store'
+import { holdNextCall } from '../fixtures/hold'
+import { makeTask } from '../fixtures/task'
+
+const repos = [
+  { id: 'r1', name: 'shop-api', path: '/Users/me/shop-api', addedAt: '' },
+  { id: 'r2', name: 'web', path: '/Users/me/web', addedAt: '' }
+]
+
+beforeEach(() => {
+  vi.mocked(call).mockReset()
+  vi.mocked(call).mockResolvedValue({ leftWorktrees: [] } as never)
+  resetStoreInternals()
+  useStore.setState({
+    ready: true,
+    repos,
+    tasks: {
+      a: makeTask({ id: 'a', repoId: 'r1', title: '登入失敗鎖定' }),
+      b: makeTask({ id: 'b', repoId: 'r1', title: '匯出 CSV' }),
+      gone: makeTask({ id: 'gone', repoId: 'r1', status: 'discarded' }),
+      w: makeTask({ id: 'w', repoId: 'r2', title: '修正時區' })
+    },
+    timelines: {},
+    view: { kind: 'new' },
+    toast: undefined
+  })
+})
+
+const trigger = (name: string) => screen.getByRole('button', { name: `「${name}」的動作` })
+const menu = (name: string) => screen.getByRole('group', { name: `「${name}」的動作` })
+
+test('「⋯」→ 移除 repo：確認文字寫出會刪除的任務數；確定後呼叫 repos:remove 並提示', async () => {
+  render(<Sidebar />)
+  expect(trigger('shop-api')).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.click(trigger('shop-api'))
+  expect(trigger('shop-api')).toHaveAttribute('aria-expanded', 'true')
+  await userEvent.click(within(menu('shop-api')).getByRole('button', { name: '移除 repo' }))
+  expect(call).not.toHaveBeenCalled()
+  // 已丟棄的任務在側欄看不到，不算在數量裡
+  expect(menu('shop-api')).toHaveTextContent(
+    '確定要從 Harness 移除 shop-api？它的 2 個任務會一併刪除：停止 Claude，刪除 worktree、分支和對話紀錄，無法復原。repo 資料夾本身不受影響。'
+  )
+  expect(menu('shop-api')).not.toHaveTextContent('會先停止')
+  // 焦點移到「取消」：誤按 Enter 不會移除
+  expect(within(menu('shop-api')).getByRole('button', { name: '取消' })).toHaveFocus()
+  await userEvent.click(within(menu('shop-api')).getByRole('button', { name: '確定移除' }))
+  expect(call).toHaveBeenCalledWith('repos:remove', 'r1')
+  expect(useStore.getState().toast?.text).toBe('已移除 repo「shop-api」')
+  expect(screen.queryByRole('group', { name: '「shop-api」的動作' })).not.toBeInTheDocument()
+})
+
+test('沒有任務時只說明 repo 資料夾不受影響；取消、Esc 都會關閉並把焦點還給「⋯」', async () => {
+  useStore.setState({ tasks: {} })
+  render(<Sidebar />)
+  await userEvent.click(trigger('web'))
+  await userEvent.click(within(menu('web')).getByRole('button', { name: '移除 repo' }))
+  expect(menu('web')).toHaveTextContent('確定要從 Harness 移除 web？repo 資料夾本身不受影響。')
+  expect(menu('web')).not.toHaveTextContent('任務')
+  await userEvent.click(within(menu('web')).getByRole('button', { name: '取消' }))
+  expect(screen.queryByRole('group', { name: '「web」的動作' })).not.toBeInTheDocument()
+  expect(trigger('web')).toHaveFocus()
+  await userEvent.click(trigger('web'))
+  await userEvent.keyboard('{Escape}')
+  expect(screen.queryByRole('group', { name: '「web」的動作' })).not.toBeInTheDocument()
+  expect(trigger('web')).toHaveFocus()
+  expect(call).not.toHaveBeenCalled()
+})
+
+test('Claude 正在執行（主線或分岔）時，確認文字說明會先停止', async () => {
+  useStore.setState({
+    tasks: {
+      a: makeTask({ id: 'a', repoId: 'r1', runState: 'running' }),
+      w: makeTask({
+        id: 'w',
+        repoId: 'r2',
+        branches: [{ id: 'b1', title: '討論', status: 'open', running: true }] as never
+      })
+    }
+  })
+  render(<Sidebar />)
+  for (const name of ['shop-api', 'web']) {
+    await userEvent.click(trigger(name))
+    await userEvent.click(within(menu(name)).getByRole('button', { name: '移除 repo' }))
+    expect(menu(name)).toHaveTextContent('它的 1 個任務會一併刪除')
+    expect(menu(name)).toHaveTextContent('Claude 正在執行，會先停止。')
+    await userEvent.keyboard('{Escape}')
+  }
+})
+
+test('有任務在整理報告時不能移除', async () => {
+  useStore.setState({
+    tasks: { a: makeTask({ id: 'a', repoId: 'r1', runState: 'finalizing' }) }
+  })
+  render(<Sidebar />)
+  await userEvent.click(trigger('shop-api'))
+  expect(within(menu('shop-api')).getByRole('button', { name: '移除 repo' })).toBeDisabled()
+  expect(menu('shop-api')).toHaveTextContent('有任務正在整理報告，完成後才能移除。')
+})
+
+test('移除中按鈕停用、連點只送一次；失敗時留在選單顯示原因', async () => {
+  render(<Sidebar />)
+  await userEvent.click(trigger('shop-api'))
+  await userEvent.click(within(menu('shop-api')).getByRole('button', { name: '移除 repo' }))
+  let reject: (e: Error) => void = () => {}
+  vi.mocked(call).mockImplementationOnce(() => new Promise((_, r) => (reject = r)) as never)
+  const confirm = within(menu('shop-api')).getByRole('button', { name: '確定移除' })
+  await userEvent.click(confirm)
+  await userEvent.click(confirm)
+  expect(call).toHaveBeenCalledTimes(1)
+  expect(confirm).toHaveAttribute('aria-disabled', 'true')
+  // 進行中點外面不關閉：結果要留在這裡
+  await userEvent.click(screen.getByRole('button', { name: '新任務' }))
+  reject(new Error('worktree 有檔案被鎖住'))
+  const alert = await within(menu('shop-api')).findByRole('alert')
+  expect(alert).toHaveTextContent('移除失敗：worktree 有檔案被鎖住')
+  expect(alert).toHaveFocus()
+  expect(useStore.getState().toast).toBeUndefined()
+})
+
+test('repo 資料夾已不存在：提示說明 worktree 資料夾沒有刪除與位置', async () => {
+  const release = holdNextCall(vi.mocked(call))
+  render(<Sidebar />)
+  await userEvent.click(trigger('shop-api'))
+  await userEvent.click(within(menu('shop-api')).getByRole('button', { name: '移除 repo' }))
+  await userEvent.click(within(menu('shop-api')).getByRole('button', { name: '確定移除' }))
+  await release({ leftWorktrees: ['/wt/shop-api/20261008-a', '/wt/shop-api/20261008-b'] })
+  expect(useStore.getState().toast?.text).toBe(
+    '已移除 repo「shop-api」。repo 資料夾已不存在，2 個 worktree 資料夾沒有刪除：/wt/shop-api/20261008-a、/wt/shop-api/20261008-b'
+  )
+})
+```
+
+**Step 2: 確認失敗** — 新的測試都失敗：`store.remove`、`repo.deleteTask`、`tm.removeRepo` 不存在；store 沒處理 `task_removed`；側欄找不到「「shop-api」的動作」。
+
+**Step 3: 實作**
+
+`src/renderer/src/components/RepoMenu.tsx`：
+
+```tsx
+// src/renderer/src/components/RepoMenu.tsx
+// 側欄 repo 列的「⋯」（滑鼠移過或鍵盤聚焦時出現）：從 Harness 移除 repo（兩段式確認）。
+// 它的任務一併刪除（停止 Claude、刪除 worktree、分支與紀錄），repo 資料夾本身不動。
+// 只有這裡會刪除任務的紀錄；單一任務仍只有任務標題列「⋯」的丟棄。
+import { type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react'
+import type { Repo, Task } from '@shared/types'
+import { call, errorText } from '../api'
+import { isComposing } from '../lib/ime'
+import { usePending } from '../lib/usePending'
+import { useStore } from '../store'
+import { Button, cx } from './ui'
+
+/** 移除後的提示；repo 資料夾已不存在時 git 無法清理，說明沒刪掉的 worktree 資料夾在哪裡 */
+function removedText(name: string, left: string[]) {
+  const base = `已移除 repo「${name}」`
+  if (!left.length) return base
+  return `${base}。repo 資料夾已不存在，${left.length} 個 worktree 資料夾沒有刪除：${left.join('、')}`
+}
+
+export function RepoMenu({
+  repo,
+  tasks,
+  children
+}: {
+  repo: Repo
+  /** 這個 repo 的所有任務（含已丟棄、在側欄看不到的） */
+  tasks: Task[]
+  /** repo 列本身（展開／收合的按鈕） */
+  children: ReactNode
+}) {
+  const showToast = useStore((s) => s.showToast)
+  const [open, setOpen] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const [failure, setFailure] = useState<string>()
+  const [pending, run] = usePending()
+  const rootRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const itemRef = useRef<HTMLButtonElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  const alertRef = useRef<HTMLDivElement>(null)
+  const panelId = useId()
+  const label = `「${repo.name}」的動作`
+
+  // 移除進行中不能關掉選單：結果（失敗原因）要留在這裡
+  const close = (refocus = false) => {
+    if (pending) return
+    setOpen(false)
+    setConfirming(false)
+    setFailure(undefined)
+    if (refocus) triggerRef.current?.focus()
+  }
+
+  // 點選單外面就關閉（在事件裡 setState，不是在 effect 本體）；移除進行中不關
+  useEffect(() => {
+    if (!open || pending) return
+    const onDown = (e: PointerEvent) => {
+      if (rootRef.current?.contains(e.target as Node)) return
+      setOpen(false)
+      setConfirming(false)
+      setFailure(undefined)
+    }
+    document.addEventListener('pointerdown', onDown)
+    return () => document.removeEventListener('pointerdown', onDown)
+  }, [open, pending])
+  // 打開時焦點移到第一個項目；進入確認時移到「取消」（誤按 Enter 不會移除）
+  useEffect(() => {
+    if (!open) return
+    const target = confirming ? cancelRef.current : itemRef.current
+    target?.focus()
+  }, [open, confirming])
+  // 失敗時焦點移到原因（role="alert"、tabIndex=-1）
+  useEffect(() => {
+    if (failure) alertRef.current?.focus()
+  }, [failure])
+
+  const visible = tasks.filter((t) => t.status !== 'discarded').length
+  const finalizing = tasks.some((t) => t.runState === 'finalizing')
+  const running = tasks.some(
+    (t) =>
+      t.runState === 'running' ||
+      t.runState === 'waiting_permission' ||
+      t.branches.some((b) => b.running)
+  )
+  const confirmText = [
+    `確定要從 Harness 移除 ${repo.name}？`,
+    visible > 0 &&
+      `它的 ${visible} 個任務會一併刪除：停止 Claude，刪除 worktree、分支和對話紀錄，無法復原。`,
+    'repo 資料夾本身不受影響。',
+    running && 'Claude 正在執行，會先停止。'
+  ]
+    .filter(Boolean)
+    .join('')
+
+  const remove = () =>
+    run(async () => {
+      setFailure(undefined)
+      let left: string[]
+      try {
+        left = (await call('repos:remove', repo.id)).leftWorktrees
+      } catch (e) {
+        setFailure(`移除失敗：${errorText(e)}`)
+        return
+      }
+      // repo 會從側欄消失；正在看它的任務時，store 收到 task_removed 會回到新任務
+      setOpen(false)
+      setConfirming(false)
+      showToast(removedText(repo.name, left))
+    })
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && !isComposing(e) && open) {
+      e.stopPropagation()
+      close(true)
+    }
+  }
+
+  return (
+    <div ref={rootRef} className="flex flex-col gap-1" onKeyDown={onKeyDown}>
+      <div className="group flex items-center">
+        {children}
+        <button
+          ref={triggerRef}
+          type="button"
+          aria-label={label}
+          aria-expanded={open}
+          aria-controls={open ? panelId : undefined}
+          onClick={() => (open ? close() : setOpen(true))}
+          className={cx(
+            'flex size-6 flex-none cursor-pointer items-center justify-center rounded-md leading-none text-muted group-hover:opacity-100 hover:bg-surface/60 hover:text-ink focus-visible:opacity-100',
+            open ? 'bg-surface/60 text-ink opacity-100' : 'opacity-0'
+          )}
+        >
+          <span aria-hidden>⋯</span>
+        </button>
+      </div>
+      {open && (
+        <div
+          id={panelId}
+          role="group"
+          aria-label={label}
+          className="mx-1 flex flex-col gap-2 rounded-xl bg-surface p-2 text-[13px] shadow-raised"
+        >
+          {confirming ? (
+            <div className="flex flex-col gap-2.5 rounded-lg bg-danger-soft p-3">
+              <span className="text-danger">{confirmText}</span>
+              <div className="flex gap-2">
+                {/* 進行中用 aria-disabled 而不是 disabled：停用的按鈕會讓焦點掉到 body */}
+                <Button
+                  size="sm"
+                  className="bg-danger font-medium text-white hover:bg-danger/90"
+                  aria-disabled={pending || undefined}
+                  onClick={() => void remove()}
+                >
+                  確定移除
+                </Button>
+                <Button
+                  ref={cancelRef}
+                  size="sm"
+                  variant="ghost"
+                  aria-disabled={pending || undefined}
+                  onClick={() => close(true)}
+                >
+                  取消
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <button
+                ref={itemRef}
+                type="button"
+                disabled={finalizing}
+                onClick={() => setConfirming(true)}
+                className="cursor-pointer rounded-lg px-3 py-2 text-left text-danger hover:bg-danger-soft disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+              >
+                移除 repo
+              </button>
+              {finalizing && (
+                <span className="px-3 pb-1 text-xs text-muted">
+                  有任務正在整理報告，完成後才能移除。
+                </span>
+              )}
+            </>
+          )}
+          {failure && (
+            <div
+              ref={alertRef}
+              role="alert"
+              tabIndex={-1}
+              className="rounded-lg bg-danger-soft px-3 py-2.5 text-xs break-words whitespace-pre-wrap text-danger outline-none"
+            >
+              {failure}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+```
+
+其餘程式碼見上面列出的 Task 區塊。
+
+**Step 4: 確認通過** — `npm test`（52 個檔案、763 個測試）、`npm run typecheck`、`npm run lint`、`npx electron-vite build` 通過。以 `scripts/e2e/driver.mjs` 啟動建置好的 app（不呼叫 Claude）手動確認：寫入兩個 repo（示範 repo 與一個資料夾不存在的 repo），示範 repo 底下放一個用 `git worktree add` 建好的任務（worktree 裡有未提交的檔案）；滑過 repo 列才出現「⋯」；確認文字寫出 1 個任務；移除後 worktree、分支、`tasks/<id>/` 都刪除，`repos.json` 只剩另一個 repo，畫面回到新任務；資料夾不存在的 repo 也能移除並提示。
+
+**Commit**
+
+```bash
+git add docs/plans/2026-10-07-harness-design.md
+git commit -m "docs: design removing a repo from Harness
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat: remove a repo from the sidebar, deleting its tasks
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git add docs/plans/2026-10-07-harness-implementation.md
+git commit -m "docs: record removing a repo in the plan (Task 41)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```

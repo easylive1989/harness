@@ -59,4 +59,7 @@ test('回答反問時可以引用選項：這不算重述（反問的回答寫�
     l.includes('[counter_question question_id=…]')
   )
   expect(rule).toContain('回答反問時可以引用選項，這不算重述')
+  // 只有文字回覆會顯示在使用者的反問下面：回答只放在 context 時，使用者看起來像沒有得到回覆
+  expect(rule).toContain('一定要先輸出文字回答')
+  expect(rule).toContain('不要只把回答寫進 ask_user 的 context')
 })

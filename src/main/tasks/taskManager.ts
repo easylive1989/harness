@@ -89,6 +89,10 @@ function nextId(prefix: string, ids: string[]): string {
   }, 0)
   return `${prefix}${max + 1}`
 }
+/** 使用者停止這一輪後記在時間軸：畫面不會停在 Claude 最後一句話，看起來像沒反應 */
+const STOPPED_NOTICE = '已停止。輸入訊息就能繼續。'
+/** Claude 回答反問時沒寫文字、說明也沒變：卡片裡仍給反問一則回覆 */
+const COUNTER_UPDATED_NOTE = '已依你的反問更新上面的問題與選項。'
 const logError = (what: string) => (e: unknown) => console.error(`[TaskManager] ${what}`, e)
 
 /** p 在 ms 內結束（成功或失敗）回傳 true，逾時回傳 false */
@@ -129,6 +133,10 @@ export class TaskManager {
   private blockedToolUses = new Map<string, { run?: AgentRun; reason: string }>()
   /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
+  /** 使用者按停止的執行：結束時在時間軸記一筆 */
+  private stoppedRuns = new WeakSet<AgentRun>()
+  /** 正在移除的 repo：期間不能為它建立任務 */
+  private removingRepos = new Set<string>()
   /** 報告整理中（邏輯狀態）：進入 reviewing 的同一步就清除 */
   private finalizing = new Set<string>()
   /** 報告整理的 promise，整個流程（含之後的時間軸寫入）結束才移除；whenIdle 用 */
@@ -190,7 +198,7 @@ export class TaskManager {
     return this.d.repo.readTimeline(taskId)
   }
 
-  /** 等這個任務的所有執行、事件與報告整理結束（測試用，也用於關閉 app 前） */
+  /** 等這個任務的所有執行、事件與報告整理結束（測試用，也用於關閉 app 前與刪除任務的紀錄前） */
   async whenIdle(taskId: string) {
     const ofTask = (m: Map<string, Promise<unknown>>) =>
       [...m.entries()].filter(([k]) => k.startsWith(`${taskId}|`)).map(([, p]) => p)
@@ -312,6 +320,7 @@ export class TaskManager {
     const settings = await this.d.repo.getSettings()
     const repo = (await this.d.repo.listRepos()).find((r) => r.id === input.repoId)
     if (!repo) throw new Error('找不到 repo')
+    if (this.removingRepos.has(repo.id)) throw new Error('正在移除這個 repo')
     const request = input.request.trim()
     if (!request) throw new Error('請描述需求')
     const id = this.newId()
@@ -585,6 +594,9 @@ export class TaskManager {
       this.forgetDenied(run)
       const branchId = branchIdOf(channel)
       if (current && !branchId) this.pendingCounter.delete(taskId)
+      // 排在這段執行的所有事件之後
+      if (this.stoppedRuns.delete(run))
+        await this.addTimeline(taskId, { channel, kind: 'system', text: STOPPED_NOTICE })
       await this.update(taskId, (t) => {
         if (current) {
           if (branchId) {
@@ -717,6 +729,14 @@ export class TaskManager {
             }
             const q = t.questions.find((x) => x.id === a.question_id)
             if (q) {
+              // 回答反問卻沒寫文字（例如只把回答放進 context）：補一則回覆，反問底下才不會是空的
+              if (counterReply && q.followups.at(-1)?.role === 'user') {
+                const context = a.context?.trim()
+                q.followups.push({
+                  role: 'assistant',
+                  text: context && context !== q.context?.trim() ? context : COUNTER_UPDATED_NOTE
+                })
+              }
               Object.assign(q, fields, { status: 'open' as const, answer: undefined })
             } else {
               added = true
@@ -1038,7 +1058,10 @@ export class TaskManager {
       if (w.taskId === taskId && w.channel === channel)
         w.resolve({ allow: false, message: '使用者停止了執行' })
     }
-    await this.runs.get(runKey(taskId, channel))?.interrupt()
+    const run = this.runs.get(runKey(taskId, channel))
+    // 這一輪還在進行才算停止（輸入已關閉的執行只是還沒結束）
+    if (run?.active) this.stoppedRuns.add(run)
+    await run?.interrupt()
   }
 
   /**
@@ -1298,18 +1321,7 @@ export class TaskManager {
     return this.exclusive(taskId, async () => {
       const t = this.task(taskId)
       if (this.finalizing.has(taskId)) throw new Error('正在整理報告，請稍候再丟棄')
-      for (const w of [...this.permissionWaiters.values()]) {
-        if (w.taskId === taskId) w.resolve({ allow: false, message: '任務已丟棄' })
-      }
-      const runs = this.runsOf(taskId)
-      runs.forEach(([, r]) => r.abort())
-      // abort 後仍不結束的程序不要卡住丟棄：不再追蹤它
-      await Promise.all(
-        runs.map(async ([key, r]) => {
-          if (await settlesWithin(r.done, this.abortGraceMs)) return
-          this.dropStuckRun(taskId, key.slice(taskId.length + 1) as Channel, r)
-        })
-      )
+      await this.stopAll(taskId, '任務已丟棄')
       await this.d.git.removeWorktree((await this.repoOf(t)).path, t.worktreePath, t.branch)
       await this.update(taskId, (x) => {
         if (x.status !== 'done' && x.status !== 'discarded')
@@ -1318,6 +1330,67 @@ export class TaskManager {
         x.pendingPermission = undefined
       })
     })
+  }
+
+  /**
+   * 從 Harness 移除 repo（repo 資料夾本身不動）：它的任務（含已丟棄的）依序停止 Claude、刪除 worktree 與分支、
+   * 刪除紀錄，全部完成才移除 repo。中途失敗就停下：已刪除的任務不會回來，再移除一次會接著處理剩下的
+   */
+  async removeRepo(repoId: string): Promise<{ leftWorktrees: string[] }> {
+    if (this.shuttingDown) throw new Error('Harness 正在關閉')
+    if (this.removingRepos.has(repoId)) throw new Error('正在移除這個 repo')
+    this.removingRepos.add(repoId)
+    try {
+      const repo = (await this.d.repo.listRepos()).find((r) => r.id === repoId)
+      if (!repo) throw new Error('找不到 repo')
+      const ids = [...this.tasks.values()].filter((t) => t.repoId === repoId).map((t) => t.id)
+      const busy = (id: string) => this.finalizing.has(id) || this.finishing.has(id)
+      if (ids.some(busy)) throw new Error('有任務正在整理報告或收尾，請稍候再移除')
+      // repo 資料夾已不在（搬走或刪掉）時 git 無法清理：worktree 資料夾留著，任務紀錄照樣刪除
+      const gitOk = await this.d.git.isRepo(repo.path)
+      const leftWorktrees: string[] = []
+      for (const id of ids) {
+        await this.exclusive(id, async () => {
+          if (this.finalizing.has(id)) throw new Error('有任務正在整理報告或收尾，請稍候再移除')
+          await this.stopAll(id, '任務已刪除')
+          const t = this.task(id)
+          if (t.status !== 'discarded') {
+            if (gitOk) await this.d.git.removeWorktree(repo.path, t.worktreePath, t.branch)
+            else leftWorktrees.push(t.worktreePath)
+          }
+          await this.forget(id)
+        })
+      }
+      const repos = (await this.d.repo.listRepos()).filter((r) => r.id !== repoId)
+      await this.d.repo.saveRepos(repos)
+      this.d.emit({ type: 'repos', repos })
+      return { leftWorktrees }
+    } finally {
+      this.removingRepos.delete(repoId)
+    }
+  }
+
+  /** 拒絕這個任務等待中的核准、中止它所有的執行；abort 後仍不結束的程序不要卡住呼叫端：不再追蹤它 */
+  private async stopAll(taskId: string, message: string) {
+    for (const w of [...this.permissionWaiters.values()]) {
+      if (w.taskId === taskId) w.resolve({ allow: false, message })
+    }
+    const runs = this.runsOf(taskId)
+    runs.forEach(([, r]) => r.abort())
+    await Promise.all(
+      runs.map(async ([key, r]) => {
+        if (await settlesWithin(r.done, this.abortGraceMs)) return
+        this.dropStuckRun(taskId, key.slice(taskId.length + 1) as Channel, r)
+      })
+    )
+  }
+
+  /** 刪除任務的紀錄：先等它排隊中的事件與寫入都結束，之後不會再有寫入讓資料夾又出現 */
+  private async forget(taskId: string) {
+    await this.whenIdle(taskId)
+    await this.d.repo.deleteTask(taskId)
+    this.tasks.delete(taskId)
+    this.d.emit({ type: 'task_removed', taskId })
   }
 
   changedFiles(taskId: string) {

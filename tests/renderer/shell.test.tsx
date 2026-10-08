@@ -68,8 +68,8 @@ describe('Sidebar', () => {
   test('展開目前任務所在的 repo，其他 repo 收合只顯示數量', () => {
     useStore.setState({ tasks, view: { kind: 'task', taskId: 'a' } })
     render(<Sidebar />)
-    const shop = screen.getByRole('button', { name: /shop-api/ })
-    const web = screen.getByRole('button', { name: /web-dashboard/ })
+    const shop = screen.getByRole('button', { name: /^shop-api/ })
+    const web = screen.getByRole('button', { name: /^web-dashboard/ })
     expect(shop).toHaveAttribute('aria-expanded', 'true')
     expect(web).toHaveAttribute('aria-expanded', 'false')
     expect(web).toHaveTextContent('2')
@@ -85,7 +85,7 @@ describe('Sidebar', () => {
   test('點 repo 標題展開，點任務切換畫面', async () => {
     useStore.setState({ tasks, view: { kind: 'task', taskId: 'a' } })
     render(<Sidebar />)
-    await userEvent.click(screen.getByRole('button', { name: /web-dashboard/ }))
+    await userEvent.click(screen.getByRole('button', { name: /^web-dashboard/ }))
     expect(screen.getByText('待審閱報告 · v1')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /匯出 CSV/ }))
     expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 'b' })
@@ -122,12 +122,12 @@ describe('Sidebar 焦點', () => {
       view: { kind: 'task', taskId: 'a' }
     })
     render(<Sidebar />)
-    const web = screen.getByRole('button', { name: /web-dashboard/ })
+    const web = screen.getByRole('button', { name: /^web-dashboard/ })
     await userEvent.click(web) // 展開 r2
     await userEvent.click(web) // 再手動收合 r2
     expect(web).toHaveAttribute('aria-expanded', 'false')
     act(() => useStore.setState({ view: { kind: 'task', taskId: 'b' } }))
-    expect(screen.getByRole('button', { name: /web-dashboard/ })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: /^web-dashboard/ })).toHaveAttribute(
       'aria-expanded',
       'true'
     )

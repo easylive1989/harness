@@ -187,6 +187,43 @@ describe('TaskManager：建立任務與釐清', () => {
     expect((await tm.timeline(id)).filter((e) => e.kind === 'question')).toHaveLength(1)
   })
 
+  test('回答反問時沒寫文字、只把回答放進說明：卡片裡以新的說明當作回覆', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser({ ...askQ1, context: '連續失敗 5 次就鎖定。' })
+    }
+    const id = await create()
+    // 第二輪：沒有輸出文字，直接以同一 question_id 更新卡片，回答寫在 context
+    claude.script = async ({ call, sink }) => {
+      if (call === 1) await sink.askUser({ ...askQ1, context: 'IP＝登入請求的來源位址。' })
+    }
+    await tm.counterQuestion(id, 'q1', 'IP 是指什麼？')
+    await tm.whenIdle(id)
+    const q = tm.get(id).questions[0]
+    expect(q.followups).toEqual([
+      { role: 'user', text: 'IP 是指什麼？' },
+      { role: 'assistant', text: 'IP＝登入請求的來源位址。' }
+    ])
+    expect(q.context).toBe('IP＝登入請求的來源位址。')
+  })
+
+  test('回答反問時沒寫文字、說明也沒變：卡片裡提示問題已更新，不讓反問沒有回覆', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser(askQ1)
+    }
+    const id = await create()
+    claude.script = async ({ call, sink }) => {
+      if (call === 1) await sink.askUser({ ...askQ1, recommended_option_id: 'acct_ip' })
+    }
+    await tm.counterQuestion(id, 'q1', '哪個比較好？')
+    await tm.whenIdle(id)
+    expect(tm.get(id).questions[0].followups).toEqual([
+      { role: 'user', text: '哪個比較好？' },
+      { role: 'assistant', text: '已依你的反問更新上面的問題與選項。' }
+    ])
+  })
+
   test('重新提問還開著的問題（不是回答反問）時，卡片移到時間軸最新的位置', async () => {
     const { tm, claude, create } = await setup()
     claude.script = async ({ call, sink }) => {
@@ -637,6 +674,26 @@ describe('TaskManager：規格與實作', () => {
     expect(tm.get(id).pendingPermission).toBeUndefined()
     expect(tm.get(id).runState).toBe('idle')
     expect(tm.get(id).error).toBeUndefined()
+  })
+
+  test('停止後時間軸留下「已停止」，畫面不會看起來像 Claude 沒反應', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => {
+      await new Promise(() => undefined) // 卡住，直到被停止
+    }
+    await tm.send(id, 'main', '再看一下 /login')
+    await tm.stop(id, 'main')
+    await tm.whenIdle(id)
+    expect((await tm.timeline(id)).at(-1)).toMatchObject({
+      channel: 'main',
+      kind: 'system',
+      text: '已停止。輸入訊息就能繼續。'
+    })
+    // 沒有執行中的這一輪時按停止：不再多記一筆
+    await tm.stop(id, 'main')
+    await tm.whenIdle(id)
+    expect((await tm.timeline(id)).filter((e) => e.kind === 'system')).toHaveLength(1)
   })
 
   test('分岔的核准請求不影響主線的執行狀態', async () => {
@@ -1298,6 +1355,9 @@ describe('TaskManager：狀態一致性', () => {
     expect(tm.get(id).branches[0].running).toBe(false)
     expect(tm.get(id)).toMatchObject({ runState: 'idle' })
     expect(tm.get(id).error).toBeUndefined()
+    // 「已停止」記在分岔自己的時間軸
+    const stopped = (await tm.timeline(id)).filter((e) => e.kind === 'system')
+    expect(stopped.map((e) => e.channel)).toEqual([`branch:${b.id}`])
   })
 
   test('沒有 session 的中斷任務：resume 重新送出需求', async () => {
@@ -1752,5 +1812,148 @@ describe('TaskManager：附加圖片', () => {
     const last = (await tm.timeline(t.id)).find((e) => e.kind === 'user_text')
     expect(last).toMatchObject({ text: msgDisplay.resume })
     expect(last?.images).toBeUndefined()
+  })
+})
+
+describe('TaskManager：移除 repo', () => {
+  const twoRepos = [
+    { id: 'r1', name: 'shop-api', path: '/repos/shop-api', addedAt: 'x' },
+    { id: 'r2', name: 'web', path: '/repos/web', addedAt: 'x' }
+  ]
+  const hang = () => new Promise<never>(() => undefined)
+
+  test('刪除它的任務（含已丟棄的）、worktree 與紀錄，其他 repo 不受影響', async () => {
+    const { tm, git, events, repo, create } = await setup()
+    await repo.saveRepos(twoRepos)
+    const a = await create()
+    const gone = await create()
+    await tm.discard(gone)
+    const other = (
+      await tm.createTask({
+        repoId: 'r2',
+        request: '匯出 CSV',
+        baseBranch: 'main',
+        model: 'claude-opus-5-5'
+      })
+    ).id
+    await tm.whenIdle(other)
+    const { worktreePath, branch } = tm.get(a)
+    git.calls.length = 0
+    events.length = 0
+    expect(await tm.removeRepo('r1')).toEqual({ leftWorktrees: [] })
+    expect(tm.list().map((t) => t.id)).toEqual([other])
+    expect(() => tm.get(a)).toThrow('找不到任務')
+    expect((await repo.listTasks()).map((t) => t.id)).toEqual([other])
+    expect(await repo.readTimeline(a)).toEqual([])
+    // 已丟棄的任務 worktree 早就刪了，不再呼叫 git
+    expect(git.calls).toEqual([`remove ${worktreePath} ${branch}`])
+    expect((await repo.listRepos()).map((r) => r.id)).toEqual(['r2'])
+    expect(events.filter((e) => e.type === 'task_removed')).toEqual([
+      { type: 'task_removed', taskId: a },
+      { type: 'task_removed', taskId: gone }
+    ])
+    // repo 在所有任務都刪掉之後才移除
+    expect(events.at(-1)).toEqual({ type: 'repos', repos: [twoRepos[1]] })
+  })
+
+  test('先停止執行中的 Claude（主線與分岔）並拒絕等待中的核准', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    const withBranch = await create()
+    let result: PermissionResult | null | undefined
+    claude.script = async ({ options }) => {
+      result = await options.canUseTool!('WebFetch', { url: 'https://example.com' }, signalOf())
+      return hang()
+    }
+    await tm.send(id, 'main', '查一下文件')
+    await until(() => !!tm.get(id).pendingPermission)
+    claude.script = hang
+    await tm.openBranch(withBranch, { title: '討論' })
+    await until(() => tm.get(withBranch).branches[0].running)
+    expect(claude.active).toBe(2)
+    await tm.removeRepo('r1')
+    expect(result).toMatchObject({ behavior: 'deny', message: '任務已刪除' })
+    expect(claude.active).toBe(0)
+    expect(tm.list()).toEqual([])
+  })
+
+  test('有任務在整理報告時拒絕移除，什麼都不動', async () => {
+    const verifying = deferred()
+    const { tm, claude, verify, repo, git, id } = await toImplementing()
+    verify.mockImplementationOnce(async () => {
+      await verifying.promise
+      return []
+    })
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await until(() => tm.get(id).runState === 'finalizing' && verify.mock.calls.length > 0)
+    git.calls.length = 0
+    await expect(tm.removeRepo('r1')).rejects.toThrow('有任務正在整理報告或收尾')
+    expect(tm.get(id).runState).toBe('finalizing')
+    expect((await repo.listRepos()).map((r) => r.id)).toEqual(['r1'])
+    expect(git.calls).toEqual([])
+    verifying.resolve()
+    await tm.whenIdle(id)
+  })
+
+  test('repo 資料夾已不存在時跳過 git 清理，照樣移除並回報留下的 worktree', async () => {
+    const { tm, git, repo, create } = await setup()
+    const id = await create()
+    const { worktreePath } = tm.get(id)
+    git.isRepo = async () => false
+    git.calls.length = 0
+    expect(await tm.removeRepo('r1')).toEqual({ leftWorktrees: [worktreePath] })
+    expect(git.calls).toEqual([])
+    expect(tm.list()).toEqual([])
+    expect(await repo.listTasks()).toEqual([])
+    expect(await repo.listRepos()).toEqual([])
+  })
+
+  test('中途失敗就停下並回報，repo 留著；再移除一次接著處理剩下的', async () => {
+    const { tm, git, repo, create } = await setup()
+    await create()
+    const second = await create()
+    const remove = git.removeWorktree
+    let n = 0
+    git.removeWorktree = async (...args: Parameters<typeof remove>) => {
+      if (++n === 2) throw new Error('worktree 有檔案被鎖住')
+      return remove(...args)
+    }
+    await expect(tm.removeRepo('r1')).rejects.toThrow('worktree 有檔案被鎖住')
+    expect(tm.list().map((t) => t.id)).toEqual([second])
+    expect(tm.get(second).status).toBe('clarifying')
+    expect((await repo.listRepos()).map((r) => r.id)).toEqual(['r1'])
+    await expect(tm.removeRepo('r1')).resolves.toEqual({ leftWorktrees: [] })
+    expect(tm.list()).toEqual([])
+    expect(await repo.listRepos()).toEqual([])
+  })
+
+  test('移除進行中不能為這個 repo 建立任務或再移除一次；移除後找不到 repo', async () => {
+    const { tm, git, create } = await setup()
+    await create()
+    const removing = deferred()
+    const remove = git.removeWorktree
+    let started = false
+    git.removeWorktree = async (...args: Parameters<typeof remove>) => {
+      started = true
+      await removing.promise
+      return remove(...args)
+    }
+    const done = tm.removeRepo('r1')
+    await until(() => started)
+    await expect(
+      tm.createTask({
+        repoId: 'r1',
+        request: '另一個需求',
+        baseBranch: 'main',
+        model: 'claude-opus-5-5'
+      })
+    ).rejects.toThrow('正在移除這個 repo')
+    await expect(tm.removeRepo('r1')).rejects.toThrow('正在移除這個 repo')
+    removing.resolve()
+    await done
+    await expect(tm.removeRepo('r1')).rejects.toThrow('找不到 repo')
   })
 })

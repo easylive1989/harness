@@ -95,6 +95,10 @@ export class Repository {
   saveTask(t: Task) {
     return this.store.writeJson(`tasks/${t.id}/task.json`, t)
   }
+  /** 刪除任務的所有紀錄（task.json、時間軸、報告） */
+  deleteTask(taskId: string) {
+    return this.store.remove(`tasks/${taskId}`)
+  }
 
   appendTimeline(taskId: string, e: TimelineEvent) {
     return this.store.appendJsonl(`tasks/${taskId}/timeline.jsonl`, e)

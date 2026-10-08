@@ -28,6 +28,29 @@ describe('store.apply', () => {
     useStore.getState().apply({ type: 'task', task: makeTask({ id: 'a' }) })
     expect(useStore.getState().tasks.a.id).toBe('a')
   })
+  test('task_removed 移除任務與它的時間軸、分岔狀態與回饋；正在看它時回到新任務', () => {
+    useStore.setState({
+      tasks: { a: makeTask({ id: 'a' }), b: makeTask({ id: 'b' }) },
+      timelines: { a: [], b: [] },
+      activeBranch: { a: 'b1' },
+      branchDrafts: { a: { excerpt: '引用', seq: 1 } },
+      feedback: { a: [{ anchor: 'section:tests', label: '新增的測試', text: '補測試' }] },
+      view: { kind: 'task', taskId: 'a' }
+    })
+    useStore.getState().apply({ type: 'task_removed', taskId: 'a' })
+    const s = useStore.getState()
+    expect(Object.keys(s.tasks)).toEqual(['b'])
+    expect(Object.keys(s.timelines)).toEqual(['b'])
+    expect(s.activeBranch.a).toBeUndefined()
+    expect(s.branchDrafts.a).toBeUndefined()
+    expect(s.feedback.a).toBeUndefined()
+    expect(s.view).toEqual({ kind: 'new' })
+    // 沒在看的任務被移除：畫面不動
+    useStore.setState({ view: { kind: 'settings' } })
+    useStore.getState().apply({ type: 'task_removed', taskId: 'b' })
+    expect(useStore.getState().tasks).toEqual({})
+    expect(useStore.getState().view).toEqual({ kind: 'settings' })
+  })
   test('timeline 事件只附加到已載入的時間軸，並去重', () => {
     const e = { id: 'e1', ts: '', channel: 'main' as const, kind: 'user_text' as const, text: 'hi' }
     useStore.getState().apply({ type: 'timeline', taskId: 'a', event: e })

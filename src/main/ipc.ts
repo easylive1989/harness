@@ -80,6 +80,7 @@ export function registerIpc(d: IpcDeps) {
       d.emitRepos([...repos, repo])
       return repo
     },
+    'repos:remove': (repoId) => d.tasks.removeRepo(assertId(repoId, 'repo')),
     'repos:branches': async (repoId) => {
       assertId(repoId, 'repo')
       const r = (await d.repo.listRepos()).find((x) => x.id === repoId)

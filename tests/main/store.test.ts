@@ -71,5 +71,22 @@ describe('Store', () => {
     await expect(store.writeJson('a/../../evil.json', {})).rejects.toThrow('超出')
     await expect(store.appendJsonl('/etc/x.jsonl', {})).rejects.toThrow('超出')
     await expect(store.list('..')).rejects.toThrow('超出')
+    await expect(store.remove('..')).rejects.toThrow('超出')
+  })
+
+  test('remove 刪掉整個資料夾；不存在時不算錯', async () => {
+    await store.writeJson('tasks/a/task.json', { id: 'a' })
+    await store.appendJsonl('tasks/a/timeline.jsonl', { n: 1 })
+    await store.writeJson('tasks/b/task.json', { id: 'b' })
+    await store.remove('tasks/a')
+    expect(await store.list('tasks')).toEqual(['b'])
+    await expect(store.remove('tasks/a')).resolves.toBeUndefined()
+  })
+
+  test('remove 不能刪 store 根目錄本身', async () => {
+    await store.writeJson('repos.json', [])
+    await expect(store.remove('.')).rejects.toThrow('不能刪除')
+    await expect(store.remove('tasks/..')).rejects.toThrow('不能刪除')
+    expect(await store.readJson('repos.json', null)).toEqual([])
   })
 })
