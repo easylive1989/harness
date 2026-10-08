@@ -37,8 +37,10 @@ export default function App() {
         載入中…
       </div>
     )
+  // relative + overflow-clip：沒有定位祖先的絕對定位元素（例如架構圖的 sr-only 連線清單）以外框為準並被裁掉，
+  // 文件不會比視窗高；否則捲到報告底再滾、或跳到某個位置（scrollIntoView）會把整個視窗往上捲走
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative flex h-full flex-col overflow-clip">
       <TitleBar title={title} />
       <div className="flex min-h-0 flex-1 gap-3 px-3 pb-3">
         {/* 設定頁自帶左欄（分類與返回） */}

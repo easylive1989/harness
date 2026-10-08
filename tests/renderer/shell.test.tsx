@@ -171,6 +171,14 @@ describe('TaskScreen / StageNav', () => {
     expect(screen.getByText('shop-api · 任務 B')).toBeInTheDocument()
     expect(stage(/規格/)).toHaveAttribute('aria-pressed', 'true')
   })
+
+  test('App 外框不會捲動：沒有定位祖先的絕對定位元素（例如架構圖的 sr-only 連線清單）留在外框裡', () => {
+    useStore.setState({ init: () => () => {} })
+    const { container } = render(<App />)
+    // relative：當它們的 containing block；overflow-clip：裁掉且不是捲動容器，
+    // 文件不會變高，捲到報告底再滾或 scrollIntoView 都不會把整個視窗捲走
+    expect(container.firstElementChild).toHaveClass('relative', 'overflow-clip')
+  })
 })
 
 describe('Toast', () => {
