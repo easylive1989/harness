@@ -103,6 +103,31 @@ describe('Repository', () => {
     warn.mockRestore()
   })
 
+  test('deleteTask 刪掉任務的資料夾（task.json、時間軸、報告），其他任務不受影響', async () => {
+    await repo.saveTask(makeTask({ id: 'a' }))
+    await repo.saveTask(makeTask({ id: 'b' }))
+    await repo.appendTimeline('a', {
+      id: 'e1',
+      ts: 'x',
+      channel: 'main',
+      kind: 'user_text',
+      text: 'hi'
+    })
+    await repo.saveReport({
+      version: 1,
+      taskId: 'a',
+      input: sampleReport,
+      diff: '',
+      stats: { files: 0, additions: 0, deletions: 0, perFile: [] },
+      verification: [],
+      createdAt: 'x'
+    })
+    await repo.deleteTask('a')
+    expect((await repo.listTasks()).map((t) => t.id)).toEqual(['b'])
+    expect(await repo.readTimeline('a')).toEqual([])
+    await expect(repo.getReport('a', 1)).rejects.toThrow('找不到報告')
+  })
+
   test('時間軸 append 與讀取', async () => {
     await repo.appendTimeline('a', {
       id: 'e1',

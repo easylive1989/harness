@@ -27,6 +27,8 @@ export interface IpcApi {
   'settings:set': (patch: Partial<Settings>) => Settings
   'repos:list': () => Repo[]
   'repos:pick': () => Repo | null
+  /** 從 Harness 移除 repo（資料夾本身不動）；leftWorktrees 是 repo 資料夾已不存在而沒刪掉的 worktree */
+  'repos:remove': (repoId: string) => { leftWorktrees: string[] }
   'repos:branches': (repoId: string) => { branches: string[]; current: string }
   'tasks:list': () => Task[]
   'tasks:create': (input: CreateTaskInput) => Task
@@ -65,6 +67,8 @@ export type AppEvent =
   | { type: 'task'; task: Task }
   | { type: 'timeline'; taskId: string; event: TimelineEvent }
   | { type: 'repos'; repos: Repo[] }
+  /** 任務的紀錄已刪除（移除 repo 時） */
+  | { type: 'task_removed'; taskId: string }
 
 export interface HarnessBridge {
   invoke<C extends IpcChannel>(

@@ -6,6 +6,7 @@ import { call } from '../api'
 import { taskStatusLabel } from '../lib/stage'
 import { useShallow } from 'zustand/react/shallow'
 import { useStore } from '../store'
+import { RepoMenu } from './RepoMenu'
 import { Button, cx, Icons, TONE_TEXT } from './ui'
 
 function RepoBadge({ name, active }: { name: string; active: boolean }) {
@@ -98,21 +99,23 @@ export function Sidebar() {
           const expanded = toggled[r.id] ?? r.id === focusRepo
           return (
             <div key={r.id} className="flex flex-col gap-1">
-              <button
-                type="button"
-                aria-expanded={expanded}
-                onClick={() => setToggled((s) => ({ ...s, [r.id]: !expanded }))}
-                className={cx(
-                  'flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1 text-left text-[13px]',
-                  expanded ? 'font-bold text-ink' : 'text-ink-2'
-                )}
-              >
-                <RepoBadge name={r.name} active={expanded} />
-                <span className="min-w-0 truncate">{r.name}</span>
-                {!expanded && ts.length > 0 && (
-                  <span className="ml-auto text-xs text-muted-2">{ts.length}</span>
-                )}
-              </button>
+              <RepoMenu repo={r} tasks={Object.values(tasks).filter((t) => t.repoId === r.id)}>
+                <button
+                  type="button"
+                  aria-expanded={expanded}
+                  onClick={() => setToggled((s) => ({ ...s, [r.id]: !expanded }))}
+                  className={cx(
+                    'flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1 text-left text-[13px]',
+                    expanded ? 'font-bold text-ink' : 'text-ink-2'
+                  )}
+                >
+                  <RepoBadge name={r.name} active={expanded} />
+                  <span className="min-w-0 truncate">{r.name}</span>
+                  {!expanded && ts.length > 0 && (
+                    <span className="ml-auto text-xs text-muted-2">{ts.length}</span>
+                  )}
+                </button>
+              </RepoMenu>
               {expanded &&
                 ts.map((t) => (
                   <TaskItem

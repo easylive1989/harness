@@ -117,7 +117,19 @@ export const useStore = create<State>((set, get) => ({
   apply(e) {
     if (e.type === 'task') set((s) => ({ tasks: { ...s.tasks, [e.task.id]: e.task } }))
     else if (e.type === 'repos') set({ repos: e.repos })
-    else if (e.type === 'timeline') {
+    else if (e.type === 'task_removed') {
+      // 移除 repo 時一併刪除的任務：正在看它就回到新任務
+      const drop = <T>(m: Record<string, T>) =>
+        Object.fromEntries(Object.entries(m).filter(([id]) => id !== e.taskId))
+      set((s) => ({
+        tasks: drop(s.tasks),
+        timelines: drop(s.timelines),
+        activeBranch: drop(s.activeBranch),
+        branchDrafts: drop(s.branchDrafts),
+        feedback: drop(s.feedback),
+        view: s.view.kind === 'task' && s.view.taskId === e.taskId ? { kind: 'new' } : s.view
+      }))
+    } else if (e.type === 'timeline') {
       const buffer = loadingTimelines.get(e.taskId)
       if (buffer) {
         buffer.push(e.event)
