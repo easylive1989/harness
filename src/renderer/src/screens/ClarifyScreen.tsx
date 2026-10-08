@@ -40,8 +40,10 @@ export function ClarifyScreen({
   // 卡片內容（反問回覆等）只改 task 不加事件，所以也看 updatedAt
   const {
     ref: scrollRef,
+    contentRef,
     onScroll,
-    stick
+    stick,
+    unstick
   } = useStickToBottom<HTMLDivElement>(`${events.length}:${task.updatedAt}`, task.id, events.length)
   // 主線執行中不能分岔（主程序會拒絕），但可以插話
   const busy = isBusy(task)
@@ -63,9 +65,11 @@ export function ClarifyScreen({
     ].find((x) => x.dataset.question === focusQuestion.id)
     if (!el) return
     focused.current = focusQuestion
+    // 不再黏在底部：平滑捲動途中有新事件也不會被拉回底部
+    unstick()
     reveal(el, 'center')
     flash(el)
-  }, [focusQuestion, events, scrollRef])
+  }, [focusQuestion, events, scrollRef, unstick])
   const createBranch = (excerpt: string, question: string) =>
     runBranch(async () => {
       const b = await act(() =>
@@ -93,7 +97,7 @@ export function ClarifyScreen({
             onScroll={onScroll}
             className="flex min-h-0 flex-1 flex-col overflow-y-auto px-7 pt-2 pb-6"
           >
-            <div className="mx-auto flex w-full max-w-[800px] flex-col gap-5">
+            <div ref={contentRef} className="mx-auto flex w-full max-w-[800px] flex-col gap-5">
               <Timeline
                 task={task}
                 channel="main"

@@ -227,6 +227,7 @@ export function ImplementScreen({
   // 步驟與卡片只改 task 不加事件，所以也看 updatedAt
   const {
     ref: scrollRef,
+    contentRef,
     onScroll,
     stick
   } = useStickToBottom<HTMLDivElement>(`${events.length}:${task.updatedAt}`, task.id, events.length)
@@ -313,7 +314,7 @@ export function ImplementScreen({
             onScroll={onScroll}
             className="flex min-h-0 flex-1 flex-col overflow-y-auto px-7 pt-2 pb-6"
           >
-            <div className="mx-auto flex w-full max-w-[800px] flex-col gap-2.5">
+            <div ref={contentRef} className="mx-auto flex w-full max-w-[800px] flex-col gap-2.5">
               <div className="mb-1.5 flex items-center gap-3">
                 <span className="text-[13px] text-muted">進度</span>
                 <span

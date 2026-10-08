@@ -203,6 +203,7 @@ export function BranchPanel({
   const replied = list.some((e) => e.kind === 'assistant_text')
   const {
     ref: scrollRef,
+    contentRef,
     onScroll,
     stick
   } = useStickToBottom<HTMLDivElement>(
@@ -273,38 +274,40 @@ export function BranchPanel({
           <div
             ref={scrollRef}
             onScroll={onScroll}
-            className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-5 py-2 text-[13px]"
+            className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 py-2 text-[13px]"
           >
-            {fromIndex > 0 && (
-              <span className="text-xs text-muted-2">
-                從問題 {fromIndex} 分出，帶著主線的上下文
-              </span>
-            )}
-            {list.map((e) => (
-              <BranchMessage key={e.id} e={e} />
-            ))}
-            <LiveStatus text={b.running && 'Claude 正在回覆…'} />
-            {b.error && (
-              <div role="alert" className="rounded-xl bg-danger-soft px-3.5 py-3 text-danger">
-                {b.error}
-              </div>
-            )}
-            {b.conclusion && (
-              <div className="flex flex-col gap-1 rounded-[14px] bg-decision px-3.5 py-3">
-                <span className="text-xs font-medium text-decision-ink">
-                  {b.status === 'concluded' ? '已帶回主線的結論' : '帶回主線的結論（預覽）'}
+            <div ref={contentRef} className="flex flex-col gap-3.5">
+              {fromIndex > 0 && (
+                <span className="text-xs text-muted-2">
+                  從問題 {fromIndex} 分出，帶著主線的上下文
                 </span>
-                <span>{b.conclusion.decision}</span>
-                {b.conclusion.rationale && (
-                  <span className="text-decision-body">原因：{b.conclusion.rationale}</span>
-                )}
-                {b.conclusion.deferred.length > 0 && (
-                  <span className="text-decision-body">
-                    延後：{b.conclusion.deferred.join('；')}
+              )}
+              {list.map((e) => (
+                <BranchMessage key={e.id} e={e} />
+              ))}
+              <LiveStatus text={b.running && 'Claude 正在回覆…'} />
+              {b.error && (
+                <div role="alert" className="rounded-xl bg-danger-soft px-3.5 py-3 text-danger">
+                  {b.error}
+                </div>
+              )}
+              {b.conclusion && (
+                <div className="flex flex-col gap-1 rounded-[14px] bg-decision px-3.5 py-3">
+                  <span className="text-xs font-medium text-decision-ink">
+                    {b.status === 'concluded' ? '已帶回主線的結論' : '帶回主線的結論（預覽）'}
                   </span>
-                )}
-              </div>
-            )}
+                  <span>{b.conclusion.decision}</span>
+                  {b.conclusion.rationale && (
+                    <span className="text-decision-body">原因：{b.conclusion.rationale}</span>
+                  )}
+                  {b.conclusion.deferred.length > 0 && (
+                    <span className="text-decision-body">
+                      延後：{b.conclusion.deferred.join('；')}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {!readOnly && b.status !== 'concluded' && (
