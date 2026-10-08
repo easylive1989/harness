@@ -45,6 +45,9 @@ test('Claude 的文字：過場句也用繁體中文；提問、提出規格、�
     '「我已在介面上送出問題」',
     '只寫與問題不重複的脈絡（1–2 句）',
     '呼叫 propose_spec、conclude_branch、submit_report 前後同理',
+    // 標記是介面送的：Claude 不要叫使用者「送出 [conclude]」，改指向介面上的按鈕
+    '使用者看不到也不會自己輸入這些標記',
+    '「帶回主線」',
     '不要在文字中重述規格、結論或報告的內容'
   ]) {
     expect(MAIN_SYSTEM_APPEND).toContain(s)
