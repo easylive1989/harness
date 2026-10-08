@@ -14,7 +14,7 @@ import { shortTime } from '../lib/format'
 import { useStore } from '../store'
 import { reveal } from '../lib/reveal'
 import { diffAnchor, fileAnchor, findAnchor } from './anchors'
-import { ArchitectureDiagram } from './ArchitectureDiagram'
+import { ArchitectureDiagram, MIN_SCALE } from './ArchitectureDiagram'
 import { BLOCK_DEFAULT_H } from './blocks'
 import { CommentButton, CommentForm, FeedbackNote } from './comments'
 import { CustomBlockFrame } from './CustomBlockFrame'
@@ -254,6 +254,10 @@ export function ReportView({
       (side) => layoutGraph(r.architecture[side].nodes, r.architecture[side].edges).width
     )
   )
+  // 每欄的基本寬度：放得下縮到 MIN_SCALE 的圖，加上欄內左右留白（p-5）。兩欄並排放不下時
+  // flex-wrap 讓「之後」換到下一列，兩欄各佔滿整列（上下排列），圖就不必縮到看不清或被切掉。
+  // 只用 CSS：匯出的 HTML 沒有 script 也一樣
+  const archColumn = `1 1 ${Math.ceil(fitWidth * MIN_SCALE) + 40}px`
   const changed = new Set(report.stats.perFile.map((f) => f.path))
   const { ran, passed, skipped, state: verifyState } = summarizeRuns(report.verification)
   const allPassed = verifyState === 'passed'
@@ -405,9 +409,14 @@ export function ReportView({
         }
       >
         {slot('section:architecture', '架構前後對照')}
-        <div className="grid grid-cols-2 gap-4">
+        <div className="flex flex-wrap gap-4">
           {(['before', 'after'] as const).map((side) => (
-            <div key={side} className="flex min-w-0 flex-col gap-3 rounded-2xl bg-fill-2 p-5">
+            <div
+              key={side}
+              data-arch-side={side}
+              className="flex min-w-0 flex-col gap-3 rounded-2xl bg-fill-2 p-5"
+              style={{ flex: archColumn }}
+            >
               <span
                 className={cx(
                   'text-[13px] font-bold',

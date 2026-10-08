@@ -13,8 +13,11 @@ const STATUS_CLASS = {
   unchanged: 'bg-surface'
 } as const
 const STATUS_LABEL = { added: '新增', modified: '修改', unchanged: '未變' } as const
-/** 縮小的下限；欄位再窄就水平捲動 */
-const MIN_SCALE = 0.6
+/**
+ * 縮小的下限：前後兩欄並排時，每欄至少要放得下這個比例的圖，否則上下排列（ReportView）；
+ * 上下排列後欄位仍然太窄才水平捲動
+ */
+export const MIN_SCALE = 0.6
 /** 箭頭與方塊之間留的空隙 */
 const GAP = 3
 

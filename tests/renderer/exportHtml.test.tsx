@@ -96,12 +96,14 @@ test('匯出檔名去掉控制字元與不能用在檔名的字元，並限制�
 test('前後兩張架構圖用同樣的比例縮放（匯出檔沒有 script 也一樣）', async () => {
   const report = makeReport()
   // 之後的圖有一層並排兩個方塊：寬 400；之前的圖寬 180
-  report.input.architecture.after = {
-    nodes: [
-      ...report.input.architecture.after.nodes,
-      { id: 'redis', label: 'Redis', status: 'unchanged', files: [] }
-    ],
-    edges: [...report.input.architecture.after.edges, { from: 'guard', to: 'redis' }]
+  // （換掉整個 architecture：makeReport 的 input 與 sampleReport 共用同一個物件，不能就地改）
+  const { before, after } = report.input.architecture
+  report.input.architecture = {
+    before,
+    after: {
+      nodes: [...after.nodes, { id: 'redis', label: 'Redis', status: 'unchanged', files: [] }],
+      edges: [...after.edges, { from: 'guard', to: 'redis' }]
+    }
   }
   const html = await buildReportHtml(makeTask(), report)
   const widths = [...parse(html).querySelectorAll('svg[role="group"]')].map((svg) =>
@@ -111,6 +113,30 @@ test('前後兩張架構圖用同樣的比例縮放（匯出檔沒有 script 也
     'width:min(180px, 45%);min-width:108px',
     'width:min(400px, 100%);min-width:240px'
   ])
+})
+
+test('前後兩張架構圖：欄寬放不下縮到 60% 的圖時上下排列（只用 CSS，匯出檔也一樣）', async () => {
+  const report = makeReport()
+  // 之後的圖最寬的一層有三個方塊：寬 3 × 180 + 2 × 40 = 620
+  const { before, after } = report.input.architecture
+  report.input.architecture = {
+    before,
+    after: {
+      nodes: [
+        ...after.nodes,
+        { id: 'redis', label: 'Redis', status: 'unchanged', files: [] },
+        { id: 'clock', label: '時鐘', status: 'added', files: [] }
+      ],
+      edges: [...after.edges, { from: 'guard', to: 'redis' }, { from: 'guard', to: 'clock' }]
+    }
+  }
+  const html = await buildReportHtml(makeTask(), report)
+  const svgs = [...parse(html).querySelectorAll('svg[role="group"]')]
+  const columns = svgs.map((svg) => svg.closest('[data-arch-side]') as HTMLElement)
+  expect(columns.map((c) => c.dataset.archSide)).toEqual(['before', 'after'])
+  // 每欄的基本寬度 = 620 × 0.6 + 左右留白 40：兩欄並排放不下就換行，各自佔滿整列
+  expect(columns.map((c) => c.getAttribute('style'))).toEqual(['flex:1 1 412px', 'flex:1 1 412px'])
+  expect(columns[0].parentElement?.className).toContain('flex-wrap')
 })
 
 test('大 diff：超過 3000 行的檔案與鎖定檔只放摘要，匯出檔維持小', async () => {
