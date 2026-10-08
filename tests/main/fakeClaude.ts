@@ -24,7 +24,13 @@ export const assistantText = (text: string) => ({
  * interrupt() 或 abort 會讓 script 提早結束：interrupt 照常送 result，abort 則丟出錯誤。
  */
 export class FakeClaude {
-  calls: { prompt: string; options: Options; tools: HarnessToolName[] }[] = []
+  /** images：第一則訊息附帶的圖片（image content block） */
+  calls: {
+    prompt: string
+    options: Options
+    tools: HarnessToolName[]
+    images: { mediaType: string; data: string }[]
+  }[] = []
   script: Script = async () => []
   /** 下一次 query() 直接丟出錯誤（模擬 CLI 無法啟動） */
   failNextQuery?: Error
@@ -86,8 +92,18 @@ export class FakeClaude {
       try {
         const it = prompt[Symbol.asyncIterator]()
         const first = await it.next()
-        const text = String((first.value as SDKUserMessage).message.content)
-        record({ prompt: text, options, tools })
+        const content = (first.value as SDKUserMessage).message.content
+        const blocks = typeof content === 'string' ? [] : content
+        const text =
+          typeof content === 'string'
+            ? content
+            : blocks.map((b) => (b.type === 'text' ? b.text : '')).join('')
+        const images = blocks.flatMap((b) =>
+          b.type === 'image' && b.source.type === 'base64'
+            ? [{ mediaType: b.source.media_type, data: b.source.data }]
+            : []
+        )
+        record({ prompt: text, options, tools, images })
         const sessionId = options.forkSession ? `fork-${call}` : (options.resume ?? `sess-${call}`)
         yield { type: 'system', subtype: 'init', session_id: sessionId } as unknown as SDKMessage
         const outcome = await Promise.race([

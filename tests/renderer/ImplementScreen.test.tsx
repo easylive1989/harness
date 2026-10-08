@@ -169,7 +169,7 @@ test('等待核准：步驟與對應的指令標示等待核准，並顯示核�
 test('插話送到主線；停止中斷執行，連點只送一次', async () => {
   renderImpl(implTask())
   await userEvent.type(screen.getByRole('textbox', { name: '插話' }), '順便改錯誤訊息{Enter}')
-  expect(call).toHaveBeenCalledWith('tasks:send', 't1', 'main', '順便改錯誤訊息')
+  expect(call).toHaveBeenCalledWith('tasks:send', 't1', 'main', '順便改錯誤訊息', [])
   const release = holdNextCall(vi.mocked(call))
   const stop = screen.getByRole('button', { name: '停止' })
   await userEvent.dblClick(stop)

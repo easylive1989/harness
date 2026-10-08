@@ -1735,6 +1735,86 @@ describe('TaskManager：分岔的錯誤', () => {
   })
 })
 
+describe('TaskManager：附加圖片', () => {
+  const png = { mediaType: 'image/png' as const, data: 'iVBORw0KGgo=', name: 'shot.png' }
+  const jpeg = { mediaType: 'image/jpeg' as const, data: '/9j/4AAQ' }
+
+  test('需求附加的圖片：存檔、記在任務與時間軸上，並以 image block 送給 Claude', async () => {
+    const { tm, claude, repo } = await setup()
+    const t = await tm.createTask({
+      repoId: 'r1',
+      request: '照截圖修版面',
+      images: [png, jpeg],
+      baseBranch: 'main',
+      model: 'claude-opus-5-5'
+    })
+    await tm.whenIdle(t.id)
+    expect(claude.calls[0].prompt).toBe('照截圖修版面')
+    expect(claude.calls[0].images).toEqual([
+      { mediaType: 'image/png', data: png.data },
+      { mediaType: 'image/jpeg', data: jpeg.data }
+    ])
+    const refs = tm.get(t.id).requestImages!
+    expect(refs).toMatchObject([
+      { mediaType: 'image/png', name: 'shot.png' },
+      { mediaType: 'image/jpeg' }
+    ])
+    const [userText] = await tm.timeline(t.id)
+    expect(userText).toMatchObject({ kind: 'user_text', text: '照截圖修版面', images: refs })
+    // 時間軸只記參照，不內嵌圖片資料
+    expect(JSON.stringify(userText)).not.toContain(png.data)
+    expect((await repo.readImage(t.id, refs[0])).toString('base64')).toBe(png.data)
+    expect(await tm.readImage(t.id, refs[1])).toBe(`data:image/jpeg;base64,${jpeg.data}`)
+  })
+
+  test('對話與分岔可以只送圖片；沒有文字也沒有圖片時拒絕', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async () => [assistantText('收到')]
+    const id = await create()
+    await tm.sendMessage(id, 'main', '', [png])
+    await tm.whenIdle(id)
+    expect(claude.calls[1]).toMatchObject({ prompt: '', images: [{ data: png.data }] })
+    const b = await tm.openBranch(id, { title: '版面' })
+    await tm.whenIdle(id)
+    await tm.sendMessage(id, `branch:${b.id}`, '這張呢', [jpeg])
+    await tm.whenIdle(id)
+    expect(claude.calls.at(-1)).toMatchObject({ prompt: '這張呢', images: [{ data: jpeg.data }] })
+    const users = (await tm.timeline(id)).filter((e) => e.kind === 'user_text')
+    expect(users.find((e) => e.channel === 'main' && e.images)).toMatchObject({
+      text: '',
+      images: [{ mediaType: 'image/png', name: 'shot.png' }]
+    })
+    expect(users.at(-1)).toMatchObject({ channel: `branch:${b.id}`, text: '這張呢', images: [{}] })
+    await expect(tm.sendMessage(id, 'main', '  ', [])).rejects.toThrow('請輸入訊息或附加圖片')
+  })
+
+  test('第一輪沒拿到 session 就中斷：繼續時連同需求的圖片一起重送', async () => {
+    const { tm, claude } = await setup()
+    claude.failNextQuery = new Error('spawn failed')
+    await expect(
+      tm.createTask({
+        repoId: 'r1',
+        request: '照截圖修版面',
+        images: [png],
+        baseBranch: 'main',
+        model: 'claude-opus-5-5'
+      })
+    ).rejects.toThrow('spawn failed')
+    const [t] = tm.list()
+    expect(t.mainSessionId).toBeUndefined()
+    await tm.resume(t.id)
+    await tm.whenIdle(t.id)
+    expect(claude.calls[0]).toMatchObject({
+      prompt: '照截圖修版面',
+      images: [{ mediaType: 'image/png', data: png.data }]
+    })
+    // 時間軸只顯示「繼續」，不重複顯示圖片
+    const last = (await tm.timeline(t.id)).find((e) => e.kind === 'user_text')
+    expect(last).toMatchObject({ text: msgDisplay.resume })
+    expect(last?.images).toBeUndefined()
+  })
+})
+
 describe('TaskManager：移除 repo', () => {
   const twoRepos = [
     { id: 'r1', name: 'shop-api', path: '/repos/shop-api', addedAt: 'x' },

@@ -1,6 +1,14 @@
 // src/main/ipcGuards.ts
 // IPC 邊界的輸入檢查（純函式，不依賴 electron，可單元測試）
 import { isAbsolute, resolve, sep } from 'node:path'
+import {
+  base64Bytes,
+  type ImageInput,
+  type ImageRef,
+  isImageMediaType,
+  MAX_IMAGE_BYTES,
+  MAX_IMAGES
+} from '@shared/images'
 import { type Channel, type ClaudeStatus, MODELS, type ModelId, type Settings } from '@shared/types'
 
 const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/
@@ -38,6 +46,33 @@ export function assertString(
   if (typeof value !== 'string' || value.length > max || (!allowEmpty && !value.trim()))
     throw new Error(`無效的${what}`)
   return value
+}
+
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
+
+/** 單張附加圖片：格式在白名單內、資料是 base64 且不超過大小上限 */
+export function assertImageRef(value: unknown): ImageRef {
+  const v = value as Partial<ImageRef> | null
+  if (!v || typeof v !== 'object' || !isSafeId(v.id) || !isImageMediaType(v.mediaType))
+    throw new Error('無效的圖片')
+  return { id: v.id, mediaType: v.mediaType }
+}
+
+/** 訊息附加的圖片：沒有附加時回傳空陣列 */
+export function assertImages(value: unknown): ImageInput[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) throw new Error('無效的圖片')
+  if (value.length > MAX_IMAGES) throw new Error(`一則訊息最多附加 ${MAX_IMAGES} 張圖片`)
+  return value.map((raw: unknown) => {
+    const img = raw as Partial<ImageInput> | null
+    if (!img || typeof img !== 'object' || !isImageMediaType(img.mediaType))
+      throw new Error('只支援 PNG、JPEG、GIF、WebP 圖片')
+    if (typeof img.data !== 'string' || !img.data || !BASE64.test(img.data))
+      throw new Error('無效的圖片資料')
+    if (base64Bytes(img.data) > MAX_IMAGE_BYTES) throw new Error('單張圖片不能超過 5 MB')
+    const name = typeof img.name === 'string' ? img.name.slice(0, 255) : undefined
+    return { mediaType: img.mediaType, data: img.data, ...(name ? { name } : {}) }
+  })
 }
 
 export function assertModel(value: unknown): ModelId {

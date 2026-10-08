@@ -38,7 +38,7 @@ test('顯示主線時間軸，從輸入框送出訊息', async () => {
   const send = screen.getByRole('button', { name: '送出' })
   expect(send).toBeDisabled()
   await userEvent.type(screen.getByRole('textbox', { name: '訊息' }), '也要記錄稽核日誌{Enter}')
-  expect(call).toHaveBeenCalledWith('tasks:send', 't1', 'main', '也要記錄稽核日誌')
+  expect(call).toHaveBeenCalledWith('tasks:send', 't1', 'main', '也要記錄稽核日誌', [])
   expect(screen.getByRole('textbox', { name: '訊息' })).toHaveValue('')
 })
 

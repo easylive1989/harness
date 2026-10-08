@@ -1,10 +1,13 @@
 // src/renderer/src/components/Composer.tsx
 import { type FormEvent, type ReactNode, type Ref, useState } from 'react'
+import type { ImageInput } from '@shared/images'
 import type { Channel } from '@shared/types'
 import { call } from '../api'
 import { blockImeSubmit } from '../lib/ime'
+import { useImageAttachments } from '../lib/useImageAttachments'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
+import { AttachButton, AttachmentPreview } from './Attachments'
 import { cx, Icons } from './ui'
 
 /**
@@ -49,45 +52,57 @@ export function Composer({
 }: {
   placeholder: string
   disabled?: boolean
-  onSend: (text: string) => void
+  /** images：附加的圖片（貼上、拖放或選擇檔案），沒有時是空陣列 */
+  onSend: (text: string, images: ImageInput[]) => void
   extra?: ReactNode
   label?: string
   /** 畫面需要把焦點放回輸入框時用（例如核准對話框關掉後） */
   inputRef?: Ref<HTMLInputElement>
 }) {
   const [text, setText] = useState('')
+  const attach = useImageAttachments()
+  const empty = !text.trim() && !attach.items.length
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    if (!text.trim() || disabled) return
-    onSend(text.trim())
+    if (empty || disabled) return
+    onSend(text.trim(), attach.images)
     setText('')
+    attach.clear()
   }
   return (
     <form
       onSubmit={submit}
-      className="flex items-center gap-2 rounded-full bg-fill py-2 pr-2 pl-[18px]"
+      {...attach.bind}
+      className={cx(
+        'flex flex-col gap-2 bg-fill py-2 pr-2 pl-[18px]',
+        attach.items.length || attach.error ? 'rounded-[22px] pt-3' : 'rounded-full'
+      )}
     >
-      <label className="flex flex-1">
-        <span className="sr-only">{label}</span>
-        <input
-          ref={inputRef}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={blockImeSubmit}
-          placeholder={placeholder}
-          disabled={disabled}
-          className="h-8 flex-1 border-none bg-transparent text-ink outline-none placeholder:text-muted-2"
-        />
-      </label>
-      {extra}
-      <button
-        type="submit"
-        aria-label="送出"
-        disabled={disabled || !text.trim()}
-        className="flex size-10 flex-none cursor-pointer items-center justify-center rounded-full bg-brand text-white hover:bg-brand-hover disabled:cursor-default disabled:opacity-40"
-      >
-        <Icons.Send />
-      </button>
+      <AttachmentPreview items={attach.items} error={attach.error} onRemove={attach.remove} />
+      <div className="flex items-center gap-2">
+        <label className="flex flex-1">
+          <span className="sr-only">{label}</span>
+          <input
+            ref={inputRef}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={blockImeSubmit}
+            placeholder={placeholder}
+            disabled={disabled}
+            className="h-8 flex-1 border-none bg-transparent text-ink outline-none placeholder:text-muted-2"
+          />
+        </label>
+        <AttachButton onFiles={(f) => void attach.add(f)} disabled={disabled} />
+        {extra}
+        <button
+          type="submit"
+          aria-label="送出"
+          disabled={disabled || empty}
+          className="flex size-10 flex-none cursor-pointer items-center justify-center rounded-full bg-brand text-white hover:bg-brand-hover disabled:cursor-default disabled:opacity-40"
+        >
+          <Icons.Send />
+        </button>
+      </div>
     </form>
   )
 }

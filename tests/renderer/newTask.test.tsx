@@ -77,6 +77,7 @@ describe('NewTaskScreen', () => {
     expect(call).toHaveBeenCalledWith('tasks:create', {
       repoId: 'r2',
       request: '加上登入失敗鎖定',
+      images: [],
       baseBranch: 'trunk',
       model: 'claude-opus-5-5'
     })

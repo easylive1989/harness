@@ -1,3 +1,4 @@
+import type { ImageRef } from './images'
 import type { ReportInput } from './report'
 
 export type ModelId = 'claude-opus-5-5' | 'claude-sonnet-5-5'
@@ -122,6 +123,8 @@ export interface Task {
   repoId: string
   title: string
   request: string
+  /** 需求附加的圖片（中斷後重新送出需求時一併重送） */
+  requestImages?: ImageRef[]
   baseBranch: string
   branch: string
   worktreePath: string
@@ -177,6 +180,8 @@ export interface TimelineEvent {
   }
   /** question id / decision id / spec 版本 / report 版本；user_text 的實作起點標記（IMPLEMENT_START_REF） */
   ref?: string
+  /** user_text 附加的圖片 */
+  images?: ImageRef[]
 }
 
 export interface Settings {

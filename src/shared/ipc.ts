@@ -13,10 +13,13 @@ import type {
   Task,
   TimelineEvent
 } from './types'
+import type { ImageInput, ImageRef } from './images'
 
 export interface CreateTaskInput {
   repoId: string
   request: string
+  /** 需求附加的圖片 */
+  images?: ImageInput[]
   baseBranch: string
   model: ModelId
 }
@@ -33,7 +36,8 @@ export interface IpcApi {
   'tasks:list': () => Task[]
   'tasks:create': (input: CreateTaskInput) => Task
   'tasks:timeline': (taskId: string) => TimelineEvent[]
-  'tasks:send': (taskId: string, channel: Channel, text: string) => void
+  /** 有附加圖片時 text 可以是空字串 */
+  'tasks:send': (taskId: string, channel: Channel, text: string, images?: ImageInput[]) => void
   'tasks:answer': (
     taskId: string,
     questionId: string,
@@ -41,6 +45,8 @@ export interface IpcApi {
   ) => void
   'tasks:counter': (taskId: string, questionId: string, text: string) => void
   'tasks:changedFiles': (taskId: string) => DiffStats
+  /** 讀取訊息附加的圖片，回傳 data URL */
+  'attachments:read': (taskId: string, image: ImageRef) => string
   'branch:open': (
     taskId: string,
     input: { title: string; fromQuestionId?: string; seed?: string }

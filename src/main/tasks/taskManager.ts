@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { Options } from '@anthropic-ai/claude-agent-sdk'
+import type { ImageInput, ImageRef } from '@shared/images'
 import type { AppEvent, CreateTaskInput } from '@shared/ipc'
 import { IMPLEMENT_START_REF, msg, msgDisplay } from '@shared/protocol'
 import type { ReportInput } from '@shared/report'
@@ -19,7 +20,7 @@ import type {
   TimelineEvent,
   VerificationResult
 } from '@shared/types'
-import { AgentRun, type QueryFn, type RunnerEvent } from '../agent/agentRun'
+import { AgentRun, type PromptImage, type QueryFn, type RunnerEvent } from '../agent/agentRun'
 import { MAIN_SYSTEM_APPEND } from '../agent/prompts'
 import { claudeEnv } from '../claude/detect'
 import type { GitLike } from '../git/gitService'
@@ -39,6 +40,10 @@ import { phaseOf, type TaskEventType, transition } from './stateMachine'
 
 type McpServer = NonNullable<Options['mcpServers']>[string]
 type TimelineEntry = Omit<TimelineEvent, 'id' | 'ts'>
+/** 已存檔、要隨訊息送給 Claude 的圖片 */
+type StoredImage = ImageRef & PromptImage
+const imageRefs = (images: StoredImage[]): ImageRef[] =>
+  images.map(({ id, mediaType, name }) => ({ id, mediaType, ...(name ? { name } : {}) }))
 
 export interface TaskManagerDeps {
   repo: Repository
@@ -323,12 +328,14 @@ export class TaskManager {
     const branch = `${settings.branchPrefix}${slug}`
     const worktreePath = join(settings.worktreeRoot, repo.name, slug)
     await this.d.git.createWorktree(repo.path, worktreePath, branch, input.baseBranch)
+    const images = await this.storeImages(id, input.images ?? [])
     const now = this.now()
     const task: Task = {
       id,
       repoId: repo.id,
       title: request.split('\n')[0].slice(0, 40),
       request,
+      ...(images.length ? { requestImages: imageRefs(images) } : {}),
       baseBranch: input.baseBranch,
       branch,
       worktreePath,
@@ -348,28 +355,78 @@ export class TaskManager {
     }
     this.tasks.set(id, task)
     await this.update(id, () => undefined)
-    await this.send(id, 'main', request)
+    await this.send(id, 'main', request, { images })
     return this.get(id)
+  }
+
+  /** 把附加的圖片存到任務資料夾，回傳之後送給 Claude 與寫進時間軸用的資料 */
+  private async storeImages(taskId: string, images: ImageInput[]): Promise<StoredImage[]> {
+    return Promise.all(
+      images.map(async (img) => {
+        const stored: StoredImage = {
+          id: randomUUID(),
+          mediaType: img.mediaType,
+          data: img.data,
+          ...(img.name ? { name: img.name } : {})
+        }
+        await this.d.repo.saveImage(taskId, stored, Buffer.from(img.data, 'base64'))
+        return stored
+      })
+    )
+  }
+
+  /** 讀回已存檔的圖片（重新送出需求時用） */
+  private loadImages(taskId: string, refs: ImageRef[]): Promise<StoredImage[]> {
+    return Promise.all(
+      refs.map(async (r) => ({
+        ...r,
+        data: (await this.d.repo.readImage(taskId, r)).toString('base64')
+      }))
+    )
+  }
+
+  /** 讀取訊息附加的圖片給畫面顯示（data URL） */
+  async readImage(taskId: string, image: ImageRef): Promise<string> {
+    this.task(taskId)
+    const data = await this.d.repo.readImage(taskId, image)
+    return `data:${image.mediaType};base64,${data.toString('base64')}`
+  }
+
+  /** 使用者在輸入框送出的訊息（可附加圖片）：圖片先存檔再送出 */
+  async sendMessage(taskId: string, channel: Channel, text: string, images: ImageInput[] = []) {
+    const body = text.trim()
+    if (!body && !images.length) throw new Error('請輸入訊息或附加圖片')
+    this.assertCanSend(taskId, channel)
+    await this.send(taskId, channel, body, { images: await this.storeImages(taskId, images) })
   }
 
   /**
    * 送出使用者訊息：該 channel 有進行中的執行就插話進去，否則以 resume 開新一輪。
    * silent 不寫入 user_text（例如回答卡片、反問，UI 另有呈現）；display 是時間軸上顯示的文字，
    * ref 是 user_text 的標記（例如 IMPLEMENT_START_REF）；entries 是訊息被接受後要一起寫入的時間軸項目。
+   * images 隨訊息送給 Claude；有 display 時時間軸只顯示 display、不附圖（例如續接時重送需求）。
    * 訊息沒送出時不寫入任何時間軸。
    */
   async send(
     taskId: string,
     channel: Channel,
     text: string,
-    opts: { display?: string; ref?: string; silent?: boolean; entries?: TimelineEntry[] } = {}
+    opts: {
+      display?: string
+      ref?: string
+      silent?: boolean
+      entries?: TimelineEntry[]
+      images?: StoredImage[]
+    } = {}
   ) {
     this.assertCanSend(taskId, channel)
+    const images = opts.images ?? []
     const userText: TimelineEntry = {
       channel,
       kind: 'user_text',
       text: opts.display ?? text,
-      ...(opts.ref ? { ref: opts.ref } : {})
+      ...(opts.ref ? { ref: opts.ref } : {}),
+      ...(images.length && opts.display === undefined ? { images: imageRefs(images) } : {})
     }
     const entries: TimelineEntry[] = [...(opts.silent ? [] : [userText]), ...(opts.entries ?? [])]
     const key = runKey(taskId, channel)
@@ -377,13 +434,13 @@ export class TaskManager {
       // 排隊等 lock 的期間任務可能已開始收尾或整理報告
       this.assertCanSend(taskId, channel)
       const prev = this.runs.get(key)
-      if (prev?.send(text)) {
+      if (prev?.send(text, images)) {
         await this.writeEntries(taskId, entries)
         return
       }
       // 上一段執行已關閉輸入但程序還沒結束：等它結束，同一個 channel 永遠只有一個 run
       if (prev) await this.settlePrevious(taskId, channel, prev)
-      await this.startTurn(taskId, channel, text, entries)
+      await this.startTurn(taskId, channel, text, entries, images)
     })
   }
 
@@ -423,7 +480,8 @@ export class TaskManager {
     taskId: string,
     channel: Channel,
     prompt: string,
-    entries: TimelineEntry[]
+    entries: TimelineEntry[],
+    images: PromptImage[] = []
   ) {
     // 等上一段執行結束的期間任務可能已被丟棄或開始收尾
     const before = this.assertCanSend(taskId, channel)
@@ -494,7 +552,8 @@ export class TaskManager {
       }
     }
 
-    const run = new AgentRun(this.d.queryFn, { options, firstPrompt: prompt }, (e) => {
+    const cfg = { options, firstPrompt: prompt, firstImages: images }
+    const run = new AgentRun(this.d.queryFn, cfg, (e) => {
       void this.enqueue(taskId, () => this.onRunnerEvent(taskId, channel, e))
     })
     owner.run = run
@@ -1063,9 +1122,10 @@ export class TaskManager {
       await this.startFinalizing(taskId, t.pendingReport)
       return
     }
-    // 第一輪還沒拿到 session 就中斷：沒有可續接的對話，重新送出需求
+    // 第一輪還沒拿到 session 就中斷：沒有可續接的對話，重新送出需求（連同附加的圖片）
     if (!t.mainSessionId) {
-      await this.send(taskId, 'main', t.request, { display: msgDisplay.resume })
+      const images = await this.loadImages(taskId, t.requestImages ?? [])
+      await this.send(taskId, 'main', t.request, { display: msgDisplay.resume, images })
       return
     }
     await this.send(taskId, 'main', msg.resume(), { display: msgDisplay.resume })

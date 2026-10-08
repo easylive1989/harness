@@ -1,6 +1,12 @@
 import { describe, expect, test, vi } from 'vitest'
 import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
-import { AgentRun, mapMessage, type QueryFn, type RunnerEvent } from '../../src/main/agent/agentRun'
+import {
+  AgentRun,
+  mapMessage,
+  type QueryFn,
+  type RunnerEvent,
+  userMessage
+} from '../../src/main/agent/agentRun'
 
 const m = (x: unknown) => x as SDKMessage
 const success = (extra: Record<string, unknown> = {}) =>
@@ -433,5 +439,22 @@ describe('AgentRun', () => {
     const run = new AgentRun(fake, { options: {}, firstPrompt: 'a' }, (e) => events.push(e))
     await run.done
     expect(events.filter((e) => e.type === 'notice')).toHaveLength(2)
+  })
+})
+
+describe('userMessage', () => {
+  test('沒有圖片時 content 是字串', () => {
+    expect(userMessage('哈囉').message.content).toBe('哈囉')
+  })
+
+  test('有圖片時是 content block：圖片在前、文字在後；沒有文字就只有圖片', () => {
+    const img = { mediaType: 'image/png' as const, data: 'iVBORw0KGgo=' }
+    expect(userMessage('看這張', [img]).message.content).toEqual([
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: img.data } },
+      { type: 'text', text: '看這張' }
+    ])
+    expect(userMessage('', [img]).message.content).toEqual([
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: img.data } }
+    ])
   })
 })

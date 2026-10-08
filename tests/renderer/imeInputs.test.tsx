@@ -23,7 +23,7 @@ describe('輸入法選字中的 Enter', () => {
     // 一般的 Enter 不取消預設動作，表單照常送出
     expect(fireEvent.keyDown(input, { key: 'Enter', keyCode: 13 })).toBe(true)
     await userEvent.type(input, '{Enter}')
-    expect(onSend).toHaveBeenCalledWith('你好')
+    expect(onSend).toHaveBeenCalledWith('你好', [])
   })
 
   test('留言輸入框：選字中的 Enter 不加入、Esc 不取消', async () => {

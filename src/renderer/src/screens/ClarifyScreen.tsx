@@ -127,9 +127,9 @@ export function ClarifyScreen({
                 <Composer
                   inputRef={composerRef}
                   placeholder="補充需求或直接回答…"
-                  onSend={(t) => {
+                  onSend={(t, images) => {
                     stick()
-                    void act(() => call('tasks:send', task.id, 'main', t))
+                    void act(() => call('tasks:send', task.id, 'main', t, images))
                   }}
                   // 主線執行中（含等待核准）可以停止；整理報告不會在釐清時發生
                   extra={

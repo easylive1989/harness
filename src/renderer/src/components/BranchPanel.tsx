@@ -7,15 +7,18 @@ import {
   useRef,
   useState
 } from 'react'
+import type { ImageInput } from '@shared/images'
 import type { Branch, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
 import { parseBranchSeed, stripMarkdown } from '../lib/branchDraft'
 import { toolResultLabel, userTextDisplay } from '../lib/timeline'
 import { blockImeSubmit, isComposing } from '../lib/ime'
 import { isBusy } from '../lib/stage'
+import { useImageAttachments } from '../lib/useImageAttachments'
 import { usePending } from '../lib/usePending'
 import { useStickToBottom } from '../lib/useStickToBottom'
 import { useStore } from '../store'
+import { AttachButton, AttachmentPreview, MessageImages } from './Attachments'
 import { StopButton } from './Composer'
 import { Markdown } from './Markdown'
 import { Button, cx, inputClass, LiveStatus } from './ui'
@@ -34,31 +37,42 @@ function BranchInput({
   extra
 }: {
   disabled: boolean
-  onSend: (text: string) => void
+  onSend: (text: string, images: ImageInput[]) => void
   extra?: ReactNode
 }) {
   const [text, setText] = useState('')
+  const attach = useImageAttachments()
   const submit = (e: FormEvent) => {
     e.preventDefault()
     const t = text.trim()
-    if (!t || disabled) return
+    if ((!t && !attach.items.length) || disabled) return
+    const images = attach.images
     setText('')
-    onSend(t)
+    attach.clear()
+    onSend(t, images)
   }
   return (
-    <form onSubmit={submit} className="flex gap-2">
-      <label className="flex min-w-0 flex-1">
-        <span className="sr-only">分岔訊息</span>
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={blockImeSubmit}
+    <form onSubmit={submit} {...attach.bind} className="flex flex-col gap-2">
+      <AttachmentPreview items={attach.items} error={attach.error} onRemove={attach.remove} />
+      <div className="flex gap-2">
+        <label className="flex min-w-0 flex-1">
+          <span className="sr-only">分岔訊息</span>
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={blockImeSubmit}
+            disabled={disabled}
+            placeholder="繼續在分岔裡討論…"
+            className={cx(inputClass, 'min-w-0 flex-1')}
+          />
+        </label>
+        <AttachButton
+          onFiles={(f) => void attach.add(f)}
           disabled={disabled}
-          placeholder="繼續在分岔裡討論…"
-          className={cx(inputClass, 'min-w-0 flex-1')}
+          className="size-[42px] rounded-xl bg-fill"
         />
-      </label>
-      {extra}
+        {extra}
+      </div>
     </form>
   )
 }
@@ -158,7 +172,7 @@ function NewBranchForm({ draft, blocked }: { draft: BranchDraft; blocked: boolea
   )
 }
 
-function BranchMessage({ e }: { e: TimelineEvent }) {
+function BranchMessage({ taskId, e }: { taskId: string; e: TimelineEvent }) {
   switch (e.kind) {
     case 'user_text': {
       const text = e.text ?? ''
@@ -172,8 +186,9 @@ function BranchMessage({ e }: { e: TimelineEvent }) {
               <span>{seed.question}</span>
             </>
           ) : (
-            userTextDisplay(text)
+            text && <span>{userTextDisplay(text)}</span>
           )}
+          <MessageImages taskId={taskId} images={e.images} />
         </div>
       )
     }
@@ -240,10 +255,10 @@ export function BranchPanel({
     ? task.questions.findIndex((q) => q.id === b.fromQuestionId) + 1
     : 0
 
-  const send = (text: string) => {
+  const send = (text: string, images: ImageInput[]) => {
     if (!b) return
     stick()
-    void act(() => call('tasks:send', task.id, `branch:${b.id}`, text))
+    void act(() => call('tasks:send', task.id, `branch:${b.id}`, text, images))
   }
   const conclude = (id: string) =>
     void runAction(() => act(() => call('branch:conclude', task.id, id)))
@@ -307,7 +322,7 @@ export function BranchPanel({
                 </span>
               )}
               {list.map((e) => (
-                <BranchMessage key={e.id} e={e} />
+                <BranchMessage key={e.id} taskId={task.id} e={e} />
               ))}
               <LiveStatus text={b.running && 'Claude 正在回覆…'} />
               {b.error && (
