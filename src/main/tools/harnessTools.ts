@@ -140,7 +140,7 @@ export function createToolHandlers(sink: ToolSink) {
     conclude_branch: (a: ConcludeBranchArgs) =>
       guard(async () => {
         await sink.concludeBranch(a)
-        return ok('結論已交給使用者確認。請結束這一輪。')
+        return ok('結論已交給使用者確認，介面會顯示完整內容。請結束這一輪，不要在文字中重述結論。')
       }),
     submit_report: (raw: unknown) =>
       guard(async () => {

@@ -62,6 +62,16 @@ describe('harness tool handlers', () => {
     expect(textOf(r)).toContain('不要在文字中重述規格')
   })
 
+  test('conclude_branch 成功時要求結束這一輪、不在文字中重述結論', async () => {
+    const r = await createToolHandlers(sink()).conclude_branch({
+      decision: 'd',
+      rationale: 'r',
+      deferred: []
+    })
+    expect(textOf(r)).toContain('結束這一輪')
+    expect(textOf(r)).toContain('不要在文字中重述結論')
+  })
+
   test('sink 丟錯時轉成 isError，並在 host 端記錄', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     const s = sink({
