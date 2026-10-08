@@ -20642,16 +20642,26 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `scripts/create-demo-repo.sh`
+- Create: `scripts/e2e/driver.mjs`、`scripts/e2e/run.mjs`（手動端對端驗證的驅動程式：Playwright 的 Electron 支援，不屬於 `npm test`）
+- Modify: `package.json`（devDependency `playwright`）、`eslint.config.mjs`（`scripts/**/*.mjs` 不要求回傳型別）
 - Create: `docs/verification.md`（記錄驗證結果）
+
+驅動程式用 `HARNESS_USER_DATA_DIR`（Task 25）把資料放在暫存資料夾，預先寫好 `settings.json` 的 `worktreeRoot`，以 stub 取代原生的選資料夾／存檔對話框；啟動後在 `127.0.0.1:47123` 接收一段段 async JS（可用 `page`、`shot`、`state`、`waitIdle` 等 helper），由 `run.mjs` 送出。示範 repo 另含 `.claude/settings.json` 的 allow 規則（`Bash(npm test:*)`、`Edit`），用來驗證 PreToolUse hook 仍會要求核准、釐清階段仍不能改檔。
 
 **Step 1: 示範 repo 腳本**
 
 ```bash
 #!/usr/bin/env bash
 # scripts/create-demo-repo.sh — 建立一個小型 Node 專案供端對端驗證
+# 用法：scripts/create-demo-repo.sh [目標資料夾]（預設 ~/harness-demo）
 set -euo pipefail
 DIR="${1:-$HOME/harness-demo}"
-rm -rf "$DIR" && mkdir -p "$DIR/src" "$DIR/test"
+# 只覆蓋之前由這個腳本建立的資料夾，避免打錯路徑時刪掉其他東西
+if [ -e "$DIR" ] && ! grep -qs '"name": "harness-demo"' "$DIR/package.json"; then
+  echo "拒絕覆蓋：$DIR 已存在且不是示範 repo" >&2
+  exit 1
+fi
+rm -rf "$DIR" && mkdir -p "$DIR/src" "$DIR/test" "$DIR/.claude"
 cd "$DIR"
 cat > package.json <<'JSON'
 { "name": "harness-demo", "type": "module", "scripts": { "test": "node --test" } }
@@ -20670,6 +20680,10 @@ import { login } from '../src/login.js'
 test('正確密碼可以登入', () => assert.deepEqual(login('alice', 'secret'), { ok: true }))
 test('錯誤密碼回 401', () => assert.equal(login('alice', 'x').status, 401))
 JS
+# 專案層級的 allow 規則：用來驗證 Harness 的 PreToolUse hook 仍會要求核准 npm test、釐清階段仍不能改檔
+cat > .claude/settings.json <<'JSON'
+{ "permissions": { "allow": ["Bash(npm test:*)", "Bash(npm test)", "Edit"] } }
+JSON
 printf '# harness-demo\n' > README.md
 git init -q -b main && git add -A && git commit -q -m "init demo"
 echo "demo repo: $DIR"
@@ -20703,13 +20717,15 @@ Expected: 全部通過。lint 有錯誤就修正後再跑。
 12. 合併到 main → `git -C ~/harness-demo log --oneline` 看得到 merge commit；任務顯示「已合併」。
 13. 另開一個任務後在釐清中關閉 app，再開啟 → 任務顯示「已中斷」，按「繼續」可續接。
 14. 再開一個任務 → 按「丟棄 worktree」兩次確認 → worktree 資料夾與分支被刪除，任務從側欄消失。
+15. 示範 repo 的 `.claude/settings.json` 允許 `npm test` 與 `Edit`：實作中 `npm test` 仍跳出 Harness 的核准框；釐清中 Claude 改檔被拒絕，核准規格前 worktree 保持乾淨。
+16. 寫入 `.git`、`.claude/`、`.mcp.json` 時跳出核准（自然發生才驗證，不刻意要求）。
 
 每一項失敗時：使用 @superpowers:systematic-debugging 找原因、補測試、修正，再重跑該項。
 
 **Step 4: Commit**
 
 ```bash
-git add scripts docs/verification.md
+git add scripts docs/verification.md package.json package-lock.json eslint.config.mjs
 git commit -m "test: add demo repo script and end-to-end verification record
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -20720,5 +20736,5 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ## 完成條件
 
 - `npm test`、`npm run typecheck`、`npm run lint` 全部通過。
-- `docs/verification.md` 的 14 項全部打勾。
+- `docs/verification.md` 的檢查項目全部打勾（第 16 項沒有自然發生時註明）。
 - `npm run dev` 可在本機啟動並使用訂閱方案的 Claude Code 完成一輪「釐清 → 規格 → 實作 → 報告 → 回饋 → 合併」。
