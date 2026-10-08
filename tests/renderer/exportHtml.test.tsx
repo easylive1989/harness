@@ -54,9 +54,7 @@ test('匯出的 HTML 自含、轉義所有報告文字、沒有互動控制', as
   expect(tests.textContent).toContain('src/auth/lockout.test.ts:3')
   expect(tests.textContent).toContain('同一帳號連續輸錯密碼 5 次 → 第 6 次登入 → 回 423')
   expect(tests.textContent).toContain('登入前多了鎖定檢查')
-  expect(tests.textContent).toContain('驗證：1 / 2 通過')
-  expect(tests.querySelector('a')?.getAttribute('href')).toBe('#report-tests')
-  expect(doc.getElementById('report-tests')).not.toBeNull()
+  expect(tests.textContent).toContain('驗證：npm test 通過')
 
   const frames = doc.querySelectorAll('iframe')
   expect(frames).toHaveLength(1)
@@ -66,6 +64,20 @@ test('匯出的 HTML 自含、轉義所有報告文字、沒有互動控制', as
   const srcdoc = frame.getAttribute('srcdoc') ?? ''
   expect(srcdoc).toContain('<div>正常 → 鎖定</div>')
   expect(srcdoc).toContain(`content="${BLOCK_CSP}"`)
+})
+
+test('匯出檔裡測試的整體驗證結果用頁內連結連到測試結果', async () => {
+  const report = makeReport({
+    verification: [
+      { command: 'npm run lint', exitCode: 1, durationMs: 1, outputTail: '' },
+      { command: 'npm run typecheck', exitCode: 0, durationMs: 1, outputTail: '' }
+    ]
+  })
+  const doc = parse(await buildReportHtml(makeTask(), report))
+  const tests = doc.querySelector('section[aria-label="新增的測試"]')!
+  expect(tests.textContent).toContain('驗證：1 / 2 通過')
+  expect(tests.querySelector('a')?.getAttribute('href')).toBe('#report-tests')
+  expect(doc.getElementById('report-tests')).not.toBeNull()
 })
 
 test('匯出檔名去掉控制字元與不能用在檔名的字元，並限制長度', () => {

@@ -28,7 +28,7 @@ export const MAIN_SYSTEM_APPEND = `
 - 完成後執行專案既有的測試、型別檢查、lint（若有），然後呼叫 mcp__harness__submit_report。
 
 ### submit_report 的寫法
-- tests：最優先，使用者會先看這一段。列出本次新增或修改的每一個測試：id（t1、t2…）、file（相對於 repo 根目錄的路徑）、name（測試名稱）、kind（unit／integration／e2e／other）、change（added／modified）、scenario（用白話說明情境：在什麼情況下 → 做什麼 → 預期什麼）、line（測試在新版檔案的行號，選填）。修改既有測試時用 why 說明為什麼改。沒有新增測試時 tests 留空，並在 tests_note 說明原因。
+- tests：最優先，使用者會先看這一段。列出本次新增或修改的每一個測試：id（t1、t2…）、file（相對於 repo 根目錄的路徑）、name（測試名稱）、kind（unit／integration／e2e／other）、change（added／modified）、scenario（用白話說明情境：在什麼情況下 → 做什麼 → 預期什麼）、line（測試在新版檔案的行號，選填）。修改既有測試時用 why 說明為什麼改。只有在沒有新增也沒有修改任何測試時 tests 才留空；沒有新增測試時在 tests_note 說明原因（修改的測試仍要列出）。
 - architecture：before 與 after 各 3–10 個節點（模組、檔案群或外部服務），status 標 added / modified / unchanged，files 列相關路徑；edges 表示呼叫或資料流向。
 - decisions：每個關鍵決策寫出選擇、捨棄的方案與原因；source 指回釐清的問題或分岔，實作中自己做的決定用 implementation。
 - limitations：已知限制與風險；followups：刻意延後的事項。

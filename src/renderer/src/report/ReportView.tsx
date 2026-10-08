@@ -1,22 +1,24 @@
 // src/renderer/src/report/ReportView.tsx
 // 對照 docs/design/B5-Report.dc.html 的 <main>；isStatic 給匯出 HTML 用，不含任何互動控制
-import { type ReactNode, useState } from 'react'
+import { type ReactNode, useMemo, useState } from 'react'
 import { flushSync } from 'react-dom'
+import { parseUnifiedDiff } from '@shared/diff'
 import { layoutGraph } from '@shared/layout'
 import { wrapBlockHtml } from '@shared/blockHtml'
 import type { ReportInput } from '@shared/report'
+import { undocumentedTestFiles } from '@shared/testFiles'
 import type { Report, Task, VerificationResult } from '@shared/types'
 import { InlineCode } from '../components/Markdown'
 import { cx, Icons, Pill } from '../components/ui'
 import { shortTime } from '../lib/format'
 import { useStore } from '../store'
-import { diffAnchor, fileAnchor, findAnchor } from './anchors'
+import { diffAnchor, fileAnchor, findAnchor, reveal } from './anchors'
 import { ArchitectureDiagram } from './ArchitectureDiagram'
 import { BLOCK_DEFAULT_H } from './blocks'
 import { CommentButton, CommentForm, FeedbackNote } from './comments'
 import { CustomBlockFrame } from './CustomBlockFrame'
 import { DiffView } from './DiffView'
-import { runState } from './testItems'
+import { runState, summarizeRuns } from './testItems'
 import { TestsSection } from './TestsSection'
 
 type Decision = ReportInput['decisions'][number]
@@ -109,7 +111,8 @@ function Stat({
   return (
     <div className={cx('flex flex-col rounded-[14px] bg-fill-2 px-4 py-3.5', className)}>
       <span className={cx('text-xs text-muted', labelClass)}>{label}</span>
-      <span className="text-2xl font-bold">{children}</span>
+      {/* 數字比格子寬時換行，不會被切掉 */}
+      <span className="text-2xl font-bold wrap-anywhere">{children}</span>
     </div>
   )
 }
@@ -243,12 +246,17 @@ export function ReportView({
     )
   )
   const changed = new Set(report.stats.perFile.map((f) => f.path))
-  const ran = report.verification.filter((v) => !v.skipped)
-  const passed = ran.filter((v) => v.exitCode === 0).length
-  const skipped = report.verification.length - ran.length
-  const allPassed = ran.length > 0 && passed === ran.length
+  const { ran, passed, skipped, state: verifyState } = summarizeRuns(report.verification)
+  const allPassed = verifyState === 'passed'
+  // 「新增的測試」：diff 裡的檔案、Claude 沒說明的測試檔（大 diff 只解析一次）
+  const diffFiles = useMemo(() => parseUnifiedDiff(report.diff), [report.diff])
+  const undocumented = useMemo(
+    () => undocumentedTestFiles(diffFiles, r.tests, task.worktreePath),
+    [diffFiles, r.tests, task.worktreePath]
+  )
   const addedTests = r.tests.filter((t) => t.change === 'added').length
   const modifiedTests = r.tests.length - addedTests
+  const undocumentedAdded = undocumented.filter((f) => f.status === 'added').length
 
   const button = (anchor: string, label: string, aria = `對「${label}」留言`) =>
     commentable && <CommentButton label={aria} onClick={() => setCommentOn(anchor)} />
@@ -266,15 +274,13 @@ export function ReportView({
     onDiffFile?.(path)
     document.getElementById('report-diff')?.scrollIntoView?.({ behavior: 'smooth' })
   }
-  /** 從「新增的測試」跳到 diff：先畫出選到的檔案（與行），再捲到那一行；找不到那一行就捲到檔頭 */
+  /** 從「新增的測試」跳到 diff：先畫出選到的檔案（與行），再捲到那一行；找不到那一行就到檔頭 */
   const jumpToTest = (path: string, line?: number) => {
     flushSync(() => onDiffFile?.(path, line))
     const atLine = line === undefined ? undefined : findAnchor(diffAnchor(path, line))
-    const target = atLine ?? findAnchor(fileAnchor(path))
-    target?.scrollIntoView?.({ behavior: 'smooth', block: atLine ? 'center' : 'start' })
+    reveal(atLine ?? findAnchor(fileAnchor(path)), atLine ? 'center' : 'start')
   }
-  const showResults = () =>
-    document.getElementById('report-tests')?.scrollIntoView?.({ behavior: 'smooth' })
+  const showResults = () => reveal(document.getElementById('report-tests'), 'start')
 
   return (
     <div className="flex flex-col gap-3">
@@ -295,17 +301,18 @@ export function ReportView({
             <InlineCode text={r.overview.summary} />
           </span>
         </div>
-        <div className="grid grid-cols-5 gap-2.5">
+        {/* 窄視窗時換行（不會擠到數字被切掉）；寬的時候五格一排 */}
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(112px,1fr))] gap-2.5">
           <Stat label="變更檔案">{report.stats.files}</Stat>
           <Stat label="行數">
             <span className="text-ok">+{report.stats.additions}</span>{' '}
             <span className="text-lg text-danger">−{report.stats.deletions}</span>
           </Stat>
-          {/* 沒有新增測試時用提醒的顏色 */}
+          {/* 沒有新增測試時用警示的顏色；Claude 沒說明的新增測試檔另外標出 */}
           <Stat
             label="新增測試"
-            className={addedTests ? undefined : 'bg-decision'}
-            labelClass={addedTests ? undefined : 'text-decision-ink'}
+            className={addedTests ? undefined : 'bg-warn-soft'}
+            labelClass={addedTests ? undefined : 'text-warn'}
           >
             {addedTests}
             {modifiedTests > 0 && (
@@ -313,14 +320,19 @@ export function ReportView({
                 修改 {modifiedTests}
               </span>
             )}
+            {undocumentedAdded > 0 && (
+              <span className="ml-1.5 inline-block text-xs font-normal whitespace-nowrap text-warn">
+                未說明 {undocumentedAdded}
+              </span>
+            )}
           </Stat>
           <Stat
             label="驗證"
-            className={ran.length === 0 ? '' : allPassed ? 'bg-brand-tint' : 'bg-danger-soft'}
+            className={ran === 0 ? '' : allPassed ? 'bg-brand-tint' : 'bg-danger-soft'}
             labelClass={allPassed ? 'text-brand-muted' : undefined}
           >
-            <span className={allPassed ? 'text-brand-ink' : ran.length ? 'text-danger' : ''}>
-              {ran.length ? `${passed} / ${ran.length} 通過` : '未執行'}
+            <span className={allPassed ? 'text-brand-ink' : ran ? 'text-danger' : ''}>
+              {ran ? `${passed} / ${ran} 通過` : '未執行'}
             </span>
             {skipped > 0 && (
               // 五格並排時可能放不下：整段換到下一行，不在字中間斷開
@@ -346,7 +358,8 @@ export function ReportView({
         <TestsSection
           tests={r.tests}
           note={r.tests_note}
-          diff={report.diff}
+          files={diffFiles}
+          undocumented={undocumented}
           root={task.worktreePath}
           runs={report.verification}
           isStatic={isStatic}

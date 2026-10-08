@@ -2,20 +2,15 @@
 // 報告最優先的區塊「新增的測試」：Claude 說明的每個測試（情境、修改原因）、
 // 對應的驗證結果（Harness 實際執行的指令整體結果，不捏造逐個測試的結果），
 // 以及 Harness 從 diff 偵測到、Claude 沒說明的測試檔。外框（標題、留言）由 ReportView 的 Section 提供。
-import { type ReactNode, useMemo } from 'react'
-import { type DiffFile, parseUnifiedDiff } from '@shared/diff'
+import { type ReactNode, useId } from 'react'
+import type { DiffFile } from '@shared/diff'
 import type { TestNote } from '@shared/report'
+import { resolveTestPath } from '@shared/testFiles'
 import type { VerificationResult } from '@shared/types'
 import { InlineCode } from '../components/Markdown'
 import { cx, Icons, Pill } from '../components/ui'
 import { testAnchor } from './anchors'
-import {
-  coveringRuns,
-  normalizeTestPath,
-  type RunState,
-  runState,
-  undocumentedTestFiles
-} from './testItems'
+import { type RunState, runState, testVerdict } from './testItems'
 
 const KIND_LABEL: Record<TestNote['kind'], string> = {
   unit: '單元',
@@ -50,8 +45,8 @@ function runLabel(v: VerificationResult): string {
 }
 
 /**
- * 一個測試的驗證結果：輸出提到這個測試檔的指令，或只有一個驗證指令時，顯示那個指令的結果；
- * 否則顯示全部驗證的整體結果，連到「測試結果」。
+ * 一個測試的驗證結果（規則見 testVerdict）：指令的結果附通過／失敗的顏色；
+ * 只有整體數字時用中性的樣式（那些指令不一定跟這個測試有關），連到「測試結果」。
  */
 function TestVerification({
   file,
@@ -64,12 +59,11 @@ function TestVerification({
   isStatic?: boolean
   onShowResults?: () => void
 }) {
-  const covering = coveringRuns(file, runs)
-  const shown = covering.length ? covering : runs.length === 1 ? runs : undefined
+  const verdict = testVerdict(file, runs)
   let body: ReactNode
-  if (runs.length === 0) body = <span className="text-muted">沒有驗證指令</span>
-  else if (shown)
-    body = shown.map((v, i) => {
+  if (!verdict) body = <span className="text-muted">沒有驗證指令</span>
+  else if ('runs' in verdict)
+    body = verdict.runs.map((v, i) => {
       const state = runState(v)
       return (
         <span
@@ -78,24 +72,20 @@ function TestVerification({
           className={cx('flex min-w-0 items-center gap-1', RUN_TEXT[state])}
         >
           <RunIcon state={state} />
-          <code className="min-w-0 truncate bg-transparent p-0 text-inherit">{v.command}</code>{' '}
+          <code title={v.command} className="min-w-0 truncate bg-transparent p-0 text-inherit">
+            {v.command}
+          </code>{' '}
           {runLabel(v)}
         </span>
       )
     })
   else {
-    const ran = runs.filter((v) => !v.skipped)
-    const passed = ran.filter((v) => v.exitCode === 0).length
-    const skipped = runs.length - ran.length
-    const state: RunState = !ran.length ? 'skipped' : passed === ran.length ? 'passed' : 'failed'
+    const { ran, passed, skipped } = verdict.summary
     const link = 'cursor-pointer text-brand hover:text-brand-hover'
     body = (
       <>
-        <span className={cx('flex items-center gap-1', RUN_TEXT[state])}>
-          <RunIcon state={state} />
-          {ran.length ? `${passed} / ${ran.length} 通過` : '未執行'}
-        </span>
-        {skipped > 0 && ran.length > 0 && <span className="text-muted"> · 略過 {skipped}</span>}
+        <span className="text-ink-2">{ran ? `${passed} / ${ran} 通過` : '未執行'}</span>
+        {skipped > 0 && ran > 0 && <span className="text-muted"> · 略過 {skipped}</span>}
         {isStatic ? (
           <a href="#report-tests" className={link}>
             查看測試結果
@@ -116,39 +106,90 @@ function TestVerification({
   )
 }
 
-/** 檔案在這次的 diff 裡、而且不是匯出檔時可以點：跳到 diff 裡的那個檔案（與行） */
-function JumpTarget({
+/** Claude 說明的一個測試：名稱（標題，可以點：跳到 diff 裡的測試檔與行）、檔案、標籤、情境、修改原因、驗證 */
+function TestItem({
+  test: t,
   path,
-  line,
-  enabled,
+  inDiff,
+  runs,
+  isStatic,
+  anchorAttr,
+  button,
+  slot,
   onJump,
-  children
+  onShowResults
 }: {
+  test: TestNote
   path: string
-  line?: number
-  enabled: boolean
+  inDiff: boolean
+  runs: VerificationResult[]
+  isStatic?: boolean
+  anchorAttr: (anchor: string) => string | undefined
+  button: (anchor: string, label: string, aria?: string) => ReactNode
+  slot: (anchor: string, label: string) => ReactNode
   onJump?: (path: string, line?: number) => void
-  children: ReactNode
+  onShowResults?: () => void
 }) {
-  const layout = 'flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left'
-  return onJump && enabled ? (
-    <button
-      type="button"
-      title="在程式碼變更中查看"
-      onClick={() => onJump(path, line)}
-      className={cx(layout, 'group cursor-pointer')}
+  const anchor = testAnchor(t.id)
+  const whereId = useId()
+  const jump = !isStatic && inDiff && onJump
+  return (
+    <div
+      data-anchor={anchorAttr(anchor)}
+      className="flex min-w-0 flex-col gap-2 rounded-[14px] p-4 shadow-[0_0_0_1px_var(--color-chip)]"
     >
-      {children}
-    </button>
-  ) : (
-    <div className={layout}>{children}</div>
+      <div className="flex items-start gap-3">
+        {/* relative：按鈕的 ::after 蓋住名稱與檔案，點檔案也會跳 */}
+        <div className="group relative flex min-w-0 flex-1 flex-col items-start gap-0.5">
+          <h3 className="m-0 text-sm leading-snug font-bold">
+            {jump ? (
+              <button
+                type="button"
+                title="在程式碼變更中查看"
+                aria-describedby={whereId}
+                onClick={() => onJump(path, t.line)}
+                className="cursor-pointer text-left group-hover:text-brand after:absolute after:inset-0 after:content-['']"
+              >
+                <InlineCode text={t.name} />
+              </button>
+            ) : (
+              <InlineCode text={t.name} />
+            )}
+          </h3>
+          <span id={whereId} className="font-mono text-xs break-all text-muted">
+            {t.line ? `${path}:${t.line}` : path}
+            {!inDiff && <span className="font-sans">（不在這次的變更中）</span>}
+          </span>
+        </div>
+        <span className="flex flex-none items-center gap-1">
+          <Pill tone={t.change === 'added' ? 'brand' : 'review'}>
+            {t.change === 'added' ? '新增' : '修改'}
+          </Pill>
+          <Pill tone="muted">{KIND_LABEL[t.kind]}</Pill>
+          {button(anchor, t.name, `對測試「${t.name}」留言`)}
+        </span>
+      </div>
+      <div className="text-[13px]">
+        <span className="mr-2 font-medium text-brand">情境</span>
+        <InlineCode text={t.scenario} />
+      </div>
+      {t.why && (
+        <div className="rounded-[10px] bg-fill-2 px-3 py-2.5 text-[13px] text-ink-2">
+          <span className="mr-2 font-medium">為什麼改</span>
+          <InlineCode text={t.why} />
+        </div>
+      )}
+      <TestVerification file={path} runs={runs} isStatic={isStatic} onShowResults={onShowResults} />
+      {slot(anchor, t.name)}
+    </div>
   )
 }
 
 export function TestsSection({
   tests,
   note,
-  diff,
+  files,
+  undocumented,
   root,
   runs,
   isStatic,
@@ -161,7 +202,9 @@ export function TestsSection({
   tests: TestNote[]
   /** 沒有新增測試的原因（Claude 說明） */
   note?: string
-  diff: string
+  /** diff 裡的檔案與其中 Claude 沒說明的測試檔（ReportView 算好，概觀的數據也用） */
+  files: DiffFile[]
+  undocumented: DiffFile[]
   /** worktree 路徑：Claude 給了絕對路徑時去掉 */
   root?: string
   runs: VerificationResult[]
@@ -173,12 +216,7 @@ export function TestsSection({
   onJump?: (path: string, line?: number) => void
   onShowResults?: () => void
 }) {
-  const files = useMemo(() => parseUnifiedDiff(diff), [diff])
-  const paths = useMemo(() => new Set(files.map((f) => f.path)), [files])
-  const undocumented = useMemo(
-    () => undocumentedTestFiles(files, tests, root),
-    [files, tests, root]
-  )
+  const paths = files.map((f) => f.path)
   // 新增的在前、修改的在後
   const ordered = [
     ...tests.filter((t) => t.change === 'added'),
@@ -190,13 +228,13 @@ export function TestsSection({
   return (
     <div className="flex flex-col gap-3">
       {!hasAdded && (
-        <div className="flex gap-2.5 rounded-xl bg-decision px-3.5 py-3 text-[13px]">
-          <Icons.Info className="mt-[3px] flex-none text-decision-ink" />
+        <div className="flex gap-2.5 rounded-xl bg-warn-soft px-3.5 py-3 text-[13px]">
+          <Icons.Info className="mt-[3px] flex-none text-warn" />
           <div className="flex min-w-0 flex-col gap-0.5">
-            <span className="font-medium text-decision-ink">
+            <span className="font-medium text-warn">
               {undocumentedAdded ? 'Claude 沒有說明新增的測試' : '這次沒有新增測試'}
             </span>
-            <span className="text-decision-body">
+            <span className="text-ink-2">
               {note ? (
                 <InlineCode text={note} />
               ) : undocumentedAdded ? (
@@ -209,56 +247,21 @@ export function TestsSection({
         </div>
       )}
       {ordered.map((t) => {
-        const anchor = testAnchor(t.id)
-        const path = normalizeTestPath(t.file, root)
-        const inDiff = paths.has(path)
+        const path = resolveTestPath(t.file, paths, root)
         return (
-          <div
+          <TestItem
             key={t.id}
-            data-anchor={anchorAttr(anchor)}
-            className="flex min-w-0 flex-col gap-2 rounded-[14px] p-4 shadow-[0_0_0_1px_var(--color-chip)]"
-          >
-            <div className="flex items-start gap-3">
-              <JumpTarget
-                path={path}
-                line={t.line}
-                enabled={inDiff}
-                onJump={isStatic ? undefined : onJump}
-              >
-                <span className="font-bold group-hover:text-brand">
-                  <InlineCode text={t.name} />
-                </span>
-                <span className="font-mono text-xs break-all text-muted">
-                  {t.line ? `${path}:${t.line}` : path}
-                  {!inDiff && <span className="font-sans">（不在這次的變更中）</span>}
-                </span>
-              </JumpTarget>
-              <span className="flex flex-none items-center gap-1">
-                <Pill tone={t.change === 'added' ? 'brand' : 'review'}>
-                  {t.change === 'added' ? '新增' : '修改'}
-                </Pill>
-                <Pill tone="muted">{KIND_LABEL[t.kind]}</Pill>
-                {button(anchor, t.name, `對測試「${t.name}」留言`)}
-              </span>
-            </div>
-            <div className="text-[13px]">
-              <span className="mr-2 font-medium text-brand">情境</span>
-              <InlineCode text={t.scenario} />
-            </div>
-            {t.why && (
-              <div className="rounded-[10px] bg-fill-2 px-3 py-2.5 text-[13px] text-ink-2">
-                <span className="mr-2 font-medium">為什麼改</span>
-                <InlineCode text={t.why} />
-              </div>
-            )}
-            <TestVerification
-              file={path}
-              runs={runs}
-              isStatic={isStatic}
-              onShowResults={onShowResults}
-            />
-            {slot(anchor, t.name)}
-          </div>
+            test={t}
+            path={path}
+            inDiff={paths.includes(path)}
+            runs={runs}
+            isStatic={isStatic}
+            anchorAttr={anchorAttr}
+            button={button}
+            slot={slot}
+            onJump={onJump}
+            onShowResults={onShowResults}
+          />
         )
       })}
       {undocumented.length > 0 && (
@@ -272,12 +275,21 @@ export function TestsSection({
                 key={f.path}
                 className="flex items-center gap-3 rounded-xl bg-fill-2 px-3.5 py-2.5 text-[13px]"
               >
-                <JumpTarget path={f.path} enabled onJump={isStatic ? undefined : onJump}>
-                  <span className="font-mono break-all group-hover:text-brand">{f.path}</span>
-                </JumpTarget>
+                {isStatic || !onJump ? (
+                  <span className="min-w-0 flex-1 font-mono break-all">{f.path}</span>
+                ) : (
+                  <button
+                    type="button"
+                    title="在程式碼變更中查看"
+                    onClick={() => onJump(f.path)}
+                    className="min-w-0 flex-1 cursor-pointer text-left font-mono break-all hover:text-brand"
+                  >
+                    {f.path}
+                  </button>
+                )}
                 <span className="flex flex-none items-center gap-1">
                   <Pill tone="muted">{FILE_STATUS[f.status]}</Pill>
-                  <Pill tone="decision">未說明</Pill>
+                  <Pill tone="warn">未說明</Pill>
                 </span>
               </li>
             ))}

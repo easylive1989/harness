@@ -47,13 +47,15 @@ export function Panel({ className, ...p }: HTMLAttributes<HTMLElement>) {
   return <section className={cx('rounded-2xl bg-surface shadow-card', className)} {...p} />
 }
 
-export type Tone = 'neutral' | 'brand' | 'decision' | 'progress' | 'review' | 'danger' | 'muted'
+export type Tone =
+  'neutral' | 'brand' | 'decision' | 'progress' | 'review' | 'warn' | 'danger' | 'muted'
 const TONES: Record<Tone, string> = {
   neutral: 'bg-fill text-ink-2',
   brand: 'bg-brand-soft text-brand-ink',
   decision: 'bg-decision text-decision-ink',
   progress: 'bg-decision text-progress',
   review: 'bg-review-soft text-review',
+  warn: 'bg-warn-soft text-warn',
   danger: 'bg-danger-soft text-danger',
   muted: 'bg-fill text-muted'
 }
@@ -63,6 +65,7 @@ export const TONE_TEXT: Record<Tone, string> = {
   decision: 'text-decision-ink',
   progress: 'text-progress',
   review: 'text-review',
+  warn: 'text-warn',
   danger: 'text-danger',
   muted: 'text-muted'
 }

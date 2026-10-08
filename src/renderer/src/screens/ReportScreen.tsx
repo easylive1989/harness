@@ -6,7 +6,7 @@ import { call, errorText } from '../api'
 import { Button, Spinner } from '../components/ui'
 import { shortTime } from '../lib/format'
 import { usePending } from '../lib/usePending'
-import { anchorTarget, findAnchor } from '../report/anchors'
+import { anchorTarget, findAnchor, reveal } from '../report/anchors'
 import { buildReportHtml, exportFileName } from '../report/exportHtml'
 import { FeedbackPanel } from '../report/FeedbackPanel'
 import { ReportView } from '../report/ReportView'
@@ -88,7 +88,7 @@ export function ReportScreen({
       const target = anchorTarget(anchor)
       if (target) setDiffFocus({ version: latest, ...target })
     })
-    findAnchor(anchor)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+    reveal(findAnchor(anchor))
   }
 
   return (

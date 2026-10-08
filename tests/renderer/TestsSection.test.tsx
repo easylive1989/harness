@@ -61,6 +61,12 @@ test('新增的測試排在概觀之後、其他區塊之前，列出名稱、�
   )
   expect(order.slice(0, 3)).toEqual(['概觀', '新增的測試', '架構前後對照'])
 
+  // 測試名稱是標題（螢幕閱讀器可以用標題跳著看）
+  expect(
+    within(section())
+      .getAllByRole('heading', { level: 3 })
+      .map((h) => h.textContent)
+  ).toEqual(['連續失敗 5 次後鎖定帳號', '錯誤密碼回 401'])
   const added = item('連續失敗 5 次後鎖定帳號')
   expect(added).toHaveAttribute('data-anchor', 'test:t1')
   expect(within(added).getByText('src/auth/lockout.test.ts:3')).toBeInTheDocument()
@@ -85,28 +91,18 @@ test('新增的測試排在概觀之後、其他區塊之前，列出名稱、�
   expect(within(section()).queryByText('這次沒有新增測試')).not.toBeInTheDocument()
 })
 
-test('驗證結果：不捏造逐個測試的結果，多個指令時顯示整體並連到測試結果', async () => {
+test('驗證結果：不捏造逐個測試的結果；輸出沒提到測試檔時看跑測試的指令（不看 lint）', async () => {
   renderReport()
   await loaded()
-  // fixture：npm test 通過、lint 失敗、e2e 略過
+  // fixture：npm test 通過、lint 失敗、e2e 略過（npm run e2e 看不出是跑測試的指令）
   const added = item('連續失敗 5 次後鎖定帳號')
-  expect(added).toHaveTextContent('驗證：1 / 2 通過 · 略過 1')
-  await userEvent.click(within(added).getByRole('button', { name: '查看測試結果' }))
-  expect(scrolled.mock.contexts.at(-1)).toBe(document.getElementById('report-tests'))
+  expect(added).toHaveTextContent('驗證：npm test 通過')
+  expect(added).not.toHaveTextContent('npm run lint')
+  // 指令很長時會被截斷：完整指令放在 title
+  expect(within(added).getByText('npm test')).toHaveAttribute('title', 'npm test')
 })
 
-test('只有一個驗證指令時顯示它的結果；輸出提到測試檔時顯示那個指令的結果', async () => {
-  report = makeReport({
-    verification: [
-      { command: 'npm test', exitCode: 1, durationMs: 10, outputTail: 'Tests  1 failed' }
-    ]
-  })
-  const { unmount } = renderReport()
-  await loaded()
-  expect(item('連續失敗 5 次後鎖定帳號')).toHaveTextContent('驗證：npm test 失敗（exit 1）')
-  expect(item('錯誤密碼回 401')).toHaveTextContent('驗證：npm test 失敗（exit 1）')
-  unmount()
-
+test('輸出提到測試檔時只顯示那個指令；沒提到時顯示所有跑測試的指令', async () => {
   report = makeReport({
     verification: [
       { command: 'npm run lint', exitCode: 1, durationMs: 10, outputTail: 'error' },
@@ -115,13 +111,35 @@ test('只有一個驗證指令時顯示它的結果；輸出提到測試檔時�
         exitCode: 0,
         durationMs: 10,
         outputTail: ' ✓ src/auth/lockout.test.ts (1 test)\n Tests  1 passed'
-      }
+      },
+      { command: 'npm run test:e2e', exitCode: 1, durationMs: 10, outputTail: '1 failed' }
     ]
   })
   renderReport()
   await loaded()
-  expect(item('連續失敗 5 次後鎖定帳號')).toHaveTextContent('驗證：npx vitest run 通過')
-  expect(item('錯誤密碼回 401')).toHaveTextContent('驗證：1 / 2 通過')
+  const added = item('連續失敗 5 次後鎖定帳號')
+  expect(added).toHaveTextContent('驗證：npx vitest run 通過')
+  expect(added).not.toHaveTextContent('test:e2e')
+  const modified = item('錯誤密碼回 401')
+  expect(modified).toHaveTextContent('npx vitest run 通過')
+  expect(modified).toHaveTextContent('npm run test:e2e 失敗（exit 1）')
+})
+
+test('沒有跑測試的指令時只給整體數字（中性樣式，不打紅叉），連到測試結果', async () => {
+  report = makeReport({
+    verification: [
+      { command: 'npm run lint', exitCode: 1, durationMs: 10, outputTail: 'error' },
+      { command: 'npm run typecheck', exitCode: 0, durationMs: 10, outputTail: '' },
+      { command: 'npm run e2e', exitCode: null, durationMs: 0, outputTail: '', skipped: '未核准' }
+    ]
+  })
+  renderReport()
+  await loaded()
+  const added = item('連續失敗 5 次後鎖定帳號')
+  expect(added).toHaveTextContent('驗證：1 / 2 通過 · 略過 1')
+  expect(within(added).getByText('1 / 2 通過').className).not.toMatch(/danger/)
+  await userEvent.click(within(added).getByRole('button', { name: '查看測試結果' }))
+  expect(scrolled.mock.contexts.at(-1)).toBe(document.getElementById('report-tests'))
 })
 
 test('沒有驗證指令或全部略過時照實顯示', async () => {
@@ -144,13 +162,16 @@ test('點測試跳到 diff 裡的測試檔；有行號時捲到那一行', async
   renderReport()
   await loaded()
   expect(pressed()).toMatch(/^src\/auth\/lockout\.ts/)
-  await userEvent.click(within(section()).getByText('src/auth/lockout.test.ts:3'))
+  await userEvent.click(within(section()).getByRole('button', { name: '連續失敗 5 次後鎖定帳號' }))
   expect(pressed()).toMatch(/^src\/auth\/lockout\.test\.ts/)
   expect(lastScrolled()).toBe('diff:src/auth/lockout.test.ts:3')
+  // 焦點跟著移到那一行（鍵盤與螢幕閱讀器使用者從那裡繼續）
+  expect(document.activeElement).toHaveAttribute('data-anchor', 'diff:src/auth/lockout.test.ts:3')
   // 沒有行號：捲到那個檔案
-  await userEvent.click(within(section()).getByText('src/auth/login.test.ts'))
+  await userEvent.click(within(section()).getByRole('button', { name: '錯誤密碼回 401' }))
   expect(pressed()).toMatch(/^src\/auth\/login\.test\.ts/)
   expect(lastScrolled()).toBe('file:src/auth/login.test.ts')
+  expect(document.activeElement).toHaveAttribute('data-anchor', 'file:src/auth/login.test.ts')
 })
 
 test('測試檔不在這次的變更裡時不能點，並註明', async () => {
@@ -161,7 +182,9 @@ test('測試檔不在這次的變更裡時不能點，並註明', async () => {
   renderReport()
   await loaded()
   const added = item('連續失敗 5 次後鎖定帳號')
-  expect(within(added).queryByRole('button', { name: /gone/ })).not.toBeInTheDocument()
+  expect(
+    within(added).queryByRole('button', { name: '連續失敗 5 次後鎖定帳號' })
+  ).not.toBeInTheDocument()
   expect(added).toHaveTextContent('src/auth/gone.test.ts（不在這次的變更中）')
 })
 
@@ -180,6 +203,26 @@ test('Claude 沒說明的測試檔列在區塊最後，標「未說明」，點�
   await userEvent.click(rest)
   expect(pressed()).toMatch(/^tests\/e2e\/lockout\.spec\.ts/)
   expect(lastScrolled()).toBe('file:tests/e2e/lockout.spec.ts')
+  // 概觀的「新增測試」旁邊標出未說明的新增測試檔
+  const overview = screen.getByRole('region', { name: '概觀' })
+  expect(within(overview).getByText('新增測試').nextSibling).toHaveTextContent('1修改 1未說明 1')
+})
+
+test('Claude 給的是絕對路徑（含 /private 前綴）：顯示 repo 裡的路徑，不重複列成未說明', async () => {
+  report = makeReport()
+  report.input.tests = [
+    { ...report.input.tests[0], file: '/tmp/wt/t1/src/auth/lockout.test.ts' },
+    { ...report.input.tests[1], file: '/private/tmp/wt/t1/src/auth/login.test.ts' }
+  ]
+  renderReport()
+  await loaded()
+  expect(
+    within(item('連續失敗 5 次後鎖定帳號')).getByText('src/auth/lockout.test.ts:3')
+  ).toBeInTheDocument()
+  expect(within(item('錯誤密碼回 401')).getByText('src/auth/login.test.ts')).toBeInTheDocument()
+  expect(within(section()).queryByText('未說明')).not.toBeInTheDocument()
+  await userEvent.click(within(section()).getByRole('button', { name: '錯誤密碼回 401' }))
+  expect(pressed()).toMatch(/^src\/auth\/login\.test\.ts/)
 })
 
 test('沒有新增測試：提醒樣式，附上 Claude 說明的原因；概觀顯示 0', async () => {
@@ -214,6 +257,9 @@ test('沒有說明任何測試、但 diff 裡有新的測試檔：不說「沒�
   expect(within(section()).queryByText('這次沒有新增測試')).not.toBeInTheDocument()
   expect(within(section()).getByText('Claude 沒有說明新增的測試')).toBeInTheDocument()
   expect(within(section()).getAllByText('未說明')).toHaveLength(2)
+  // 概觀：新增測試 0，旁邊標出 1 個未說明的新增測試檔（修改的 login.test.ts 不算）
+  const overview = screen.getByRole('region', { name: '概觀' })
+  expect(within(overview).getByText('新增測試').nextSibling).toHaveTextContent('0未說明 1')
 })
 
 test('對測試與區塊留言：回饋清單標成「測試 · 名稱」，點它捲到那個測試', async () => {
@@ -243,6 +289,6 @@ test('只能看時沒有留言按鈕，但仍可以跳到 diff', async () => {
   renderReport(true)
   await loaded()
   expect(within(section()).queryByRole('button', { name: /留言/ })).not.toBeInTheDocument()
-  await userEvent.click(within(section()).getByText('src/auth/login.test.ts'))
+  await userEvent.click(within(section()).getByRole('button', { name: '錯誤密碼回 401' }))
   expect(pressed()).toMatch(/^src\/auth\/login\.test\.ts/)
 })

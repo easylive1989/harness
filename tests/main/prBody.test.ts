@@ -3,7 +3,7 @@ import { expect, test } from 'vitest'
 import { prBody } from '../../src/main/tasks/prBody'
 import type { ReportInput } from '@shared/report'
 import type { Report } from '@shared/types'
-import { sampleReport } from '../fixtures/report'
+import { bigDiff, sampleDiff, sampleReport } from '../fixtures/report'
 
 const report = (input: ReportInput = sampleReport): Report => ({
   version: 1,
@@ -53,4 +53,48 @@ test('沒有新增測試時寫明，附上 Claude 說明的原因', () => {
   // 只有修改既有測試：一樣寫明沒有新增，再列出修改的測試
   const onlyModified = prBody(report({ ...sampleReport, tests: [sampleReport.tests[1]] }))
   expect(onlyModified).toContain('這次沒有新增測試。\n- 修改：**錯誤密碼回 401**')
+})
+
+test('沒有說明新增的測試、但 diff 裡有新增的測試檔：不說「沒有新增測試」，列出那些檔案', () => {
+  // 舊報告讀出來是 tests: []；diff 裡有新增的 lockout.test.ts（login.test.ts 是修改，不算）
+  const old = { ...report({ ...sampleReport, tests: [] }), diff: sampleDiff }
+  const body = prBody(old)
+  expect(body).toContain('## 新增的測試\nClaude 沒有說明新增的測試：`src/auth/lockout.test.ts`\n')
+  expect(body).not.toContain('這次沒有新增測試')
+
+  const two = prBody({
+    ...report({ ...sampleReport, tests: [], tests_note: '只是重構' }),
+    diff: sampleDiff + bigDiff('tests/e2e/lockout.spec.ts', 1) + bigDiff('tests/fixtures/u.ts', 1)
+  })
+  expect(two).toContain(
+    'Claude 沒有說明新增的測試：`src/auth/lockout.test.ts`、`tests/e2e/lockout.spec.ts`\nClaude 的說明：只是重構\n'
+  )
+
+  // 有說明新增的測試，另外還有沒說明的新增測試檔
+  const extra = prBody({ ...report(), diff: sampleDiff + bigDiff('tests/e2e/lockout.spec.ts', 1) })
+  expect(extra).toContain('- **連續失敗 5 次後鎖定帳號**')
+  expect(extra).toContain('- 未說明的新增測試檔：`tests/e2e/lockout.spec.ts`')
+})
+
+test('Claude 給的文字壓成一行；code span 裡的反引號會跳脫', () => {
+  const body = prBody({
+    ...report({
+      ...sampleReport,
+      tests: [
+        {
+          id: 't1',
+          file: 'src/`odd`.test.ts',
+          name: '多行\n名稱',
+          kind: 'unit',
+          change: 'added',
+          scenario: '第一行\n\n  第二行'
+        }
+      ],
+      decisions: [{ ...sampleReport.decisions[0], rationale: '多台\n機器共享' }]
+    }),
+    verification: [{ command: 'echo `x`', exitCode: 0, durationMs: 1, outputTail: '' }]
+  })
+  expect(body).toContain('- **多行 名稱**（`` src/`odd`.test.ts ``）：第一行 第二行')
+  expect(body).toContain('（原因：多台 機器共享）')
+  expect(body).toContain('- ✅ `` echo `x` ``')
 })
