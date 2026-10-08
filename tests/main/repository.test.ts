@@ -46,8 +46,12 @@ describe('Repository', () => {
     expect(read.branchPrefix).toBe('a/')
   })
 
-  test('cachedSettings：尚未讀取時是預設值，之後是最近一次讀取或寫入的設定', async () => {
-    expect(repo.cachedSettings().branchPrefix).toBe('harness/')
+  test('cachedSettings：尚未讀取時是預設值但不允許任何指令，之後是最近一次讀取或寫入的設定', async () => {
+    // 還不知道使用者的允許清單：寧可多問，不自動允許預設的指令
+    expect(repo.cachedSettings()).toMatchObject({
+      branchPrefix: 'harness/',
+      alwaysAllowedCommands: []
+    })
     await writeFile(join(root, 'settings.json'), JSON.stringify({ branchPrefix: 'disk/' }))
     await repo.getSettings()
     expect(repo.cachedSettings().branchPrefix).toBe('disk/')
@@ -56,6 +60,12 @@ describe('Repository', () => {
       branchPrefix: 'disk/',
       alwaysAllowedCommands: ['npm test']
     })
+  })
+
+  test('讀取失敗（設定檔壞掉）時 cachedSettings 仍不允許任何指令', async () => {
+    await writeFile(join(root, 'settings.json'), '{"alwaysAllowedCommands":')
+    await expect(repo.getSettings()).rejects.toThrow()
+    expect(repo.cachedSettings().alwaysAllowedCommands).toEqual([])
   })
 
   test('寫入失敗時快取維持原值，之後的更新照常進行', async () => {

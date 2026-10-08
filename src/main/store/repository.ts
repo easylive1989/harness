@@ -58,11 +58,13 @@ export class Repository {
     })
   }
   /**
-   * 同步取得最近一次讀取或寫入的設定（尚未讀取時是預設值）。
+   * 同步取得最近一次讀取或寫入的設定。
    * 給執行中的權限判斷用：設定頁移除允許的指令後，進行中的對話輪也立即適用。
    */
   cachedSettings(): Settings {
-    return this.settings ?? defaultSettings(this.home)
+    // 還沒成功讀過設定（或設定檔壞掉）時不知道使用者的允許清單：
+    // 其他欄位用預設值，但不自動允許任何指令（fail-safe，寧可多問一次）
+    return this.settings ?? { ...defaultSettings(this.home), alwaysAllowedCommands: [] }
   }
 
   listRepos() {

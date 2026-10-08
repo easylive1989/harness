@@ -112,7 +112,8 @@ export async function detectClaude(exec: Exec, explicitPath?: string): Promise<C
 
 /**
  * 快取的 Claude Code 狀態。`status(true)` 重新偵測；同時有多次偵測時只有最後開始的那次會更新快取
- * （較早開始、較晚結束的偵測不會蓋掉較新的結果），每次呼叫都回傳當下的快取。
+ * （較早開始、較晚結束的偵測不會蓋掉較新的結果）。較早開始的呼叫會等到最新的偵測結束再回傳，
+ * 不會拿到過時的狀態；最新的偵測失敗時只有它的呼叫收到錯誤，其他呼叫回傳原本的快取。
  */
 export function createClaudeStatusCache(
   detect: () => Promise<ClaudeStatus>,
@@ -120,13 +121,27 @@ export function createClaudeStatusCache(
 ) {
   let cached = initial
   let generation = 0
+  /** 最後開始的那次偵測（結束時已更新快取） */
+  let latest: Promise<void> = Promise.resolve()
   return {
     current: () => cached,
     async status(refresh = false): Promise<ClaudeStatus> {
-      if (refresh) {
-        const mine = ++generation
-        const next = await detect()
+      if (!refresh) return cached
+      const mine = ++generation
+      const run = detect().then((next) => {
         if (mine === generation) cached = next
+      })
+      latest = run
+      try {
+        await run
+      } catch (e) {
+        if (mine === generation) throw e
+      }
+      // 等待期間有更新的偵測開始：等到最新的那次結束（期間可能又有更新的）
+      let waited = run
+      while (latest !== waited) {
+        waited = latest
+        await waited.catch(() => undefined)
       }
       return cached
     }

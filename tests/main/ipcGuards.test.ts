@@ -131,10 +131,21 @@ describe('isValidBranchName', () => {
   test.each(['main', 'harness/20261008-ab12cd34', 'feat/a.b', 'v1.2', 'a-b_c'])('接受 %s', (n) =>
     expect(isValidBranchName(n)).toBe(true)
   )
-  test.each(['', 'a.', 'a/', 'a.lock', 'a/b.lock', '.a', 'a/.b', 'a b', 'a..b', 'a@{1}', '-a'])(
-    '拒絕 %j',
-    (n) => expect(isValidBranchName(n)).toBe(false)
-  )
+  test.each([
+    '',
+    'a.',
+    'a/',
+    'a.lock',
+    'a/b.lock',
+    '.a',
+    'a/.b',
+    'a b',
+    'a..b',
+    'a@{1}',
+    '-a',
+    '@',
+    'HEAD'
+  ])('拒絕 %j', (n) => expect(isValidBranchName(n)).toBe(false))
 })
 
 describe('assertString', () => {

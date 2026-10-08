@@ -53,10 +53,12 @@ const nonEmpty = (v: unknown, what: string) => {
 /**
  * git check-ref-format 的分支名稱規則（純 JS 版，不必執行 git）：不可有空白、控制字元與
  * ~^:?*[\，不可有 ..、@{、//，不可以 - 或 / 開頭、以 / 或 . 結尾，
- * 每一段不可以 . 開頭或以 .lock 結尾。
+ * 每一段不可以 . 開頭或以 .lock 結尾；保險起見也拒絕單獨的 `@` 與 `HEAD`。
+ * 檢查的是完整的分支名稱：設定的分支前綴以 `${前綴}x` 代表之後接上「日期-代號」的樣子。
  */
 export function isValidBranchName(name: string): boolean {
-  if (!name || /[\s~^:?*[\\]/.test(name)) return false
+  if (!name || name === '@' || name === 'HEAD') return false
+  if (/[\s~^:?*[\\]/.test(name)) return false
   // 控制字元（含 DEL）
   if ([...name].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f)) return false
   if (name.includes('..') || name.includes('@{') || name.includes('//')) return false

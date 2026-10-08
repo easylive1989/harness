@@ -194,6 +194,45 @@ describe('createClaudeStatusCache', () => {
     expect(cache.current().path).toBe('/second')
   })
 
+  test('較早開始的呼叫會等到最新的偵測結束，不回傳過時的狀態', async () => {
+    const [first, second, third] = [deferred(), deferred(), deferred()]
+    const pending = [first, second, third]
+    const cache = createClaudeStatusCache(() => pending.shift()!.promise, status('/initial'))
+    const results: string[] = []
+    const track = (p: Promise<ClaudeStatus>, name: string) =>
+      p.then((s) => void results.push(`${name}:${s.path}`))
+    const flush = () => new Promise((r) => setTimeout(r, 0))
+    const a = track(cache.status(true), 'a')
+    const b = track(cache.status(true), 'b')
+    first.resolve(status('/first'))
+    await flush()
+    // a 的偵測結束了，但 b 的還沒：a 繼續等
+    expect(results).toEqual([])
+    // 等待期間又開始一次偵測：a、b 都要等到這一次
+    const c = track(cache.status(true), 'c')
+    second.resolve(status('/second'))
+    await flush()
+    expect(results).toEqual([])
+    third.resolve(status('/third'))
+    await Promise.all([a, b, c])
+    expect(results.sort()).toEqual(['a:/third', 'b:/third', 'c:/third'])
+    expect(cache.current().path).toBe('/third')
+  })
+
+  test('最新的偵測失敗時，它的呼叫收到錯誤，較早的呼叫回傳原本的快取', async () => {
+    const first = deferred()
+    let rejectSecond!: (e: Error) => void
+    const second = new Promise<ClaudeStatus>((_, reject) => (rejectSecond = reject))
+    const pending = [first.promise, second]
+    const cache = createClaudeStatusCache(() => pending.shift()!, status('/initial'))
+    const older = cache.status(true)
+    const newer = cache.status(true)
+    first.resolve(status('/first'))
+    rejectSecond(new Error('boom'))
+    await expect(newer).rejects.toThrow('boom')
+    expect(await older).toEqual(status('/initial'))
+  })
+
   test('偵測失敗時保留原本的快取', async () => {
     const cache = createClaudeStatusCache(async () => {
       throw new Error('boom')
