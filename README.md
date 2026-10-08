@@ -22,6 +22,7 @@ npm run dev            # 開發模式啟動 app
 npm test               # 單元、整合與元件測試（Vitest）
 npm run typecheck      # 型別檢查（main／preload 與 renderer）
 npm run lint           # ESLint
+npm run test:e2e       # 建置後跑自動化端對端測試（Playwright，假 Claude）
 npx electron-vite build  # 建置到 out/（手動端對端驗證用）
 ```
 
@@ -34,6 +35,16 @@ app 不打包、沒有程式碼簽章與自動更新，用 `npm run dev`（或�
   - `tasks/<任務 id>/task.json`、`timeline.jsonl`、`reports/v<n>.json`
 - 任務的 worktree：預設 `~/.harness/worktrees/<repo>/<日期>-<代號>`，分支 `harness/<日期>-<代號>`（設定頁可改位置與分支前綴）
 - 環境變數 `HARNESS_USER_DATA_DIR` 可以把 userData 換到別的資料夾（驗證或試用時不碰真正的資料）
+
+## 自動化端對端測試
+
+`npm run test:e2e` 先 `electron-vite build`，再用 `@playwright/test` 的 Electron 支援啟動 `out/` 裡的 app，透過真實介面操作。不需要登入 Claude Code，也不用訂閱額度：
+
+- app 以 `HARNESS_E2E_FAKE_CLAUDE=1` 啟動時，main 程序改用 `src/main/e2e/fakeClaude.ts` 的假 Claude（Claude Code 狀態視為已登入、模型用內建清單）。測試用 `tests/e2e/fixtures.ts` 的 `h.claude` 等 app 送出的每一則訊息，再指定這一輪要回的文字、工具呼叫或錯誤。
+- 工具呼叫走真實的路徑：PreToolUse hook → `canUseTool`（需要時跳出核准框）→ 執行；harness 工具交給 app 的 handler，`Read`／`Write`／`Edit`／`Bash` 真的在 worktree 裡執行（`Glob`、`Grep` 等其他工具不支援）。
+- 每個測試用獨立的暫存資料夾（userData、worktree 位置、`scripts/create-demo-repo.sh` 建立的示範 repo），依序執行，每個測試會開一個 Electron 視窗。失敗時附上截圖、app 的輸出與 task.json，暫存資料夾留著方便查看（路徑印在輸出裡）。
+- 情境在 `tests/e2e/*.spec.ts`：主流程到合併、反問、分岔、規格修改、釐清階段的阻擋、指令核准、插話、執行錯誤、報告回饋與匯出、中斷續接、丟棄。
+- 假 Claude 驗不到真 Claude 的行為（提示詞的效果、Claude 實際產生的參數、Claude Code CLI 的版本差異），這些仍靠下面的手動驗證。
 
 ## 手動端對端驗證
 

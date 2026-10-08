@@ -4,3 +4,8 @@ dist/
 .DS_Store
 *.log
 .eslintcache
+# Playwright（npm run test:e2e）的結果、報告與快取
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/

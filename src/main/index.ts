@@ -23,7 +23,7 @@ import { TaskManager } from './tasks/taskManager'
 import { createHarnessServer } from './tools/harnessTools'
 import { runVerification } from './verify/verifyRunner'
 
-// 手動端對端驗證（scripts/e2e）用：把 userData 指到暫存資料夾，不碰使用者真正的資料。
+// 端對端驗證（scripts/e2e 的手動驗證、tests/e2e 的自動化測試）用：把 userData 指到暫存資料夾，不碰使用者真正的資料。
 // 必須在任何地方讀取 userData 之前設定
 if (process.env.HARNESS_USER_DATA_DIR) app.setPath('userData', process.env.HARNESS_USER_DATA_DIR)
 
@@ -90,18 +90,26 @@ async function start() {
   // 必須在 detectClaude 之前：從 Finder 啟動時 PATH 不含 homebrew / nvm
   await applyLoginShellPath()
 
+  // 自動化端對端測試（tests/e2e）：改用測試控制的假 Claude，不啟動 Claude Code
+  const fake =
+    process.env.HARNESS_E2E_FAKE_CLAUDE === '1'
+      ? (await import('./e2e/fakeClaude')).installFakeClaude()
+      : undefined
+
   const repo = new Repository(
     new Store(join(app.getPath('userData'), 'harness')),
     app.getPath('home')
   )
   const git = new GitService()
-  const detect = async () => detectClaude(execCapture, (await repo.getSettings()).claudePath)
+  const detect = fake
+    ? async () => fake.status
+    : async () => detectClaude(execCapture, (await repo.getSettings()).claudePath)
   // 同時有多次重新偵測（重新檢查、改 claude 路徑、視窗取得焦點）時只採用最後開始的那次
   const claude = createClaudeStatusCache(detect, await detect())
   const claudeStatus = (refresh?: boolean) => claude.status(refresh)
   // 未登入時查不到，直接用內建清單（不快取，登入後再查）
   const queryModels = createModelCache(() =>
-    claude.current().loggedIn
+    claude.current().loggedIn && !fake
       ? fetchModels(query as unknown as ModelQueryFn, {
           pathToClaudeCodeExecutable: claude.current().path,
           env: claudeEnv(),
@@ -117,8 +125,10 @@ async function start() {
     repo,
     git,
     emit,
-    queryFn: query as unknown as QueryFn,
-    createToolServer: createHarnessServer,
+    queryFn: fake?.query ?? (query as unknown as QueryFn),
+    createToolServer: fake
+      ? (sink, names) => fake.register(createHarnessServer(sink, names), sink, names)
+      : createHarnessServer,
     getClaudePath: () => claude.current().path,
     verify: runVerification
   })
