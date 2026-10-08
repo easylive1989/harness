@@ -8,8 +8,10 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, test, vi } from 'vitest'
 import {
+  BUILTIN_TOOLS,
   createPermissionGate,
   createPreToolUseHook,
+  evaluateTool,
   type GateContext
 } from '../../src/main/permissions/gate'
 import type { GatePhase } from '../../src/main/tasks/stateMachine'
@@ -77,6 +79,17 @@ describe('PermissionGate', () => {
     const input = { query: 'select:mcp__harness__ask_user', max_results: 1 }
     expect((await call('ToolSearch', input)).behavior).toBe('allow')
     expect(await callHook('ToolSearch', input)).toBe('allow')
+  })
+
+  test('提供給 Claude 的內建工具：含 Glob／Grep（新版 Claude Code 預設不提供），且都有權限規則', () => {
+    expect(BUILTIN_TOOLS).toEqual(expect.arrayContaining(['Read', 'Glob', 'Grep', 'Edit', 'Bash']))
+    const rules = {
+      getPhase: () => 'implement' as const,
+      worktreePath: '/wt/t1',
+      getAllowedPatterns: () => []
+    }
+    for (const tool of BUILTIN_TOOLS)
+      expect(evaluateTool(tool, {}, rules).message ?? '').not.toContain('不允許使用')
   })
 
   test('只信任 app 自己註冊（source: sdk）的 harness MCP 伺服器', async () => {

@@ -2081,8 +2081,10 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, test, vi } from 'vitest'
 import {
+  BUILTIN_TOOLS,
   createPermissionGate,
   createPreToolUseHook,
+  evaluateTool,
   type GateContext
 } from '../../src/main/permissions/gate'
 import type { GatePhase } from '../../src/main/tasks/stateMachine'
@@ -2150,6 +2152,17 @@ describe('PermissionGate', () => {
     const input = { query: 'select:mcp__harness__ask_user', max_results: 1 }
     expect((await call('ToolSearch', input)).behavior).toBe('allow')
     expect(await callHook('ToolSearch', input)).toBe('allow')
+  })
+
+  test('提供給 Claude 的內建工具：含 Glob／Grep（新版 Claude Code 預設不提供），且都有權限規則', () => {
+    expect(BUILTIN_TOOLS).toEqual(expect.arrayContaining(['Read', 'Glob', 'Grep', 'Edit', 'Bash']))
+    const rules = {
+      getPhase: () => 'implement' as const,
+      worktreePath: '/wt/t1',
+      getAllowedPatterns: () => []
+    }
+    for (const tool of BUILTIN_TOOLS)
+      expect(evaluateTool(tool, {}, rules).message ?? '').not.toContain('不允許使用')
   })
 
   test('只信任 app 自己註冊（source: sdk）的 harness MCP 伺服器', async () => {
@@ -2475,6 +2488,13 @@ const WRITE = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const ALWAYS = new Set(['TodoWrite', 'Task', 'Agent', 'ToolSearch'])
 const NEEDS_APPROVAL = new Set(['WebFetch', 'WebSearch'])
 const PATH_KEYS = ['file_path', 'notebook_path', 'path'] as const
+
+/**
+ * 明確提供給 Claude 的內建工具（query 的 `tools`）：只有上面有規則的這些。
+ * 新版 Claude Code 預設不提供 Glob／Grep（改用 Bash 搜尋），但釐清階段不能用 Bash，
+ * 不明確列出的話 Claude 只能猜檔名。CLI 不認得的名稱（舊工具）會被忽略。
+ */
+export const BUILTIN_TOOLS: string[] = [...READ, ...WRITE, 'Bash', ...NEEDS_APPROVAL, ...ALWAYS]
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -5496,6 +5516,7 @@ import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AppEvent } from '@shared/ipc'
+import { BUILTIN_TOOLS } from '../../src/main/permissions/gate'
 import { Repository } from '../../src/main/store/repository'
 import { Store } from '../../src/main/store/store'
 import { TaskManager, type TaskManagerDeps } from '../../src/main/tasks/taskManager'
@@ -5569,6 +5590,8 @@ describe('TaskManager：建立任務與釐清', () => {
     expect(claude.calls[0].options.canUseTool).toBeTypeOf('function')
     expect(claude.calls[0].options.hooks?.PreToolUse?.[0].hooks).toHaveLength(1)
     // 不載入 claude.ai 帳號上的連接器（Harness 一律拒絕使用，只會增加噪音），其餘環境變數照傳
+    // 只提供 PermissionGate 有規則的內建工具（新版 Claude Code 預設沒有 Glob／Grep，釐清時就找不到檔案）
+    expect(claude.calls[0].options.tools).toEqual(BUILTIN_TOOLS)
     expect(claude.calls[0].options.env).toMatchObject({
       ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
       PATH: process.env.PATH
@@ -5739,6 +5762,7 @@ import type { GitLike } from '../git/gitService'
 import { hasShellOperators, matchesPattern } from '../permissions/commandPattern'
 import {
   type ApprovalRequest,
+  BUILTIN_TOOLS,
   createPermissionGate,
   createPreToolUseHook,
   type GateContext
@@ -6158,6 +6182,7 @@ export class TaskManager {
       resume,
       forkSession: branch && !branch.sessionId ? true : undefined,
       settingSources: settings.loadProjectSettings ? ['project'] : [],
+      tools: BUILTIN_TOOLS,
       systemPrompt: { type: 'preset', preset: 'claude_code', append: MAIN_SYSTEM_APPEND },
       mcpServers: {
         harness: this.d.createToolServer(

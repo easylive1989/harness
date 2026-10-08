@@ -63,6 +63,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 - `cwd`: 任務 worktree
 - `model`: 任務模型
 - `settingSources: ['project']`
+- `tools`: 只列出 PermissionGate 有規則的內建工具（Read、Glob、Grep、Edit、Write、NotebookEdit、Bash、WebFetch、WebSearch、子代理、ToolSearch）。新版 Claude Code 預設不提供 Glob／Grep（改用 Bash 搜尋），釐清階段不能用 Bash，必須明確列出
 - `systemPrompt: { type: 'preset', preset: 'claude_code', append: <Harness 階段指示> }`
 - `mcpServers: { harness: HarnessTools }`（`alwaysLoad: true`：Claude Code 預設把 MCP 工具藏在 tool search 後面，沒先載入 schema 時 Claude 會猜錯參數）
 - `canUseTool: PermissionGate`

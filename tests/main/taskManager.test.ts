@@ -6,6 +6,7 @@ import { describe, expect, test, vi } from 'vitest'
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AppEvent } from '@shared/ipc'
 import { IMPLEMENT_START_REF, msgDisplay, startsImplementation } from '@shared/protocol'
+import { BUILTIN_TOOLS } from '../../src/main/permissions/gate'
 import { Repository } from '../../src/main/store/repository'
 import { Store } from '../../src/main/store/store'
 import { TaskManager, type TaskManagerDeps } from '../../src/main/tasks/taskManager'
@@ -79,6 +80,8 @@ describe('TaskManager：建立任務與釐清', () => {
     expect(claude.calls[0].options.canUseTool).toBeTypeOf('function')
     expect(claude.calls[0].options.hooks?.PreToolUse?.[0].hooks).toHaveLength(1)
     // 不載入 claude.ai 帳號上的連接器（Harness 一律拒絕使用，只會增加噪音），其餘環境變數照傳
+    // 只提供 PermissionGate 有規則的內建工具（新版 Claude Code 預設沒有 Glob／Grep，釐清時就找不到檔案）
+    expect(claude.calls[0].options.tools).toEqual(BUILTIN_TOOLS)
     expect(claude.calls[0].options.env).toMatchObject({
       ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
       PATH: process.env.PATH

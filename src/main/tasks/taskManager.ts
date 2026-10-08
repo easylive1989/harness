@@ -24,6 +24,7 @@ import type { GitLike } from '../git/gitService'
 import { hasShellOperators, matchesPattern } from '../permissions/commandPattern'
 import {
   type ApprovalRequest,
+  BUILTIN_TOOLS,
   createPermissionGate,
   createPreToolUseHook,
   type GateContext
@@ -447,6 +448,7 @@ export class TaskManager {
       resume,
       forkSession: branch && !branch.sessionId ? true : undefined,
       settingSources: settings.loadProjectSettings ? ['project'] : [],
+      tools: BUILTIN_TOOLS,
       systemPrompt: { type: 'preset', preset: 'claude_code', append: MAIN_SYSTEM_APPEND },
       mcpServers: {
         harness: this.d.createToolServer(

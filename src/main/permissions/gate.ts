@@ -53,6 +53,13 @@ const ALWAYS = new Set(['TodoWrite', 'Task', 'Agent', 'ToolSearch'])
 const NEEDS_APPROVAL = new Set(['WebFetch', 'WebSearch'])
 const PATH_KEYS = ['file_path', 'notebook_path', 'path'] as const
 
+/**
+ * 明確提供給 Claude 的內建工具（query 的 `tools`）：只有上面有規則的這些。
+ * 新版 Claude Code 預設不提供 Glob／Grep（改用 Bash 搜尋），但釐清階段不能用 Bash，
+ * 不明確列出的話 Claude 只能猜檔名。CLI 不認得的名稱（舊工具）會被忽略。
+ */
+export const BUILTIN_TOOLS: string[] = [...READ, ...WRITE, 'Bash', ...NEEDS_APPROVAL, ...ALWAYS]
+
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
 
