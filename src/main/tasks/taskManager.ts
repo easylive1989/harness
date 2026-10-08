@@ -27,7 +27,8 @@ import {
   BUILTIN_TOOLS,
   createPermissionGate,
   createPreToolUseHook,
-  type GateContext
+  type GateContext,
+  hooksDirInside
 } from '../permissions/gate'
 import type { Repository } from '../store/repository'
 import { type HarnessToolName, type ToolSink, TURN_ENDING_TOOLS } from '../tools/harnessTools'
@@ -414,8 +415,13 @@ export class TaskManager {
     entries: TimelineEntry[]
   ) {
     // 等上一段執行結束的期間任務可能已被丟棄或開始收尾
-    this.assertCanSend(taskId, channel)
-    const settings = await this.d.repo.getSettings()
+    const before = this.assertCanSend(taskId, channel)
+    // repo 設定的 core.hooksPath 每一輪讀一次：在 worktree 內時，寫入那個資料夾要核准。
+    // 讀不到（git 失敗）時照常開始，husky 等常見的 hook 位置仍受保護
+    const [settings, hooksPath] = await Promise.all([
+      this.d.repo.getSettings(),
+      this.d.git.hooksPath(before.worktreePath).catch(() => undefined)
+    ])
     // 上面的 await 期間狀態可能又變了：建立執行前最後確認一次
     const t = this.assertCanSend(taskId, channel)
     const branchId = branchIdOf(channel)
@@ -429,6 +435,7 @@ export class TaskManager {
     const gateCtx: GateContext = {
       getPhase: () => (branch ? 'branch' : phaseOf(this.task(taskId).status)),
       worktreePath: t.worktreePath,
+      hooksDir: hooksDirInside(t.worktreePath, hooksPath),
       // 每次判斷都讀目前的設定：設定頁移除允許的指令後，進行中的這一輪也立即適用
       getAllowedPatterns: () => [
         ...this.d.repo.cachedSettings().alwaysAllowedCommands,

@@ -134,6 +134,7 @@ export function fakeGit(): GitLike & { calls: string[] } {
       calls.push(`worktree ${wt} ${branch} ${base}`)
     },
     commitAll: async () => 'abc123',
+    hooksPath: async () => undefined,
     diff: async () => 'diff --git a/a.ts b/a.ts\n',
     diffStats: async () => ({
       files: 1,

@@ -187,7 +187,9 @@ test('修改受保護的檔案：顯示工具、相對路徑、說明與要寫�
   expect(screen.getByRole('dialog', { name: 'Claude 想修改這個檔案' })).toBeInTheDocument()
   expect(screen.getByText('.claude/settings.json')).toBeInTheDocument()
   expect(screen.getByText('Edit · cwd: /wt')).toBeInTheDocument()
-  expect(screen.getByText('這個檔案會影響 Claude 的權限或 git 設定')).toBeInTheDocument()
+  expect(
+    screen.getByText('這個檔案會影響 Claude 的權限、git 設定，或在 git 操作時執行的 hook')
+  ).toBeInTheDocument()
   expect(screen.getByLabelText('要寫入的內容')).toHaveTextContent(
     '- "allow": [] + "allow": ["Bash(*)"]'
   )

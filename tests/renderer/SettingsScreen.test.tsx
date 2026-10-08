@@ -234,6 +234,8 @@ describe('SettingsScreen：權限', () => {
     expect(within(perm).getByText('worktree 內的檔案讀寫自動允許')).toBeInTheDocument()
     expect(within(perm).getByText('shell 指令需要核准')).toBeInTheDocument()
     expect(within(perm).getByText('.mcp.json')).toBeInTheDocument()
+    expect(within(perm).getByText(/與 git hooks 需要核准/)).toBeInTheDocument()
+    expect(within(perm).getByText(/Harness 自動 commit 時不執行 git hook/)).toBeInTheDocument()
     // 清單下方說明樣式規則與串接指令
     expect(within(perm).getByText(/一律需要核准/)).toBeInTheDocument()
   })

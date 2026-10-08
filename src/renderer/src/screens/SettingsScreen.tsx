@@ -505,10 +505,11 @@ function PermissionSection({ settings, save }: { settings: Settings; save: Save 
         <FixedRule
           title={
             <>
-              修改 <code>.git</code>、<code>.claude</code> 與 <code>.mcp.json</code> 需要核准
+              修改 <code>.git</code>、<code>.claude</code>、<code>.mcp.json</code> 與 git hooks
+              需要核准
             </>
           }
-          detail="這些檔案會改變 git 或 Claude 的行為，即使在 worktree 內也會先詢問"
+          detail="這些檔案會改變 git 或 Claude 的行為，即使在 worktree 內也會先詢問。git hooks 包含 .husky、.githooks、lefthook、pre-commit 與 core.hooksPath；Harness 自動 commit 時不執行 git hook"
         />
         <FixedRule title="shell 指令需要核准" detail="下方清單中的指令不必詢問" />
         <AllowedCommands list={settings.alwaysAllowedCommands} save={save} />

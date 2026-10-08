@@ -88,6 +88,41 @@ describe('GitService', () => {
     })
   })
 
+  test('commitAll 不執行任何 git hook（hook 檔案在 worktree 裡，Claude 改得到）', async () => {
+    await git.createWorktree(repo, wt, 'harness/t1', 'main')
+    // repo 設定的 core.hooksPath 指向 worktree 裡的 .husky：pre-commit 失敗、post-commit 寫標記
+    const marker = join(await mkdtemp(join(tmpdir(), 'harness-hook-')), 'ran')
+    await mkdir(join(wt, '.husky'))
+    for (const hook of ['pre-commit', 'commit-msg', 'post-commit']) {
+      await writeFile(
+        join(wt, '.husky', hook),
+        `#!/bin/sh\necho ${hook} >> "${marker}"\n${hook === 'pre-commit' ? 'exit 1\n' : ''}`,
+        { mode: 0o755 }
+      )
+    }
+    sh(repo, 'config', 'core.hooksPath', '.husky')
+    await writeFile(join(wt, 'a.txt'), 'one\ntwo\n')
+    expect(await git.commitAll(wt, 'change')).toMatch(/^[0-9a-f]{40}$/)
+    expect(existsSync(marker)).toBe(false)
+    expect(sh(wt, 'status', '--porcelain')).toBe('')
+    // 確認 hook 本身有效：一般的 git commit 會執行它（pre-commit 失敗）
+    await writeFile(join(wt, 'a.txt'), 'one\ntwo\nthree\n')
+    sh(wt, 'add', '-A')
+    expect(() =>
+      execFileSync('git', ['commit', '-q', '-m', 'x'], { cwd: wt, stdio: 'pipe' })
+    ).toThrow()
+    expect(existsSync(marker)).toBe(true)
+  })
+
+  test('hooksPath：回傳 repo 設定的 core.hooksPath（相對路徑以 worktree 為準）；沒設定時 undefined', async () => {
+    await git.createWorktree(repo, wt, 'harness/t1', 'main')
+    expect(await git.hooksPath(wt)).toBeUndefined()
+    sh(repo, 'config', 'core.hooksPath', '.githooks')
+    expect(await git.hooksPath(wt)).toBe(join(wt, '.githooks'))
+    sh(repo, 'config', 'core.hooksPath', '/opt/hooks')
+    expect(await git.hooksPath(wt)).toBe('/opt/hooks')
+  })
+
   test('改名視為刪除加新增，路徑不含 =>', async () => {
     await git.createWorktree(repo, wt, 'harness/t1', 'main')
     await rename(join(wt, 'a.txt'), join(wt, 'renamed.txt'))
@@ -207,6 +242,45 @@ describe('runCommand', () => {
 
   test('沒有 input 時 stdin 是空的，不會卡住', async () => {
     expect(await runCommand('cat', [], tmpdir())).toBe('')
+  })
+
+  test('逾時就終止整個程序群組並回報錯誤，不會一直卡住', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'harness-hang-'))
+    const marker = join(dir, 'child-alive')
+    const started = Date.now()
+    // 子程序（sh 底下的 sleep）也要一起終止：留著的話會佔住輸出管線
+    await expect(
+      runCommand('sh', ['-c', `(sleep 2; touch "${marker}") & sleep 30`], dir, { timeoutMs: 200 })
+    ).rejects.toThrow('逾時')
+    expect(Date.now() - started).toBeLessThan(1500)
+    await new Promise((r) => setTimeout(r, 2500))
+    expect(existsSync(marker)).toBe(false)
+  })
+})
+
+describe('GitService 的逾時', () => {
+  test('push 卡住時依設定的上限終止並回報錯誤（開 PR 不會一直等）', async () => {
+    const slow = new GitService({ timeouts: { network: 300 } })
+    await slow.createWorktree(repo, wt, 'harness/t1', 'main')
+    // ssh 連線卡住：core.sshCommand 只是 sleep
+    sh(repo, 'remote', 'add', 'origin', 'ssh://example.invalid/repo.git')
+    sh(repo, 'config', 'core.sshCommand', "sh -c 'sleep 30' --")
+    const started = Date.now()
+    await expect(slow.pushAndOpenPr(wt, 'harness/t1', 'main', 't', 'b')).rejects.toThrow('逾時')
+    expect(Date.now() - started).toBeLessThan(3000)
+  })
+
+  test('預設上限：commit 120 秒、push 與 gh 300 秒、其他 60 秒', () => {
+    expect(new GitService().timeouts).toEqual({
+      default: 60_000,
+      commit: 120_000,
+      network: 300_000
+    })
+    expect(new GitService({ timeouts: { commit: 5 } }).timeouts).toEqual({
+      default: 60_000,
+      commit: 5,
+      network: 300_000
+    })
   })
 })
 

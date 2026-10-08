@@ -22,6 +22,11 @@ export interface ApprovalRequest {
 export interface GateContext {
   getPhase(): GatePhase
   worktreePath: string
+  /**
+   * repo 設定的 core.hooksPath 在 worktree 內時，相對於 worktree 的路徑（'' 是 worktree 根目錄）；
+   * 每一輪開始時讀一次（見 hooksDirInside），寫入這個資料夾要核准
+   */
+  hooksDir?: string
   getAllowedPatterns(): string[]
   requestApproval(req: ApprovalRequest, signal: AbortSignal): Promise<PermissionDecision>
   onApproved(command: string | undefined, rememberPattern?: string): void
@@ -35,7 +40,7 @@ export interface GateContext {
 /** evaluateTool 只需要規則相關的部分（hook 另外會通知擋下） */
 export type GateRules = Pick<
   GateContext,
-  'getPhase' | 'worktreePath' | 'getAllowedPatterns' | 'onBlocked'
+  'getPhase' | 'worktreePath' | 'hooksDir' | 'getAllowedPatterns' | 'onBlocked'
 >
 
 export interface Evaluation {
@@ -140,10 +145,34 @@ function globEscapes(root: string, input: Record<string, unknown>): boolean {
   return !isInside(root, pattern)
 }
 
-/** .git、.claude/ 與 .mcp.json 會改變 git 或 Claude 的行為，修改前要人工核准 */
-function isProtected(rel: string): boolean {
+/** 存放 git hook 腳本的資料夾（husky、自訂的 .githooks、lefthook 的腳本） */
+const HOOK_DIRS = new Set(['.husky', '.githooks', '.lefthook', '.lefthook-local'])
+/** lefthook 與 pre-commit 的設定檔：決定 git hook 要執行什麼 */
+const HOOK_CONFIG = /^(\.?lefthook(-local)?\.(ya?ml|json|jsonc|toml)|\.pre-commit-config\.ya?ml)$/
+
+/**
+ * worktree 裡的 core.hooksPath 相對於 worktree 的路徑（'' 是 worktree 根目錄）；
+ * 沒有設定或在 worktree 外（寫入本來就會被拒絕）時 undefined
+ */
+export function hooksDirInside(root: string, hooksPath: string | undefined): string | undefined {
+  return hooksPath === undefined ? undefined : relativeInside(root, hooksPath)
+}
+
+/**
+ * .git、.claude/、.mcp.json 與 git hook（husky、.githooks、lefthook、pre-commit、core.hooksPath）
+ * 會改變 git、Claude 的行為或在 git 操作時執行程式，修改前要人工核准
+ */
+function isProtected(rel: string, hooksDir: string | undefined): boolean {
   const segs = rel.toLowerCase().split(sep)
-  return segs.includes('.git') || segs.includes('.claude') || segs.at(-1) === '.mcp.json'
+  const name = segs.at(-1) ?? ''
+  if (segs.includes('.git') || segs.includes('.claude') || name === '.mcp.json') return true
+  if (segs.some((s) => HOOK_DIRS.has(s)) || HOOK_CONFIG.test(name)) return true
+  if (hooksDir === undefined) return false
+  // hooksPath 是根目錄時，根目錄的檔案都可能是 hook；macOS 的檔案系統不分大小寫
+  if (hooksDir === '') return segs.length === 1
+  const dir = hooksDir.toLowerCase()
+  const r = rel.toLowerCase()
+  return r === dir || r.startsWith(dir + sep)
 }
 
 const allowE = (): Evaluation => ({ decision: 'allow' })
@@ -183,8 +212,11 @@ export function evaluateTool(
     if (paths.length === 0 || paths.some((p) => !p)) return denyE('缺少要修改的檔案路徑')
     const rels = paths.map((p) => relativeInside(root, p))
     if (rels.some((r) => r === undefined)) return denyE('只能修改 worktree 內的檔案')
-    if (rels.some((r) => isProtected(r!)))
-      return { decision: 'ask', message: '修改 git、Claude 或 MCP 設定檔需要使用者核准' }
+    if (rels.some((r) => isProtected(r!, ctx.hooksDir)))
+      return {
+        decision: 'ask',
+        message: '修改 git 設定、git hooks、Claude 或 MCP 設定檔需要使用者核准'
+      }
     return allowE()
   }
 

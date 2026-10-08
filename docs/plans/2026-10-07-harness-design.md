@@ -107,6 +107,8 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
   - 其他：deny。
 - 執行方式：規則集中在純函式 `evaluateTool`。硬性規則（deny／ask）由 **PreToolUse hook** 執行，因為 SDK 會先套用專案 `.claude/settings.json` 的 allow 規則才呼叫 `canUseTool`，只靠 `canUseTool` 會被繞過；`canUseTool` 負責核准流程（等待使用者、核准後再確認任務階段）。harness 工具只信任 `mcpServer.source === 'sdk'` 且名稱為 `harness` 的伺服器。規則擋下的呼叫（hook 或 `canUseTool` 的 deny、核准後任務狀態已改變）透過 `onBlocked(tool_use_id, 原因)` 通知 TaskManager，時間軸上的工具結果標成「已阻擋：原因」（中性的顏色）；使用者在核准對話框拒絕的標「已拒絕」；只有真的失敗才是紅色的「工具錯誤」。
 - 路徑：以 realpath 解開 symlink 後才比對 worktree；`~` 開頭、含 `..` 片段、非字串路徑、寫入工具缺路徑一律 deny；Glob pattern 含 `..`，或在開頭／大括號選項中以 `/`、`~` 起頭也 deny。寫入 `.git`、`.claude/`、`.mcp.json` 即使在實作階段也要核准。
+- git hooks（2026-10-08 總審查後加上）：hook 是 worktree 裡 Claude 改得到的檔案，git 操作時會執行。寫入下列位置一律要核准：任何一層的 `.husky/`、`.githooks/`、`.lefthook/`、`.lefthook-local/` 資料夾，`lefthook*.yml|yaml|json|jsonc|toml`、`.lefthook*.…` 設定檔，`.pre-commit-config.yaml`，以及 repo 設定的 `core.hooksPath` 在 worktree 內時的那個資料夾（每一輪開始時以 `git config --type=path --get core.hooksPath` 讀一次，換算成相對路徑放進 `GateContext.hooksDir`，`evaluateTool` 本身不碰 git；讀不到就照常開始）。app 自己的自動 commit（§3.6）不執行任何 hook；合併與 push 照常執行（§3.7）。
+- 已知的限制：核准專案腳本的樣式（例如 `npm test *`）等於允許它執行的任何內容；Claude 可以改 `package.json` 的 scripts（或腳本本身）改變 `npm test` 實際跑什麼，之後不必再核准，VerifyRunner 提交報告時也會重跑它。Harness 只比對指令文字，不看指令會執行的檔案。
 
 ### 3.5 分岔
 
@@ -128,7 +130,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 - `custom_blocks[{ id, title, html }]`
 
 由 app 產生、不依賴 Claude 自述：
-- diff：`git diff <base>...HEAD`（提交報告時 app 先 commit worktree 變更）
+- diff：`git diff <base>...HEAD`（提交報告時 app 先 commit worktree 變更；這個 commit 不執行任何 git hook：`git -c core.hooksPath=/dev/null commit --no-verify`。hook 在 worktree 裡、Claude 改得到，由 app 執行等於繞過指令核准；`--no-verify` 只跳過 pre-commit 與 commit-msg，`core.hooksPath=/dev/null` 讓 post-commit 等其他 hook 也不執行）
 - 統計：檔案數、增刪行數
 - 測試結果：VerifyRunner 在 worktree 內依序實跑 `verification` 指令（只跑本任務已核准過或在允許清單中的指令），記錄 exit code、輸出摘要與耗時
 - 測試檔偵測（`src/shared/testFiles.ts`，報告與 PR 內文共用）：原始碼檔案（ts/tsx/js/jsx/mjs/cjs/py/rb/go/rs/java/kt/swift/php/cs），檔名是 `*.test.*`、`*.spec.*`、`*.cy.*`、`*_test.*`、`test_*.py`、`*_spec.rb`、`*Test(s).java|kt`，或在 `tests/`、`test/`、`__tests__/`、`spec/`、`Tests/` 底下；排除 `fixtures?/`、`__snapshots__/`、`__mocks__/`、`testdata/`、`.snap` 與測試資料夾裡的輔助檔（helper、setup、util、conftest）。Claude 給的路徑去掉 worktree 前綴後對不到時以結尾比對（絕對路徑、`/var` 與 `/private/var`）。Claude 沒在 `tests` 說明的標「未說明」
@@ -144,6 +146,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 - 開 PR：`git push -u origin <branch>` 後 `gh pr create`（標題＝規格標題，內文＝報告摘要、新增的測試與情境、決策、限制、後續工作與驗證結果；沒有說明新增的測試但 diff 裡有新增的測試檔時寫「Claude 沒有說明新增的測試：…」，不說沒有新增；Claude 給的文字壓成一行、code span 跳脫反引號）。
 - 合併：在原 repo 檢查工作目錄乾淨且位於 base branch，`git merge --no-ff <branch>`；失敗（衝突／不乾淨）顯示原因並中止。
+- 開 PR 的 push 與合併照常執行 repo 的 git hooks（pre-push、pre-merge-commit、post-merge…）：這兩個操作是使用者看過報告與 diff 後才按的，hook 的變更（受保護路徑，修改時已經核准過）也在 diff 裡。只有提交報告時的自動 commit 不執行 hook（§3.6）。
 - 丟棄：`git worktree remove --force` ＋刪除分支（需確認；任何階段都可以，入口是標題列的「⋯」選單，見 §3.1）。
 
 ### 3.8 儲存
@@ -173,7 +176,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 - SDK 程序崩潰或中斷：任務標為「已中斷」，保留 session id，可繼續。
 - Claude 未依格式呼叫工具（例如釐清時直接用文字提問）：照常顯示文字訊息，使用者仍可在輸入框回覆。
 - `submit_report` 驗證失敗：把 zod 錯誤回給 Claude 要求修正。
-- Git 操作失敗：顯示指令與 stderr，不自動重試。
+- Git 操作失敗：顯示指令與 stderr，不自動重試。git／gh 指令都有逾時上限（`GitService` 的 `timeouts` 可設定；預設 commit、合併、建立 worktree 120 秒，push 與 `gh pr create` 300 秒，其他 60 秒），逾時就終止整個程序群組（含 ssh、hook 等子程序）並回報「執行逾時」，不會一直卡住：整理報告時逾時就是整理失敗（可「繼續」重試，見 §3.8），開 PR／合併時逾時就顯示錯誤。
 
 ## 6. 測試策略
 

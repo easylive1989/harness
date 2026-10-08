@@ -10,7 +10,7 @@ export const APPROVAL_ARM_MS = 500
 /** 要寫入的內容先顯示前幾個字，其餘按「顯示完整內容」展開 */
 export const PREVIEW_COLLAPSED = 1500
 
-/** 修改這些工具的請求只會出現在 .git／.claude／.mcp.json（主程序只對這些路徑詢問） */
+/** 修改這些工具的請求只會出現在受保護的路徑（.git、.claude、.mcp.json、git hooks；主程序只對這些路徑詢問） */
 const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 
 const str = (v: unknown) => (typeof v === 'string' ? v : undefined)
@@ -72,7 +72,7 @@ export function describeRequest(r: PermissionRequest, cwd: string, branch?: stri
       title: `${who}想修改這個檔案`,
       code: relativeTo(cwd, path),
       sub: `${r.toolName} · cwd: ${cwd}`,
-      warning: '這個檔案會影響 Claude 的權限或 git 設定',
+      warning: '這個檔案會影響 Claude 的權限、git 設定，或在 git 操作時執行的 hook',
       preview: writePreview(i)
     }
   }

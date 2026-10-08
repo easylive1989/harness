@@ -20,7 +20,12 @@ export interface RunOptions {
   env?: Record<string, string>
   /** 寫入 stdin 的內容；沒給時 stdin 為空 */
   input?: string
+  /** 逾時毫秒數（預設 60 秒）：逾時就終止整個程序群組並回報錯誤，不會一直卡住 */
+  timeoutMs?: number
 }
+
+/** 逾時送出 SIGTERM 後，等這麼久還沒結束就送 SIGKILL */
+const KILL_GRACE_MS = 1000
 
 export function runCommand(
   cmd: string,
@@ -29,15 +34,41 @@ export function runCommand(
   opts: RunOptions = {}
 ): Promise<string> {
   const command = `${cmd} ${args.join(' ')}`
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_GIT_TIMEOUTS.default
   return new Promise((done, fail) => {
     const child = spawn(cmd, args, {
       cwd,
       // GIT_TERMINAL_PROMPT=0：需要帳密時直接失敗，不要卡在看不到的提示
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...opts.env },
-      stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']
+      stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      // 自成 process group：逾時可連同子程序（git 底下的 ssh、hook，gh 的子程序）一起終止
+      detached: true
     })
     let stdout = ''
     let stderr = ''
+    let settled = false
+    const settle = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fn()
+    }
+    const killGroup = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal)
+        else child.kill(signal)
+      } catch {
+        /* 已經結束 */
+      }
+    }
+    const timer = setTimeout(() => {
+      killGroup('SIGTERM')
+      setTimeout(() => killGroup('SIGKILL'), KILL_GRACE_MS)
+      // 不等 close：子程序可能還佔著輸出管線
+      settle(() =>
+        fail(new CommandError(command, `執行逾時（超過 ${timeoutMs / 1000} 秒），已終止`))
+      )
+    }, timeoutMs)
     child.stdout?.setEncoding('utf8').on('data', (s: string) => (stdout += s))
     child.stderr?.setEncoding('utf8').on('data', (s: string) => (stderr += s))
     if (child.stdin) {
@@ -46,23 +77,40 @@ export function runCommand(
       })
       child.stdin.end(opts.input)
     }
-    child.on('error', (err) => fail(new CommandError(command, err.message)))
-    child.on('close', (code, signal) => {
-      if (code === 0) done(stdout)
-      else
-        fail(
-          new CommandError(command, stderr.trim() || stdout.trim() || `結束代碼 ${code ?? signal}`)
-        )
-    })
+    child.on('error', (err) => settle(() => fail(new CommandError(command, err.message))))
+    child.on('close', (code, signal) =>
+      settle(() => {
+        if (code === 0) done(stdout)
+        else
+          fail(
+            new CommandError(
+              command,
+              stderr.trim() || stdout.trim() || `結束代碼 ${code ?? signal}`
+            )
+          )
+      })
+    )
   })
 }
 
-/** core.quotePath=false：非 ASCII 路徑原樣輸出，不用八進位跳脫 */
-const git = (cwd: string, ...args: string[]) =>
-  runCommand('git', ['-c', 'core.quotePath=false', ...args], cwd)
+/** git／gh 指令的逾時上限（毫秒） */
+export interface GitTimeouts {
+  /** 查詢、diff、刪除 worktree 等其他操作 */
+  default: number
+  /** commit、合併、建立 worktree（會寫入檔案或執行 hook） */
+  commit: number
+  /** push 與 gh pr create（走網路） */
+  network: number
+}
+export const DEFAULT_GIT_TIMEOUTS: GitTimeouts = {
+  default: 60_000,
+  commit: 120_000,
+  network: 300_000
+}
 
-const gitEnv = (cwd: string, env: Record<string, string>, ...args: string[]) =>
-  runCommand('git', ['-c', 'core.quotePath=false', ...args], cwd, { env })
+/** core.quotePath=false：非 ASCII 路徑原樣輸出，不用八進位跳脫 */
+const gitRun = (cwd: string, args: string[], opts: RunOptions = {}) =>
+  runCommand('git', ['-c', 'core.quotePath=false', ...args], cwd, opts)
 
 /** diff 輸出固定格式：不上色、不走外部 diff 工具、改名視為刪除＋新增 */
 const DIFF_FLAGS = ['--no-color', '--no-ext-diff', '--no-renames']
@@ -72,7 +120,7 @@ export async function assertRefName(cwd: string, name: string): Promise<void> {
   const invalid = () => new CommandError('git check-ref-format', `不合法的分支名稱：${name}`)
   if (!name || name.startsWith('-')) throw invalid()
   try {
-    await git(cwd, 'check-ref-format', '--branch', name)
+    await gitRun(cwd, ['check-ref-format', '--branch', name])
   } catch {
     throw invalid()
   }
@@ -100,16 +148,26 @@ export function parseNumstat(out: string): DiffStats {
 }
 
 export class GitService {
+  readonly timeouts: GitTimeouts
+
+  constructor(opts: { timeouts?: Partial<GitTimeouts> } = {}) {
+    this.timeouts = { ...DEFAULT_GIT_TIMEOUTS, ...opts.timeouts }
+  }
+
+  private git(cwd: string, ...args: string[]) {
+    return gitRun(cwd, args, { timeoutMs: this.timeouts.default })
+  }
+
   async isRepo(dir: string): Promise<boolean> {
     try {
-      return (await git(dir, 'rev-parse', '--is-inside-work-tree')).trim() === 'true'
+      return (await this.git(dir, 'rev-parse', '--is-inside-work-tree')).trim() === 'true'
     } catch {
       return false
     }
   }
 
   async repoRoot(dir: string) {
-    return (await git(dir, 'rev-parse', '--show-toplevel')).trim()
+    return (await this.git(dir, 'rev-parse', '--show-toplevel')).trim()
   }
 
   /**
@@ -117,7 +175,7 @@ export class GitService {
    * 會多出「(HEAD detached at …)」這種不是分支的項目；lstrip=2 在分支和 tag 同名時也不會變成 heads/x。
    */
   async branches(repo: string) {
-    return (await git(repo, 'for-each-ref', '--format=%(refname:lstrip=2)', 'refs/heads/'))
+    return (await this.git(repo, 'for-each-ref', '--format=%(refname:lstrip=2)', 'refs/heads/'))
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean)
@@ -129,7 +187,7 @@ export class GitService {
    */
   async currentBranch(repo: string) {
     try {
-      return (await git(repo, 'symbolic-ref', '--quiet', 'HEAD'))
+      return (await this.git(repo, 'symbolic-ref', '--quiet', 'HEAD'))
         .trim()
         .replace(/^refs\/heads\//, '')
     } catch {
@@ -147,19 +205,46 @@ export class GitService {
     await assertRefName(repo, branch)
     await assertRefName(repo, base)
     await mkdir(dirname(worktreePath), { recursive: true })
-    await git(repo, 'worktree', 'add', '-b', branch, '--end-of-options', worktreePath, base)
+    await gitRun(repo, ['worktree', 'add', '-b', branch, '--end-of-options', worktreePath, base], {
+      timeoutMs: this.timeouts.commit
+    })
   }
 
+  /**
+   * commit worktree 裡的所有變更（提交報告時由 app 自動執行）。不執行任何 git hook：
+   * hook（.husky/、.githooks/、lefthook、pre-commit、core.hooksPath 指向的資料夾）是 worktree 裡
+   * Claude 改得到的檔案，在這裡執行等於讓 Claude 不經指令核准就跑任意程式。
+   * --no-verify 只跳過 pre-commit 與 commit-msg，所以再把 core.hooksPath 指到 /dev/null，
+   * post-commit 等其他 hook 也不會執行。合併與 push 是使用者看過 diff 後按的，照常執行 hook。
+   */
   async commitAll(wt: string, message: string): Promise<string | null> {
-    await git(wt, 'add', '-A')
-    if (!(await git(wt, 'diff', '--cached', '--name-only')).trim()) return null
-    // 刻意不加 --no-verify：repo 的 git hooks 照常執行
-    await git(wt, 'commit', '-q', '-m', message)
-    return (await git(wt, 'rev-parse', 'HEAD')).trim()
+    await this.git(wt, 'add', '-A')
+    if (!(await this.git(wt, 'diff', '--cached', '--name-only')).trim()) return null
+    await gitRun(
+      wt,
+      ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', message],
+      { timeoutMs: this.timeouts.commit }
+    )
+    return (await this.git(wt, 'rev-parse', 'HEAD')).trim()
+  }
+
+  /**
+   * repo 設定的 core.hooksPath（絕對路徑；相對路徑以 worktree 根目錄為準，`~` 由 git 展開），
+   * 沒有設定時 undefined。PermissionGate 用它把 worktree 裡的 hook 資料夾列為受保護的路徑。
+   */
+  async hooksPath(wt: string): Promise<string | undefined> {
+    let out: string
+    try {
+      out = await this.git(wt, 'config', '--type=path', '--get', 'core.hooksPath')
+    } catch {
+      return undefined
+    }
+    const p = out.trim()
+    return p ? resolve(wt, p) : undefined
   }
 
   diff(wt: string, base: string) {
-    return git(
+    return this.git(
       wt,
       'diff',
       ...DIFF_FLAGS,
@@ -172,7 +257,15 @@ export class GitService {
 
   async diffStats(wt: string, base: string) {
     return parseNumstat(
-      await git(wt, 'diff', '--numstat', '-z', ...DIFF_FLAGS, '--end-of-options', `${base}...HEAD`)
+      await this.git(
+        wt,
+        'diff',
+        '--numstat',
+        '-z',
+        ...DIFF_FLAGS,
+        '--end-of-options',
+        `${base}...HEAD`
+      )
     )
   }
 
@@ -181,23 +274,18 @@ export class GitService {
    * `add -N` 在暫存的 index 複本上做，不改動 worktree 真正的 index。
    */
   async workingStats(wt: string, base: string) {
-    const mergeBase = (await git(wt, 'merge-base', '--end-of-options', base, 'HEAD')).trim()
-    const realIndex = resolve(wt, (await git(wt, 'rev-parse', '--git-path', 'index')).trim())
+    const mergeBase = (await this.git(wt, 'merge-base', '--end-of-options', base, 'HEAD')).trim()
+    const realIndex = resolve(wt, (await this.git(wt, 'rev-parse', '--git-path', 'index')).trim())
     const tmp = await mkdtemp(join(tmpdir(), 'harness-index-'))
-    const env = { GIT_INDEX_FILE: join(tmp, 'index') }
+    const opts = { env: { GIT_INDEX_FILE: join(tmp, 'index') }, timeoutMs: this.timeouts.default }
     try {
-      if (existsSync(realIndex)) await copyFile(realIndex, env.GIT_INDEX_FILE)
-      await gitEnv(wt, env, 'add', '-A', '-N')
+      if (existsSync(realIndex)) await copyFile(realIndex, opts.env.GIT_INDEX_FILE)
+      await gitRun(wt, ['add', '-A', '-N'], opts)
       return parseNumstat(
-        await gitEnv(
+        await gitRun(
           wt,
-          env,
-          'diff',
-          '--numstat',
-          '-z',
-          ...DIFF_FLAGS,
-          '--end-of-options',
-          mergeBase
+          ['diff', '--numstat', '-z', ...DIFF_FLAGS, '--end-of-options', mergeBase],
+          opts
         )
       )
     } finally {
@@ -208,18 +296,24 @@ export class GitService {
   async merge(repo: string, branch: string, base: string) {
     await assertRefName(repo, branch)
     await assertRefName(repo, base)
-    if ((await git(repo, 'status', '--porcelain')).trim()) {
+    if ((await this.git(repo, 'status', '--porcelain')).trim()) {
       throw new CommandError('git status', '原 repo 有未提交的變更，請先處理後再合併')
     }
     const current = await this.currentBranch(repo)
     if (current !== base)
       throw new CommandError('git rev-parse', `原 repo 目前在 ${current}，請切回 ${base} 再合併`)
     try {
-      // 刻意不加 --no-verify：repo 的 git hooks 照常執行
-      await git(repo, 'merge', '--no-ff', '-m', `Merge ${branch}`, '--end-of-options', branch)
+      // 刻意不加 --no-verify：合併是使用者看過報告與 diff 後按的，repo 的 git hooks 照常執行
+      await gitRun(
+        repo,
+        ['merge', '--no-ff', '-m', `Merge ${branch}`, '--end-of-options', branch],
+        {
+          timeoutMs: this.timeouts.commit
+        }
+      )
     } catch (e) {
       // 衝突時還原成合併前的狀態，錯誤訊息保留 git 的 CONFLICT 輸出
-      await git(repo, 'merge', '--abort').catch(() => undefined)
+      await this.git(repo, 'merge', '--abort').catch(() => undefined)
       const detail = e instanceof CommandError ? e.stderr : String(e)
       throw new CommandError(
         `git merge ${branch}`,
@@ -231,16 +325,22 @@ export class GitService {
   async removeWorktree(repo: string, wt: string, branch: string) {
     await assertRefName(repo, branch)
     try {
-      await git(repo, 'worktree', 'remove', '--force', '--end-of-options', wt)
+      await this.git(repo, 'worktree', 'remove', '--force', '--end-of-options', wt)
     } catch (e) {
       // 目錄已被手動刪掉時 remove 會失敗，prune 掉紀錄即可；目錄還在就是真的失敗
-      await git(repo, 'worktree', 'prune').catch(() => undefined)
+      await this.git(repo, 'worktree', 'prune').catch(() => undefined)
       if (existsSync(wt)) throw e
     }
     try {
-      await git(repo, 'branch', '-D', '--end-of-options', branch)
+      await this.git(repo, 'branch', '-D', '--end-of-options', branch)
     } catch (e) {
-      const exists = await git(repo, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`)
+      const exists = await this.git(
+        repo,
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        `refs/heads/${branch}`
+      )
         .then(() => true)
         .catch(() => false)
       if (exists) throw e
@@ -256,7 +356,10 @@ export class GitService {
   ): Promise<string> {
     await assertRefName(wt, branch)
     await assertRefName(wt, base)
-    await git(wt, 'push', '-u', '--end-of-options', 'origin', branch)
+    // push 照常執行 pre-push hook：使用者看過報告與 diff 後才按開 PR
+    await gitRun(wt, ['push', '-u', '--end-of-options', 'origin', branch], {
+      timeoutMs: this.timeouts.network
+    })
     const out = await runCommand(
       'gh',
       [
@@ -269,7 +372,7 @@ export class GitService {
         '-'
       ],
       wt,
-      { input: body }
+      { input: body, timeoutMs: this.timeouts.network }
     )
     return out.trim().split('\n').pop() ?? ''
   }
@@ -284,6 +387,7 @@ export type GitLike = Pick<
   | 'branchInfo'
   | 'createWorktree'
   | 'commitAll'
+  | 'hooksPath'
   | 'diff'
   | 'diffStats'
   | 'workingStats'

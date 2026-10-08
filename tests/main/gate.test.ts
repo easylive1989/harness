@@ -12,7 +12,8 @@ import {
   createPermissionGate,
   createPreToolUseHook,
   evaluateTool,
-  type GateContext
+  type GateContext,
+  hooksDirInside
 } from '../../src/main/permissions/gate'
 import type { GatePhase } from '../../src/main/tasks/stateMachine'
 
@@ -23,12 +24,14 @@ function setup(
   phase: GatePhase,
   decision = { allow: true },
   patterns: string[] = [],
-  worktreePath = '/wt/t1'
+  worktreePath = '/wt/t1',
+  hooksDir?: string
 ) {
   const state = { phase }
   const ctx: GateContext = {
     getPhase: () => state.phase,
     worktreePath,
+    hooksDir,
     getAllowedPatterns: () => patterns,
     requestApproval: vi.fn(async () => decision),
     onApproved: vi.fn(),
@@ -228,6 +231,64 @@ describe('PermissionGate', () => {
     expect((await call('Edit', { file_path: '/wt/t1/.claude/settings.json' })).behavior).toBe(
       'deny'
     )
+  })
+
+  test('寫入 git hook 的設定與腳本（husky、.githooks、lefthook、pre-commit）需要使用者核准', async () => {
+    for (const file_path of [
+      '/wt/t1/.husky/pre-commit',
+      '/wt/t1/.husky/_/husky.sh',
+      '/wt/t1/packages/web/.husky/pre-push',
+      '/wt/t1/.githooks/pre-commit',
+      '/wt/t1/lefthook.yml',
+      '/wt/t1/lefthook-local.yaml',
+      '/wt/t1/.lefthook.toml',
+      '/wt/t1/.config/lefthook.json',
+      '/wt/t1/.lefthook/pre-commit/lint.sh',
+      '/wt/t1/.lefthook-local/pre-push/x.sh',
+      '/wt/t1/.pre-commit-config.yaml'
+    ]) {
+      expect(evaluateTool('Write', { file_path }, setup('implement').ctx).decision, file_path).toBe(
+        'ask'
+      )
+    }
+    // 名稱相近的一般檔案照常自動允許
+    for (const file_path of [
+      '/wt/t1/src/lefthook.ts',
+      '/wt/t1/docs/husky.md',
+      '/wt/t1/githooks/readme.md',
+      '/wt/t1/pre-commit-config.yaml'
+    ]) {
+      expect(evaluateTool('Write', { file_path }, setup('implement').ctx).decision, file_path).toBe(
+        'allow'
+      )
+    }
+  })
+
+  test('repo 設定的 core.hooksPath 在 worktree 內時，寫入那個資料夾需要使用者核准', async () => {
+    const { ctx } = setup('implement', { allow: true }, [], '/wt/t1', 'tools/hooks')
+    expect(evaluateTool('Write', { file_path: '/wt/t1/tools/hooks/pre-commit' }, ctx)).toEqual({
+      decision: 'ask',
+      message: expect.stringContaining('git hooks')
+    })
+    expect(evaluateTool('Edit', { file_path: 'tools/hooks/lib/run.sh' }, ctx).decision).toBe('ask')
+    expect(evaluateTool('Write', { file_path: '/wt/t1/tools/hooksx/a' }, ctx).decision).toBe(
+      'allow'
+    )
+    expect(evaluateTool('Write', { file_path: '/wt/t1/tools/build.sh' }, ctx).decision).toBe(
+      'allow'
+    )
+    // hooksPath 就是 worktree 根目錄：根目錄的檔案都可能是 hook
+    const atRoot = setup('implement', { allow: true }, [], '/wt/t1', '').ctx
+    expect(evaluateTool('Write', { file_path: '/wt/t1/pre-commit' }, atRoot).decision).toBe('ask')
+    expect(evaluateTool('Write', { file_path: '/wt/t1/src/a.ts' }, atRoot).decision).toBe('allow')
+  })
+
+  test('hooksDirInside：core.hooksPath 在 worktree 內時回傳相對路徑，否則 undefined', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'harness-hooks-'))
+    expect(hooksDirInside(root, join(root, 'tools/hooks'))).toBe('tools/hooks')
+    expect(hooksDirInside(root, root)).toBe('')
+    expect(hooksDirInside(root, '/opt/hooks')).toBeUndefined()
+    expect(hooksDirInside(root, undefined)).toBeUndefined()
   })
 
   test('符合允許樣式的指令直接允許', async () => {
