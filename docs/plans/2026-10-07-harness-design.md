@@ -116,6 +116,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 `ReportInput`（zod 驗證）：
 - `overview: { headline, summary }`
+- `tests[{ id, file, name, kind:'unit'|'integration'|'e2e'|'other', change:'added'|'modified', scenario, why?, line? }]`、`tests_note?`：本次新增或修改的每個測試與情境（白話：在什麼情況下 → 做什麼 → 預期什麼），修改既有測試時 `why` 說明原因；沒有新增測試時留空並以 `tests_note` 說明原因。報告最優先呈現這一段（2026-10-08 使用者要求）。沒有這些欄位的舊報告照樣解析，讀取時補 `tests: []`。
 - `architecture: { before: Graph, after: Graph }`，`Graph = { nodes[{id,label,status:'added'|'modified'|'unchanged',files[]}], edges[{from,to,label?}] }`
 - `decisions[{ id, title, chosen, rejected[], rationale, source: {type:'question'|'branch'|'implementation', ref} }]`
 - `limitations[{ title, detail, severity }]`、`followups[{ title, detail }]`
@@ -127,16 +128,18 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 - diff：`git diff <base>...HEAD`（提交報告時 app 先 commit worktree 變更）
 - 統計：檔案數、增刪行數
 - 測試結果：VerifyRunner 在 worktree 內依序實跑 `verification` 指令（只跑本任務已核准過或在允許清單中的指令），記錄 exit code、輸出摘要與耗時
+- 測試檔偵測：依路徑（`*.test.*`、`*.spec.*`、`*_test.*`、`test_*.py`，或在 `tests/`、`test/`、`__tests__/`、`spec/` 底下）從 diff 找出測試檔；Claude 沒在 `tests` 說明的標「未說明」
 
 呈現：
-- Renderer 用 React 元件渲染固定骨架；架構圖以前後兩欄自動分層排版。
+- Renderer 用 React 元件渲染固定骨架，順序：概觀（變更檔案、行數、新增測試、驗證、決策五格數據）→ 新增的測試 → 架構前後對照 → 決策 → 自訂區塊 → 限制與後續 → 程式碼變更 → 測試結果；架構圖以前後兩欄自動分層排版。
+- 「新增的測試」：每個測試列出名稱、檔案、類型、新增／修改、情境、修改原因與驗證結果。驗證結果不捏造逐個測試的結果：輸出提到該測試檔的指令顯示該指令的結果，只有一個驗證指令時顯示它的結果，否則顯示整體的「x / y 通過」並連到測試結果。點測試跳到 diff 中的測試檔（有行號時到那一行）。沒有新增測試時以提醒樣式顯示「這次沒有新增測試」與原因（diff 裡其實有新的測試檔時改說「Claude 沒有說明新增的測試」）；未說明的測試檔列在區塊最後。
 - `custom_blocks` 以 `<iframe sandbox="allow-scripts" srcdoc>` 呈現，附 CSP（禁止網路），不給 same-origin。
-- 回饋錨點：區塊（`section:<id>`）、決策（`decision:<id>`）、diff 行（`diff:<path>:<line>`）。送出回饋 → 任務回到 `implementing`，完成後產生 v2；舊版本保留可切換。
-- 匯出 HTML：產生單一自含 HTML 檔。
+- 回饋錨點：區塊（`section:<id>`，新增的測試為 `section:tests`）、測試（`test:<id>`）、決策（`decision:<id>`）、自訂區塊（`block:<id>`）、整個檔案（`file:<path>`）、diff 行（`diff:<path>:<line>`）。送出回饋 → 任務回到 `implementing`，完成後產生 v2；舊版本保留可切換。
+- 匯出 HTML：產生單一自含 HTML 檔（含靜態的「新增的測試」）。
 
 ### 3.7 收尾
 
-- 開 PR：`git push -u origin <branch>` 後 `gh pr create`（標題＝規格標題，內文＝報告摘要＋決策）。
+- 開 PR：`git push -u origin <branch>` 後 `gh pr create`（標題＝規格標題，內文＝報告摘要、新增的測試與情境、決策、限制、後續工作與驗證結果）。
 - 合併：在原 repo 檢查工作目錄乾淨且位於 base branch，`git merge --no-ff <branch>`；失敗（衝突／不乾淨）顯示原因並中止。
 - 丟棄：`git worktree remove --force` ＋刪除分支（需確認）。
 
