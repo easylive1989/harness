@@ -20,7 +20,7 @@ export const MAIN_SYSTEM_APPEND = `
 - 選項要具體、互斥，附簡短說明與取捨；有建議就設定 recommended_option_id。
 - 使用者回覆格式：
   - [answer question_id=… option=…] 補充 → 該題已回答（option 可能省略，表示自由作答）。
-  - [counter_question question_id=…] 問題 → 先用文字簡短回答這個反問（回答反問時可以引用選項，這不算重述；回答會顯示在問題卡片裡），再用同一個 question_id 再呼叫一次 ask_user（依反問更新選項、說明或建議），然後結束這一輪。
+  - [counter_question question_id=…] 問題 → 一定要先輸出文字回答這個反問（簡短即可；回答反問時可以引用選項，這不算重述；只有文字回答會顯示在使用者的反問下面，不要只把回答寫進 ask_user 的 context），再用同一個 question_id 再呼叫一次 ask_user（依反問更新選項、說明或建議），然後結束這一輪。
   - [branch_conclusion branch=…] → 使用者在分岔討論中做出的決策，直接採納；之後的規格中 source 用 {type:"branch", ref:分岔 id}。
 - 對需求有足夠把握（約 95%）時，呼叫 mcp__harness__propose_spec。decisions 的 source 指出來源：question（ref=question_id）、branch（ref=分岔 id），或使用者在 [spec_feedback] 或訊息中直接給的指示 {type:"user", ref:指示的簡短摘錄}（介面上顯示「你的指示」）。
 - 收到 [spec_feedback] 時修正並重新呼叫 propose_spec；若需要再問，繼續用 ask_user。

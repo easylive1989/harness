@@ -187,6 +187,43 @@ describe('TaskManager：建立任務與釐清', () => {
     expect((await tm.timeline(id)).filter((e) => e.kind === 'question')).toHaveLength(1)
   })
 
+  test('回答反問時沒寫文字、只把回答放進說明：卡片裡以新的說明當作回覆', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser({ ...askQ1, context: '連續失敗 5 次就鎖定。' })
+    }
+    const id = await create()
+    // 第二輪：沒有輸出文字，直接以同一 question_id 更新卡片，回答寫在 context
+    claude.script = async ({ call, sink }) => {
+      if (call === 1) await sink.askUser({ ...askQ1, context: 'IP＝登入請求的來源位址。' })
+    }
+    await tm.counterQuestion(id, 'q1', 'IP 是指什麼？')
+    await tm.whenIdle(id)
+    const q = tm.get(id).questions[0]
+    expect(q.followups).toEqual([
+      { role: 'user', text: 'IP 是指什麼？' },
+      { role: 'assistant', text: 'IP＝登入請求的來源位址。' }
+    ])
+    expect(q.context).toBe('IP＝登入請求的來源位址。')
+  })
+
+  test('回答反問時沒寫文字、說明也沒變：卡片裡提示問題已更新，不讓反問沒有回覆', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser(askQ1)
+    }
+    const id = await create()
+    claude.script = async ({ call, sink }) => {
+      if (call === 1) await sink.askUser({ ...askQ1, recommended_option_id: 'acct_ip' })
+    }
+    await tm.counterQuestion(id, 'q1', '哪個比較好？')
+    await tm.whenIdle(id)
+    expect(tm.get(id).questions[0].followups).toEqual([
+      { role: 'user', text: '哪個比較好？' },
+      { role: 'assistant', text: '已依你的反問更新上面的問題與選項。' }
+    ])
+  })
+
   test('重新提問還開著的問題（不是回答反問）時，卡片移到時間軸最新的位置', async () => {
     const { tm, claude, create } = await setup()
     claude.script = async ({ call, sink }) => {
@@ -637,6 +674,26 @@ describe('TaskManager：規格與實作', () => {
     expect(tm.get(id).pendingPermission).toBeUndefined()
     expect(tm.get(id).runState).toBe('idle')
     expect(tm.get(id).error).toBeUndefined()
+  })
+
+  test('停止後時間軸留下「已停止」，畫面不會看起來像 Claude 沒反應', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => {
+      await new Promise(() => undefined) // 卡住，直到被停止
+    }
+    await tm.send(id, 'main', '再看一下 /login')
+    await tm.stop(id, 'main')
+    await tm.whenIdle(id)
+    expect((await tm.timeline(id)).at(-1)).toMatchObject({
+      channel: 'main',
+      kind: 'system',
+      text: '已停止。輸入訊息就能繼續。'
+    })
+    // 沒有執行中的這一輪時按停止：不再多記一筆
+    await tm.stop(id, 'main')
+    await tm.whenIdle(id)
+    expect((await tm.timeline(id)).filter((e) => e.kind === 'system')).toHaveLength(1)
   })
 
   test('分岔的核准請求不影響主線的執行狀態', async () => {
@@ -1298,6 +1355,9 @@ describe('TaskManager：狀態一致性', () => {
     expect(tm.get(id).branches[0].running).toBe(false)
     expect(tm.get(id)).toMatchObject({ runState: 'idle' })
     expect(tm.get(id).error).toBeUndefined()
+    // 「已停止」記在分岔自己的時間軸
+    const stopped = (await tm.timeline(id)).filter((e) => e.kind === 'system')
+    expect(stopped.map((e) => e.channel)).toEqual([`branch:${b.id}`])
   })
 
   test('沒有 session 的中斷任務：resume 重新送出需求', async () => {

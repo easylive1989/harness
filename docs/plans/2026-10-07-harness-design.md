@@ -79,7 +79,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 | 工具 | 階段 | 作用 |
 |---|---|---|
-| `ask_user({question_id, question, options[{id,label,description}], recommended_option_id, allow_free_text, context})` | 釐清、實作 | 顯示／更新問題卡片（同一 `question_id` 再呼叫＝更新卡片；除了回答反問之外，時間軸會在最新的位置再放一筆，畫面只畫最後一張，使用者在底部就看得到） |
+| `ask_user({question_id, question, options[{id,label,description}], recommended_option_id, allow_free_text, context})` | 釐清、實作 | 顯示／更新問題卡片（同一 `question_id` 再呼叫＝更新卡片；除了回答反問之外，時間軸會在最新的位置再放一筆，畫面只畫最後一張，使用者在底部就看得到；回答反問卻沒寫文字時，把有變的 `context` 或「已依你的反問更新上面的問題與選項。」補成卡片裡的回覆，反問底下不會是空的） |
 | `propose_spec({title, summary, in_scope[], out_of_scope[], decisions[{id,text,source}], steps[], acceptance[]})` | 釐清 | 產生／更新規格草稿，任務轉為 `spec_review` |
 | `update_plan({steps[{id,title,status}]})` | 實作 | 更新步驟進度 |
 | `conclude_branch({title?, decision, rationale, deferred[]})` | 分岔 | 產生分岔結論；`title`（要求 10–20 字；只是顯示用，超過 30 字截斷、空白就保留原標題，不會因此拒絕結論）取代分岔的暫定標題 |
@@ -92,7 +92,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 - `[spec_feedback] 上限改成 10 次`／`[spec_approved]`
 - `[report_feedback anchor=diff:src/auth/lockout.ts:13] …`
 
-階段指示（append 到 system prompt）定義這些格式與行為規則：釐清時一次只問一題、一定用 `ask_user`、收到反問要回答後用同一 `question_id` 重新呼叫 `ask_user`；有把握時呼叫 `propose_spec`；實作時依步驟呼叫 `update_plan`；完成時呼叫 `submit_report`。
+階段指示（append 到 system prompt）定義這些格式與行為規則：釐清時一次只問一題、一定用 `ask_user`、收到反問要先輸出文字回答（只有文字會顯示在反問下面，不要只寫進 `context`）後用同一 `question_id` 重新呼叫 `ask_user`；有把握時呼叫 `propose_spec`；實作時依步驟呼叫 `update_plan`；完成時呼叫 `submit_report`。
 
 回覆的寫法（2026-10-08 端對端驗證後加上）：全程繁體中文，包含簡短說明與過渡語句，只有程式碼、識別字、指令、檔案路徑與錯誤訊息保留原文；問題、選項、規格與報告的內容只放在工具參數裡（介面會顯示），不在文字中重述，也不說「我已在介面上送出問題」，需要脈絡時只寫與問題不重複的 1–2 句（回答反問時可以引用選項，這不算重述）；第二輪驗證後補上：`conclude_branch` 的結論同樣不在文字中重述，也不提到 `[conclude]` 等標記（使用者看不到也不會自己輸入，需要動作時指向介面上的按鈕）。決策來源除了 `question`、`branch`、`implementation`，使用者在規格回饋、實作中插話或報告回饋中直接要求而做的決定用 `{type:"user", ref:指示的簡短摘錄}`（介面顯示「你的指示」）。
 
@@ -175,7 +175,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 - 找不到 `claude` 或未登入：設定頁與新任務頁顯示說明（請在終端機執行 `claude` 登入），停用開始按鈕。
 - 訂閱額度用盡／rate limit：SDK 的 `rate_limit_event`（每段執行每種狀態只報一次）與 assistant 的 `rate_limit` 錯誤在時間軸顯示為系統訊息（「已達到訂閱方案的用量上限（5 小時），約 … 重置。」）；這一輪以失敗的 `result` 結束時錯誤記在 `task.error`，主線標為「發生錯誤」（`runState: 'error'`），畫面顯示錯誤與「繼續」，稍後按「繼續」以 `resume` 續接（送 `[resume]`）。分岔的失敗記在分岔上，不影響主線。
-- SDK 程序崩潰（迭代丟出例外）：同樣記錄錯誤、主線標為「發生錯誤」，保留 session id，可「繼續」。關閉 app 時中止的執行標為「已中斷」（`runState: 'interrupted'`），下次啟動可「繼續」。使用者按停止造成的結束不算錯誤。
+- SDK 程序崩潰（迭代丟出例外）：同樣記錄錯誤、主線標為「發生錯誤」，保留 session id，可「繼續」。關閉 app 時中止的執行標為「已中斷」（`runState: 'interrupted'`），下次啟動可「繼續」。使用者按停止造成的結束不算錯誤，但時間軸記一筆「已停止。輸入訊息就能繼續。」（記在被停止的主線或分岔；沒有進行中的一輪時不記），畫面才不會停在 Claude 最後一句話、看起來像沒反應（2026-10-08 使用中發現後加上）。
 - Claude 未依格式呼叫工具（例如釐清時直接用文字提問）：照常顯示文字訊息，使用者仍可在輸入框回覆。
 - `submit_report` 驗證失敗：把 zod 錯誤回給 Claude 要求修正。
 - Git 操作失敗：顯示指令與 stderr，不自動重試。git／gh 指令都有逾時上限（`GitService` 的 `timeouts` 可設定；預設 commit、合併、建立 worktree 120 秒，push 與 `gh pr create` 300 秒，其他 60 秒），逾時就終止整個程序群組（含 ssh、hook 等子程序）並回報「執行逾時」，不會一直卡住：整理報告時逾時就是整理失敗（可「繼續」重試，見 §3.8），開 PR／合併時逾時就顯示錯誤。

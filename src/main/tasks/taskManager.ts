@@ -84,6 +84,10 @@ function nextId(prefix: string, ids: string[]): string {
   }, 0)
   return `${prefix}${max + 1}`
 }
+/** 使用者停止這一輪後記在時間軸：畫面不會停在 Claude 最後一句話，看起來像沒反應 */
+const STOPPED_NOTICE = '已停止。輸入訊息就能繼續。'
+/** Claude 回答反問時沒寫文字、說明也沒變：卡片裡仍給反問一則回覆 */
+const COUNTER_UPDATED_NOTE = '已依你的反問更新上面的問題與選項。'
 const logError = (what: string) => (e: unknown) => console.error(`[TaskManager] ${what}`, e)
 
 /** p 在 ms 內結束（成功或失敗）回傳 true，逾時回傳 false */
@@ -124,6 +128,8 @@ export class TaskManager {
   private blockedToolUses = new Map<string, { run?: AgentRun; reason: string }>()
   /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
+  /** 使用者按停止的執行：結束時在時間軸記一筆 */
+  private stoppedRuns = new WeakSet<AgentRun>()
   /** 報告整理中（邏輯狀態）：進入 reviewing 的同一步就清除 */
   private finalizing = new Set<string>()
   /** 報告整理的 promise，整個流程（含之後的時間軸寫入）結束才移除；whenIdle 用 */
@@ -526,6 +532,9 @@ export class TaskManager {
       this.forgetDenied(run)
       const branchId = branchIdOf(channel)
       if (current && !branchId) this.pendingCounter.delete(taskId)
+      // 排在這段執行的所有事件之後
+      if (this.stoppedRuns.delete(run))
+        await this.addTimeline(taskId, { channel, kind: 'system', text: STOPPED_NOTICE })
       await this.update(taskId, (t) => {
         if (current) {
           if (branchId) {
@@ -658,6 +667,14 @@ export class TaskManager {
             }
             const q = t.questions.find((x) => x.id === a.question_id)
             if (q) {
+              // 回答反問卻沒寫文字（例如只把回答放進 context）：補一則回覆，反問底下才不會是空的
+              if (counterReply && q.followups.at(-1)?.role === 'user') {
+                const context = a.context?.trim()
+                q.followups.push({
+                  role: 'assistant',
+                  text: context && context !== q.context?.trim() ? context : COUNTER_UPDATED_NOTE
+                })
+              }
               Object.assign(q, fields, { status: 'open' as const, answer: undefined })
             } else {
               added = true
@@ -979,7 +996,10 @@ export class TaskManager {
       if (w.taskId === taskId && w.channel === channel)
         w.resolve({ allow: false, message: '使用者停止了執行' })
     }
-    await this.runs.get(runKey(taskId, channel))?.interrupt()
+    const run = this.runs.get(runKey(taskId, channel))
+    // 這一輪還在進行才算停止（輸入已關閉的執行只是還沒結束）
+    if (run?.active) this.stoppedRuns.add(run)
+    await run?.interrupt()
   }
 
   /**
