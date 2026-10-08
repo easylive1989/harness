@@ -2615,10 +2615,18 @@ export interface GateContext {
   getAllowedPatterns(): string[]
   requestApproval(req: ApprovalRequest, signal: AbortSignal): Promise<PermissionDecision>
   onApproved(command: string | undefined, rememberPattern?: string): void
+  /**
+   * Harness 的規則擋下了這個工具呼叫（階段不允許、worktree 外、核准後狀態已改變…），
+   * 不是使用者拒絕：時間軸上的工具結果標成「已阻擋」並顯示這個原因
+   */
+  onBlocked?(toolUseId: string | undefined, reason: string): void
 }
 
-/** evaluateTool 只需要規則相關的部分 */
-export type GateRules = Pick<GateContext, 'getPhase' | 'worktreePath' | 'getAllowedPatterns'>
+/** evaluateTool 只需要規則相關的部分（hook 另外會通知擋下） */
+export type GateRules = Pick<
+  GateContext,
+  'getPhase' | 'worktreePath' | 'getAllowedPatterns' | 'onBlocked'
+>
 
 export interface Evaluation {
   decision: 'allow' | 'deny' | 'ask'
@@ -2807,9 +2815,13 @@ const deny = (message: string): PermissionResult => ({ behavior: 'deny', message
 export function createPermissionGate(ctx: GateContext): PermissionGate {
   return async (toolName, input, { signal, mcpServer, toolUseID }) => {
     if (signal.aborted) return deny('已取消')
+    const block = (reason: string) => {
+      ctx.onBlocked?.(toolUseID, reason)
+      return deny(reason)
+    }
     const e = evaluateTool(toolName, input, ctx, { mcpServer })
     if (e.decision === 'allow') return allow(input)
-    if (e.decision === 'deny') return deny(e.message ?? `Harness 不允許使用 ${toolName}`)
+    if (e.decision === 'deny') return block(e.message ?? `Harness 不允許使用 ${toolName}`)
 
     const d = await ctx.requestApproval(
       { toolName, input, suggestedPattern: e.suggestedPattern, toolUseId: toolUseID },
@@ -2817,7 +2829,7 @@ export function createPermissionGate(ctx: GateContext): PermissionGate {
     )
     if (!d.allow) return deny(d.message?.trim() || '使用者拒絕了這個操作')
     if (signal.aborted) return deny('已取消')
-    if (!phaseStillAllows(toolName, ctx.getPhase())) return deny('任務狀態已改變')
+    if (!phaseStillAllows(toolName, ctx.getPhase())) return block('任務狀態已改變')
     // 只有指令可以記住樣式
     ctx.onApproved(e.command, e.command ? d.rememberPattern : undefined)
     return allow(input)
@@ -2829,13 +2841,14 @@ export function createPermissionGate(ctx: GateContext): PermissionGate {
  * ask 會讓 SDK 轉交 canUseTool 走核准流程。
  */
 export function createPreToolUseHook(ctx: GateRules): HookCallback {
-  return async (input) => {
+  return async (input, toolUseID) => {
     if (input.hook_event_name !== 'PreToolUse') return {}
     // 沒有來源資訊（舊版 CLI）時不做決定，交給拿得到 mcpServer 的 canUseTool
     if (input.tool_name.startsWith('mcp__harness__') && !input.mcp_server) return {}
     const e: Evaluation = isRecord(input.tool_input)
       ? evaluateTool(input.tool_name, input.tool_input, ctx, { mcpServer: input.mcp_server })
       : denyE('工具參數格式不正確')
+    if (e.decision === 'deny') ctx.onBlocked?.(input.tool_use_id ?? toolUseID, e.message ?? '')
     return {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
@@ -4696,7 +4709,7 @@ export const MAIN_SYSTEM_APPEND = `
 - 選項要具體、互斥，附簡短說明與取捨；有建議就設定 recommended_option_id。
 - 使用者回覆格式：
   - [answer question_id=… option=…] 補充 → 該題已回答（option 可能省略，表示自由作答）。
-  - [counter_question question_id=…] 問題 → 先用文字簡短回答這個反問，再用同一個 question_id 再呼叫一次 ask_user（依反問更新選項、說明或建議），然後結束這一輪。
+  - [counter_question question_id=…] 問題 → 先用文字簡短回答這個反問（回答反問時可以引用選項，這不算重述；回答會顯示在問題卡片裡），再用同一個 question_id 再呼叫一次 ask_user（依反問更新選項、說明或建議），然後結束這一輪。
   - [branch_conclusion branch=…] → 使用者在分岔討論中做出的決策，直接採納；之後的規格中 source 用 {type:"branch", ref:分岔 id}。
 - 對需求有足夠把握（約 95%）時，呼叫 mcp__harness__propose_spec。decisions 的 source 指出來源：question（ref=question_id）、branch（ref=分岔 id），或使用者在 [spec_feedback] 或訊息中直接給的指示 {type:"user", ref:指示的簡短摘錄}（介面上顯示「你的指示」）。
 - 收到 [spec_feedback] 時修正並重新呼叫 propose_spec；若需要再問，繼續用 ask_user。
@@ -6079,6 +6092,8 @@ export class TaskManager {
    * 那段執行結束時清掉（沒等到工具結果的也一併清掉）。
    */
   private deniedToolUses = new Map<string, AgentRun | undefined>()
+  /** Harness 規則擋下的 tool_use id → 提出的執行與原因：工具結果標成「已阻擋」；清除時機同上 */
+  private blockedToolUses = new Map<string, { run?: AgentRun; reason: string }>()
   /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
   /** 報告整理中（邏輯狀態）：進入 reviewing 的同一步就清除 */
@@ -6392,6 +6407,9 @@ export class TaskManager {
       ],
       requestApproval: (req, signal) =>
         this.requestApproval(taskId, channel, owner.run, req, signal),
+      onBlocked: (toolUseId, reason) => {
+        if (toolUseId) this.blockedToolUses.set(toolUseId, { run: owner.run, reason })
+      },
       onApproved: (command, pattern) => {
         this.persist(taskId, (x) => {
           if (command && !x.approvedCommands.includes(command)) x.approvedCommands.push(command)
@@ -6534,12 +6552,20 @@ export class TaskManager {
         return
       case 'tool_result': {
         const denied = this.deniedToolUses.delete(e.id)
+        const blocked = this.blockedToolUses.get(e.id)
+        this.blockedToolUses.delete(e.id)
         if (e.isError) {
           await this.addTimeline(taskId, {
             channel,
             kind: 'tool_result',
-            text: e.text.slice(0, 2000),
-            tool: { id: e.id, name: '', isError: true, ...(denied ? { denied: true } : {}) }
+            // 規則擋下的顯示 Harness 的原因（SDK 的文字會帶「PreToolUse:… hook error:」之類的前綴）
+            text: (blocked?.reason || e.text).slice(0, 2000),
+            tool: {
+              id: e.id,
+              name: '',
+              isError: true,
+              ...(denied ? { denied: true } : blocked ? { blocked: true } : {})
+            }
           })
         }
         return
@@ -6740,6 +6766,7 @@ export class TaskManager {
   }
   private forgetDenied(run: AgentRun) {
     for (const [id, r] of this.deniedToolUses) if (r === run) this.deniedToolUses.delete(id)
+    for (const [id, b] of this.blockedToolUses) if (b.run === run) this.blockedToolUses.delete(id)
   }
   private async finalizeReport(taskId: string, input: ReportInput, run?: AgentRun) {
     void [taskId, input, run]
@@ -9133,6 +9160,7 @@ describe('TaskManager：分岔的錯誤', () => {
     await settlesWithin(Promise.all(marks), timeoutMs)
     // 中止後仍不結束的執行不會走到 onRunDone
     this.deniedToolUses.clear()
+    this.blockedToolUses.clear()
   }
 ```
 
@@ -9900,6 +9928,32 @@ describe('store.recheckClaude：claude 沒有值', () => {
     expect(call).toHaveBeenCalledTimes(2)
   })
 })
+
+describe('從訊息開分岔的草稿', () => {
+  test('每按一次分岔按鈕 seq 都遞增（再按同一則也是）；放棄後清掉', () => {
+    useStore.setState({ branchDrafts: {}, activeBranch: {} })
+    const { startBranchDraft, cancelBranchDraft } = useStore.getState()
+    startBranchDraft('t1', '有幾件事要先確認。')
+    const first = useStore.getState().branchDrafts.t1!
+    startBranchDraft('t1', '有幾件事要先確認。')
+    const second = useStore.getState().branchDrafts.t1!
+    expect(second.excerpt).toBe('有幾件事要先確認。')
+    expect(second.seq).toBeGreaterThan(first.seq)
+    cancelBranchDraft('t1')
+    expect(useStore.getState().branchDrafts.t1).toBeUndefined()
+  })
+
+  test('切到任何分岔（即使是已經在看的那個）都會放棄草稿；只影響那個任務', () => {
+    useStore.setState({ branchDrafts: {}, activeBranch: { t1: 'b1' } })
+    const { startBranchDraft, setActiveBranch } = useStore.getState()
+    startBranchDraft('t1', 'A')
+    startBranchDraft('t2', 'B')
+    setActiveBranch('t1', 'b1')
+    expect(useStore.getState().branchDrafts.t1).toBeUndefined()
+    expect(useStore.getState().branchDrafts.t2?.excerpt).toBe('B')
+    expect(useStore.getState().activeBranch.t1).toBe('b1')
+  })
+})
 ```
 
 ```ts
@@ -9999,6 +10053,11 @@ export interface State {
   /** 打開設定前的畫面：設定頁的「返回」回到這裡 */
   settingsReturn?: View
   activeBranch: Record<string, string | undefined>
+  /**
+   * 從 Claude 訊息開分岔的草稿（引用的訊息原文），以任務為鍵；送出問題前不會建立任何東西。
+   * seq 每按一次分岔按鈕就遞增：再按同一則訊息也會把焦點移回問題輸入框
+   */
+  branchDrafts: Record<string, { excerpt: string; seq: number } | undefined>
   feedback: Record<string, FeedbackItem[]>
   /** id 每次遞增：同樣的錯誤再出現一次也會重新計時 */
   toast?: { id: number; text: string }
@@ -10007,7 +10066,10 @@ export interface State {
   apply(e: AppEvent): void
   open(view: View): Promise<void>
   act<T>(fn: () => Promise<T>): Promise<T | undefined>
+  /** 切到某個分岔（即使是已經在看的那個）：一併放棄這個任務的分岔草稿 */
   setActiveBranch(taskId: string, branchId?: string): void
+  startBranchDraft(taskId: string, excerpt: string): void
+  cancelBranchDraft(taskId: string): void
   addFeedback(taskId: string, item: FeedbackItem): void
   removeFeedback(taskId: string, anchor: string): void
   clearFeedback(taskId: string): void
@@ -10023,6 +10085,7 @@ export const CLAUDE_RECHECK_MS = 5000
 // 上次因視窗取得焦點而重新偵測的時間（節流用）
 let lastClaudeRecheck = -Infinity
 let toastSeq = 0
+let draftSeq = 0
 /** 正在讀取時間軸的任務 → 讀取期間收到的即時事件（快照回來後併進去） */
 const loadingTimelines = new Map<string, TimelineEvent[]>()
 /** 每份時間軸已有的事件 id（以陣列本身為鍵，直接 setState 換掉陣列時會自動重建） */
@@ -10046,6 +10109,7 @@ export const useStore = create<State>((set, get) => ({
   timelines: {},
   view: { kind: 'new' },
   activeBranch: {},
+  branchDrafts: {},
   feedback: {},
 
   init() {
@@ -10149,7 +10213,16 @@ export const useStore = create<State>((set, get) => ({
   },
 
   setActiveBranch: (taskId, branchId) =>
-    set((s) => ({ activeBranch: { ...s.activeBranch, [taskId]: branchId } })),
+    set((s) => ({
+      activeBranch: { ...s.activeBranch, [taskId]: branchId },
+      branchDrafts: { ...s.branchDrafts, [taskId]: undefined }
+    })),
+  startBranchDraft: (taskId, excerpt) =>
+    set((s) => ({ branchDrafts: { ...s.branchDrafts, [taskId]: { excerpt, seq: ++draftSeq } } })),
+  cancelBranchDraft: (taskId) =>
+    set((s) =>
+      s.branchDrafts[taskId] ? { branchDrafts: { ...s.branchDrafts, [taskId]: undefined } } : {}
+    ),
   addFeedback: (taskId, item) =>
     set((s) => ({
       feedback: {
@@ -10332,7 +10405,7 @@ export function Button({
     <button
       type={type}
       className={cx(
-        'inline-flex cursor-pointer items-center justify-center gap-2 whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+        'inline-flex cursor-pointer items-center justify-center gap-2 whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50',
         size === 'sm' ? 'h-9 rounded-[10px] px-3 text-xs' : 'h-11 rounded-xl px-4 text-[13px]',
         VARIANTS[variant],
         className
@@ -12063,6 +12136,27 @@ describe('Timeline', () => {
     expect(screen.queryByText(/工具錯誤/)).not.toBeInTheDocument()
   })
 
+  test('Harness 規則擋下的工具顯示「已阻擋：原因」（中性的顏色），真的失敗才是紅色的工具錯誤', () => {
+    render(
+      <Timeline
+        task={makeTask()}
+        channel="main"
+        events={[
+          ev({
+            kind: 'tool_result',
+            text: '目前不是實作階段，不能修改檔案。',
+            tool: { id: 'e1', name: '', isError: true, blocked: true }
+          }),
+          ev({ kind: 'tool_result', text: 'exit 1', tool: { id: 'b1', name: '', isError: true } })
+        ]}
+      />
+    )
+    const blocked = screen.getByText('已阻擋：目前不是實作階段，不能修改檔案。')
+    expect(blocked).toHaveClass('text-muted')
+    expect(blocked).not.toHaveClass('text-danger')
+    expect(screen.getByText('工具錯誤：exit 1')).toHaveClass('text-danger')
+  })
+
   test('重新提問的問題只在最後一次出現的位置顯示卡片', () => {
     const open = { ...q, status: 'open' as const, answer: undefined }
     render(
@@ -12251,6 +12345,19 @@ export function toolTarget(tool: Pick<ToolCall, 'input'>, root?: string): string
   const i = tool.input ?? {}
   const target = String(i.file_path ?? i.path ?? i.pattern ?? i.command ?? i.url ?? i.query ?? '')
   return root ? relativeTo(root, target) : target
+}
+
+/**
+ * 失敗的工具結果怎麼標：使用者在核准對話框拒絕、Harness 的規則擋下（階段不允許、worktree 外…）
+ * 都是預期中的事，用中性的顏色；真的失敗才是紅色的「工具錯誤」
+ */
+export function toolResultLabel(tool?: Pick<ToolCall, 'denied' | 'blocked'>): {
+  label: string
+  muted: boolean
+} {
+  if (tool?.denied) return { label: '已拒絕', muted: true }
+  if (tool?.blocked) return { label: '已阻擋', muted: true }
+  return { label: '工具錯誤', muted: false }
 }
 
 /** 工具呼叫的一行摘要，例如「讀取 src/auth/login.ts」 */
@@ -12757,6 +12864,7 @@ import {
   latestQuestionEvents,
   type ToolCall,
   toolLabel,
+  toolResultLabel,
   toolSummary,
   userTextDisplay
 } from '../lib/timeline'
@@ -12933,18 +13041,20 @@ export function Timeline({
                 變更報告 v{e.ref} 已產生 → 查看
               </button>
             )
-          case 'tool_result':
+          case 'tool_result': {
+            const { label, muted } = toolResultLabel(e.tool)
             return (
               <div
                 key={e.id}
                 className={cx(
                   'ml-10 line-clamp-4 text-xs break-all whitespace-pre-wrap',
-                  e.tool?.denied ? 'text-muted' : 'text-danger'
+                  muted ? 'text-muted' : 'text-danger'
                 )}
               >
-                {e.tool?.denied ? '已拒絕' : '工具錯誤'}：{e.text}
+                {label}：{e.text}
               </div>
             )
+          }
           case 'system':
             return (
               <div
@@ -13090,7 +13200,12 @@ const talk = [
 beforeEach(() => {
   vi.mocked(call).mockClear()
   resetStoreInternals()
-  useStore.setState({ activeBranch: { t1: 'b2' }, timelines: { t1: [] }, toast: undefined })
+  useStore.setState({
+    activeBranch: { t1: 'b2' },
+    branchDrafts: {},
+    timelines: { t1: [] },
+    toast: undefined
+  })
 })
 
 test('沒有分岔時顯示說明', () => {
@@ -13217,6 +13332,29 @@ test('分岔裡的工具錯誤以錯誤樣式顯示；處理中在常駐的 live
   expect(status).toHaveTextContent('Claude 正在回覆…')
 })
 
+test('分岔裡被 Harness 規則擋下或使用者拒絕的工具以中性的顏色顯示', () => {
+  render(
+    <BranchPanel
+      task={{ ...task, branches: [open] }}
+      events={[
+        ...talk,
+        ev('e4', {
+          kind: 'tool_result',
+          text: '分岔裡不能執行指令',
+          tool: { id: 'x', name: '', isError: true, blocked: true }
+        }),
+        ev('e5', {
+          kind: 'tool_result',
+          text: '先不要',
+          tool: { id: 'y', name: '', isError: true, denied: true }
+        })
+      ]}
+    />
+  )
+  expect(screen.getByText('已阻擋：分岔裡不能執行指令')).toHaveClass('text-muted')
+  expect(screen.getByText('已拒絕：先不要')).toHaveClass('text-muted')
+})
+
 test('從訊息開的分岔：第一則訊息分成引用（去掉 Markdown）與使用者的問題', () => {
   const seed = ev('e1', { text: '針對以下內容：\n建議改成 **429**\n\n我的問題：為什麼不是 423？' })
   render(<BranchPanel task={{ ...task, branches: [open] }} events={[seed]} />)
@@ -13226,21 +13364,35 @@ test('從訊息開的分岔：第一則訊息分成引用（去掉 Markdown）�
   expect(screen.queryByText(/針對以下內容/)).not.toBeInTheDocument()
 })
 
-test('正在開新分岔時顯示問題輸入框；點其他分岔就取消', async () => {
-  const onCancel = vi.fn()
-  render(
-    <BranchPanel
-      task={task}
-      events={talk}
-      draft={{ excerpt: '會有騷擾的風險。', pending: false, onSubmit: vi.fn(), onCancel }}
-    />
-  )
+test('正在開新分岔時顯示問題輸入框；點分岔標籤就切過去（store 會放棄草稿）', async () => {
+  useStore.getState().startBranchDraft('t1', '會有騷擾的風險。')
+  const draft = {
+    ...useStore.getState().branchDrafts.t1!,
+    pending: false,
+    onSubmit: vi.fn(),
+    onCancel: vi.fn()
+  }
+  render(<BranchPanel task={task} events={talk} draft={draft} />)
   expect(screen.getByRole('form', { name: '新分岔' })).toBeInTheDocument()
   // 分岔的內容先收起來，不會同時出現兩個輸入框
   expect(screen.queryByRole('textbox', { name: '分岔訊息' })).not.toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: /計數存放位置 · 已帶回/ }))
-  expect(onCancel).toHaveBeenCalled()
   expect(useStore.getState().activeBranch.t1).toBe('b1')
+  expect(useStore.getState().branchDrafts.t1).toBeUndefined()
+})
+
+test('新分岔建立中停用分岔標籤', async () => {
+  render(
+    <BranchPanel
+      task={task}
+      events={talk}
+      draft={{ excerpt: 'x', seq: 1, pending: true, onSubmit: vi.fn(), onCancel: vi.fn() }}
+    />
+  )
+  const chip = screen.getByRole('button', { name: /計數存放位置 · 已帶回/ })
+  expect(chip).toBeDisabled()
+  await userEvent.click(chip)
+  expect(useStore.getState().activeBranch.t1).toBe('b2')
 })
 
 test('唯讀時不顯示新分岔的輸入框', () => {
@@ -13249,7 +13401,7 @@ test('唯讀時不顯示新分岔的輸入框', () => {
       task={task}
       events={talk}
       readOnly
-      draft={{ excerpt: 'x', pending: false, onSubmit: vi.fn(), onCancel: vi.fn() }}
+      draft={{ excerpt: 'x', seq: 1, pending: false, onSubmit: vi.fn(), onCancel: vi.fn() }}
     />
   )
   expect(screen.queryByRole('form', { name: '新分岔' })).not.toBeInTheDocument()
@@ -13263,7 +13415,7 @@ test('取消新分岔、回到原本的分岔時捲到最底（重新畫出的�
     get: () => 500
   })
   try {
-    const draft = { excerpt: 'x', pending: false, onSubmit: vi.fn(), onCancel: vi.fn() }
+    const draft = { excerpt: 'x', seq: 1, pending: false, onSubmit: vi.fn(), onCancel: vi.fn() }
     const view = (d?: typeof draft) => (
       <BranchPanel task={{ ...task, branches: [open] }} events={talk} draft={d} />
     )
@@ -13305,7 +13457,12 @@ const events: TimelineEvent[] = [
 beforeEach(() => {
   vi.mocked(call).mockClear()
   resetStoreInternals()
-  useStore.setState({ activeBranch: {}, timelines: { t1: events }, toast: undefined })
+  useStore.setState({
+    activeBranch: {},
+    branchDrafts: {},
+    timelines: { t1: events },
+    toast: undefined
+  })
 })
 
 test('顯示主線時間軸，從輸入框送出訊息', async () => {
@@ -13535,6 +13692,86 @@ test('從訊息分岔的輸入框開著時，從問題卡片切到分岔（查�
   )
 })
 
+test('從訊息分岔的輸入框開著時，「查看分岔」到已經在看的分岔也會放棄草稿', async () => {
+  const task = makeTask({
+    questions: [
+      {
+        id: 'q1',
+        text: '要鎖多久？',
+        status: 'open',
+        allowFreeText: true,
+        askedAt: '',
+        options: [{ id: 'a', label: '15 分鐘' }],
+        followups: []
+      }
+    ],
+    branches: [
+      {
+        id: 'b1',
+        title: '鎖定時間',
+        fromQuestionId: 'q1',
+        status: 'open',
+        running: false,
+        createdAt: ''
+      }
+    ]
+  })
+  // 分岔面板本來就在看 b1
+  useStore.setState({
+    activeBranch: { t1: 'b1' },
+    timelines: {
+      t1: [...events, { id: 'e3', ts: '', channel: 'main', kind: 'question', ref: 'q1' }]
+    }
+  })
+  render(<ClarifyScreen task={task} nav={null} readOnly={false} onOpenStage={() => {}} />)
+  await userEvent.click(screen.getByRole('button', { name: '從這則訊息分岔' }))
+  expect(newBranchForm()).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '查看分岔' }))
+  expect(screen.queryByRole('form', { name: '新分岔' })).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /鎖定時間 · 進行中/ })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+})
+
+test('從訊息分岔：再按一次同一則訊息的分岔按鈕，焦點回到問題輸入框（打的字留著）', async () => {
+  clarify()
+  const trigger = screen.getByRole('button', { name: '從這則訊息分岔' })
+  await userEvent.click(trigger)
+  await userEvent.type(topicInput(), '差在哪')
+  trigger.focus()
+  await userEvent.click(trigger)
+  expect(topicInput()).toHaveFocus()
+  expect(topicInput()).toHaveValue('差在哪')
+})
+
+test('從訊息分岔：建立中不能用分岔標籤放棄草稿；建立失敗時問題留著', async () => {
+  const task = makeTask({
+    branches: [{ id: 'b1', title: '舊分岔', status: 'open', running: false, createdAt: '' }]
+  })
+  render(<ClarifyScreen task={task} nav={null} readOnly={false} onOpenStage={() => {}} />)
+  await userEvent.click(screen.getByRole('button', { name: '從這則訊息分岔' }))
+  await userEvent.type(topicInput(), '差在哪？')
+  const release = holdNextCall(vi.mocked(call))
+  await userEvent.click(within(newBranchForm()).getByRole('button', { name: '開始討論' }))
+  const chip = screen.getByRole('button', { name: /舊分岔 · 進行中/ })
+  expect(chip).toBeDisabled()
+  await userEvent.click(chip)
+  expect(newBranchForm()).toBeInTheDocument()
+  // 建立失敗（act 吞掉錯誤、回傳 undefined）：輸入的問題還在
+  await release(undefined)
+  expect(topicInput()).toHaveValue('差在哪？')
+  expect(chip).toBeEnabled()
+})
+
+test('離開釐清畫面就放棄草稿', async () => {
+  const { unmount } = clarify()
+  await userEvent.click(screen.getByRole('button', { name: '從這則訊息分岔' }))
+  expect(useStore.getState().branchDrafts.t1).toBeDefined()
+  unmount()
+  expect(useStore.getState().branchDrafts.t1).toBeUndefined()
+})
+
 test('等反問的回答時只在卡片顯示處理中，不重複顯示', () => {
   const task = makeTask({
     runState: 'running',
@@ -13673,16 +13910,25 @@ test('TaskScreen：已丟棄的任務即使停在釐清也唯讀', () => {
 ```tsx
 // tests/renderer/useStickToBottom.test.tsx
 import { fireEvent, render, screen } from '@testing-library/react'
-import { expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { useStickToBottom } from '@renderer/lib/useStickToBottom'
 
 function List({ version, resetKey, count }: { version: number; resetKey: string; count?: number }) {
-  const { ref, onScroll, stick } = useStickToBottom<HTMLDivElement>(version, resetKey, count)
+  const { ref, contentRef, onScroll, stick, unstick } = useStickToBottom<HTMLDivElement>(
+    version,
+    resetKey,
+    count
+  )
   return (
     <>
-      <div data-testid="list" ref={ref} onScroll={onScroll} />
+      <div data-testid="list" ref={ref} onScroll={onScroll}>
+        <div data-testid="content" ref={contentRef} />
+      </div>
       <button type="button" onClick={stick}>
         送出
+      </button>
+      <button type="button" onClick={unstick}>
+        跳到問題
       </button>
     </>
   )
@@ -13736,6 +13982,58 @@ test('從空變成有內容（重開 app 後第一次讀進時間軸）時一定
   rerender(<List version={4} resetKey="b" count={2} />)
   expect(list.scrollTop).toBe(1000)
 })
+
+test('unstick：跳到某個位置（例如問題卡片）後，新的內容不會把畫面拉回底部', () => {
+  const { rerender } = render(<List version={0} resetKey="a" count={1} />)
+  const list = sized(screen.getByTestId('list'))
+  rerender(<List version={1} resetKey="a" count={1} />)
+  expect(list.scrollTop).toBe(1000)
+  fireEvent.click(screen.getByRole('button', { name: '跳到問題' }))
+  list.scrollTop = 300
+  rerender(<List version={2} resetKey="a" count={2} />)
+  expect(list.scrollTop).toBe(300)
+})
+
+/** 測試用的 ResizeObserver：記下觀察的元素，手動觸發回呼 */
+class FakeResizeObserver {
+  static last?: FakeResizeObserver
+  targets: Element[] = []
+  constructor(public cb: () => void) {
+    FakeResizeObserver.last = this
+  }
+  observe(el: Element) {
+    this.targets.push(el)
+  }
+  unobserve(el: Element) {
+    this.targets = this.targets.filter((t) => t !== el)
+  }
+  disconnect() {
+    this.targets = []
+  }
+}
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+test('內容在之後才變高（字型載入、程式碼區塊）：黏在底部時再捲到底，使用者往上捲時不動', () => {
+  vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+  const { rerender } = render(<List version={0} resetKey="a" count={1} />)
+  const list = sized(screen.getByTestId('list'))
+  rerender(<List version={1} resetKey="a" count={1} />)
+  const ro = FakeResizeObserver.last!
+  expect(ro.targets).toEqual([list, screen.getByTestId('content')])
+  expect(list.scrollTop).toBe(1000)
+
+  Object.defineProperty(list, 'scrollHeight', { configurable: true, value: 1400 })
+  ro.cb()
+  expect(list.scrollTop).toBe(1400)
+
+  list.scrollTop = 0
+  fireEvent.scroll(list)
+  Object.defineProperty(list, 'scrollHeight', { configurable: true, value: 1800 })
+  ro.cb()
+  expect(list.scrollTop).toBe(0)
+})
 ```
 
 **Step 2: 確認失敗**
@@ -13746,7 +14044,7 @@ test('從空變成有內容（重開 app 後第一次讀進時間軸）時一定
 
 ```ts
 // src/renderer/src/lib/useStickToBottom.ts
-import { type UIEvent, useLayoutEffect, useRef } from 'react'
+import { type UIEvent, useEffect, useLayoutEffect, useRef } from 'react'
 
 /** 距離底部多少 px 以內算「在底部」 */
 const THRESHOLD = 80
@@ -13757,7 +14055,10 @@ const THRESHOLD = 80
  * `resetKey` 變了代表換了一段對話（例如換分岔），重新黏在底部；
  * `count` 是目前的項目數：從 0 變成有內容（初次載入，例如重開 app 後第一次打開任務、
  * 時間軸讀進來）時一定捲到底，不受讀取期間的捲動事件影響。
- * 使用者自己送出訊息時呼叫 `stick()`，之後的回覆一定看得到。
+ * `ref` 給捲動區、`contentRef` 給裡面包住內容的元素：內容在之後才變高（字型載入、程式碼區塊）
+ * 或捲動區變矮時（ResizeObserver），黏在底部就再捲一次。
+ * 使用者自己送出訊息時呼叫 `stick()`，之後的回覆一定看得到；跳到某個位置（例如問題卡片）前
+ * 呼叫 `unstick()`，平滑捲動途中有新內容也不會被拉回底部。
  */
 export function useStickToBottom<T extends HTMLElement>(
   version: unknown,
@@ -13765,6 +14066,7 @@ export function useStickToBottom<T extends HTMLElement>(
   count?: number
 ) {
   const ref = useRef<T>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
   const sticking = useRef(true)
   const lastKey = useRef(resetKey)
   /** 這段對話已經有過內容（初次載入的強制捲到底只做一次） */
@@ -13783,6 +14085,17 @@ export function useStickToBottom<T extends HTMLElement>(
     const el = ref.current
     if (el && sticking.current) el.scrollTop = el.scrollHeight
   }, [version, resetKey, count])
+  // 換一段對話時捲動區可能重新掛上（例如分岔面板收起新分岔的輸入框）：重新觀察
+  useEffect(() => {
+    const el = ref.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => {
+      if (sticking.current) el.scrollTop = el.scrollHeight
+    })
+    ro.observe(el)
+    if (contentRef.current) ro.observe(contentRef.current)
+    return () => ro.disconnect()
+  }, [resetKey])
   const onScroll = (e: UIEvent<T>) => {
     const el = e.currentTarget
     sticking.current = el.scrollHeight - el.scrollTop - el.clientHeight < THRESHOLD
@@ -13790,7 +14103,10 @@ export function useStickToBottom<T extends HTMLElement>(
   const stick = () => {
     sticking.current = true
   }
-  return { ref, onScroll, stick }
+  const unstick = () => {
+    sticking.current = false
+  }
+  return { ref, contentRef, onScroll, stick, unstick }
 }
 ```
 
@@ -13861,7 +14177,7 @@ import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 
 import type { Branch, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
 import { parseBranchSeed, stripMarkdown } from '../lib/branchDraft'
-import { userTextDisplay } from '../lib/timeline'
+import { toolResultLabel, userTextDisplay } from '../lib/timeline'
 import { blockImeSubmit, isComposing } from '../lib/ime'
 import { isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
@@ -13908,11 +14224,13 @@ function BranchInput({ disabled, onSend }: { disabled: boolean; onSend: (text: s
 export interface BranchDraft {
   /** 引用的 Claude 訊息（原文） */
   excerpt: string
+  /** 每按一次分岔按鈕就變：再按同一則訊息時把焦點移回問題輸入框 */
+  seq: number
   /** 正在建立分岔 */
   pending: boolean
   onSubmit: (question: string) => void
-  /** 放棄草稿；refocus（預設）時焦點回到按下的分岔按鈕 */
-  onCancel: (refocus?: boolean) => void
+  /** 放棄草稿（焦點回到按下的分岔按鈕） */
+  onCancel: () => void
 }
 
 /** 引用的訊息：最多 3 行，長的可以展開 */
@@ -13944,10 +14262,10 @@ function Quote({ text, toggle = true }: { text: string; toggle?: boolean }) {
 function NewBranchForm({ draft, blocked }: { draft: BranchDraft; blocked: boolean }) {
   const [text, setText] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
-  // 按下訊息旁的分岔按鈕（或換了引用的訊息）後，焦點移到問題輸入框
+  // 按下訊息旁的分岔按鈕（換了引用的訊息時表單重新掛上；再按同一則時 seq 變了）後，焦點移到問題輸入框
   useEffect(() => {
     inputRef.current?.focus()
-  }, [draft.excerpt])
+  }, [draft.seq])
   const submit = (e: FormEvent) => {
     e.preventDefault()
     const q = text.trim()
@@ -14018,12 +14336,19 @@ function BranchMessage({ e }: { e: TimelineEvent }) {
     }
     case 'assistant_text':
       return <Markdown text={e.text ?? ''} />
-    case 'tool_result':
+    case 'tool_result': {
+      const { label, muted } = toolResultLabel(e.tool)
       return (
-        <div className="line-clamp-4 text-xs break-all whitespace-pre-wrap text-danger">
-          工具錯誤：{e.text}
+        <div
+          className={cx(
+            'line-clamp-4 text-xs break-all whitespace-pre-wrap',
+            muted ? 'text-muted' : 'text-danger'
+          )}
+        >
+          {label}：{e.text}
         </div>
       )
+    }
     case 'system':
       return <div className="self-center text-xs text-muted">{e.text}</div>
     default:
@@ -14059,6 +14384,7 @@ export function BranchPanel({
   const replied = list.some((e) => e.kind === 'assistant_text')
   const {
     ref: scrollRef,
+    contentRef,
     onScroll,
     stick
   } = useStickToBottom<HTMLDivElement>(
@@ -14104,13 +14430,12 @@ export function BranchPanel({
                 aria-pressed={!drafting && x.id === b?.id}
                 // 建立分岔後焦點移到這裡（ClarifyScreen）
                 data-branch-chip={x.id}
-                onClick={() => {
-                  // 改看既有的分岔：放棄還沒送出的新分岔（焦點留在這裡）
-                  if (drafting) draft.onCancel(false)
-                  setActiveBranch(task.id, x.id)
-                }}
+                // 新分岔建立中不能切走：建立完成會自己切到新分岔，失敗時輸入的問題還在
+                disabled={!!drafting && draft.pending}
+                // 改看既有的分岔：store 一併放棄還沒送出的新分岔（焦點留在這裡）
+                onClick={() => setActiveBranch(task.id, x.id)}
                 className={cx(
-                  'cursor-pointer rounded-full px-2.5 py-1',
+                  'cursor-pointer rounded-full px-2.5 py-1 disabled:cursor-default disabled:opacity-50',
                   !drafting && x.id === b?.id
                     ? 'bg-brand-soft font-medium text-brand-ink'
                     : 'bg-fill text-muted'
@@ -14130,38 +14455,40 @@ export function BranchPanel({
           <div
             ref={scrollRef}
             onScroll={onScroll}
-            className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-5 py-2 text-[13px]"
+            className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 py-2 text-[13px]"
           >
-            {fromIndex > 0 && (
-              <span className="text-xs text-muted-2">
-                從問題 {fromIndex} 分出，帶著主線的上下文
-              </span>
-            )}
-            {list.map((e) => (
-              <BranchMessage key={e.id} e={e} />
-            ))}
-            <LiveStatus text={b.running && 'Claude 正在回覆…'} />
-            {b.error && (
-              <div role="alert" className="rounded-xl bg-danger-soft px-3.5 py-3 text-danger">
-                {b.error}
-              </div>
-            )}
-            {b.conclusion && (
-              <div className="flex flex-col gap-1 rounded-[14px] bg-decision px-3.5 py-3">
-                <span className="text-xs font-medium text-decision-ink">
-                  {b.status === 'concluded' ? '已帶回主線的結論' : '帶回主線的結論（預覽）'}
+            <div ref={contentRef} className="flex flex-col gap-3.5">
+              {fromIndex > 0 && (
+                <span className="text-xs text-muted-2">
+                  從問題 {fromIndex} 分出，帶著主線的上下文
                 </span>
-                <span>{b.conclusion.decision}</span>
-                {b.conclusion.rationale && (
-                  <span className="text-decision-body">原因：{b.conclusion.rationale}</span>
-                )}
-                {b.conclusion.deferred.length > 0 && (
-                  <span className="text-decision-body">
-                    延後：{b.conclusion.deferred.join('；')}
+              )}
+              {list.map((e) => (
+                <BranchMessage key={e.id} e={e} />
+              ))}
+              <LiveStatus text={b.running && 'Claude 正在回覆…'} />
+              {b.error && (
+                <div role="alert" className="rounded-xl bg-danger-soft px-3.5 py-3 text-danger">
+                  {b.error}
+                </div>
+              )}
+              {b.conclusion && (
+                <div className="flex flex-col gap-1 rounded-[14px] bg-decision px-3.5 py-3">
+                  <span className="text-xs font-medium text-decision-ink">
+                    {b.status === 'concluded' ? '已帶回主線的結論' : '帶回主線的結論（預覽）'}
                   </span>
-                )}
-              </div>
-            )}
+                  <span>{b.conclusion.decision}</span>
+                  {b.conclusion.rationale && (
+                    <span className="text-decision-body">原因：{b.conclusion.rationale}</span>
+                  )}
+                  {b.conclusion.deferred.length > 0 && (
+                    <span className="text-decision-body">
+                      延後：{b.conclusion.deferred.join('；')}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {!readOnly && b.status !== 'concluded' && (
@@ -15742,7 +16069,7 @@ const openQuestion = (id: string, text: string): Question => ({
 })
 const start = ev({ kind: 'user_text', text: msgDisplay.specApproved, ref: IMPLEMENT_START_REF })
 
-test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已拒絕」', async () => {
+test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已拒絕」、規則擋下的標「已阻擋」', async () => {
   useStore.setState({
     timelines: {
       t1: [
@@ -15754,7 +16081,13 @@ test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已
           text: '先不要刪',
           tool: { id: 'tu-d', name: '', isError: true, denied: true }
         }),
-        tool('Bash', { command: 'npm test' }, 'tu-b')
+        tool('Bash', { command: 'npm test' }, 'tu-b'),
+        tool('Read', { file_path: '/etc/hosts' }, 'tu-x'),
+        ev({
+          kind: 'tool_result',
+          text: '只能讀取 worktree 內的檔案',
+          tool: { id: 'tu-x', name: '', isError: true, blocked: true }
+        })
       ]
     }
   })
@@ -15765,8 +16098,13 @@ test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已
   expect(rows.map((r) => r.textContent)).toEqual([
     '指令npm test等待核准',
     '指令rm -rf dist已拒絕',
-    '指令npm test'
+    '指令npm test',
+    // Harness 規則擋下的：中性的「已阻擋」，原因在 title
+    '讀取/etc/hosts已阻擋'
   ])
+  const blocked = within(rows[3]).getByText('已阻擋')
+  expect(blocked).toHaveClass('text-muted')
+  expect(blocked).toHaveAttribute('title', '只能讀取 worktree 內的檔案')
   await screen.findByText('src/auth/lockout.ts')
 })
 
@@ -16310,8 +16648,8 @@ import { useStickToBottom } from '../lib/useStickToBottom'
 import { useStore } from '../store'
 
 type ToolEvent = TimelineEvent & { tool: ToolCall }
-/** 工具呼叫的結果：失敗，或使用者在核准對話框拒絕 */
-type ToolOutcome = 'failed' | 'denied'
+/** 工具呼叫的結果：失敗、使用者在核准對話框拒絕，或 Harness 的規則擋下（reason：顯示的原因） */
+type ToolOutcome = { kind: 'failed' | 'denied' | 'blocked'; reason?: string }
 const isToolCall = (e: TimelineEvent): e is ToolEvent => e.kind === 'tool_call' && !!e.tool
 /** 進行中的步驟裡列出最近幾個工具呼叫 */
 const RECENT_TOOLS = 8
@@ -16357,10 +16695,15 @@ function ToolRows({
             </code>
             {waiting ? (
               <span className="ml-auto flex-none text-xs text-decision-ink">等待核准</span>
-            ) : outcome === 'denied' ? (
+            ) : outcome?.kind === 'denied' ? (
               <span className="ml-auto flex-none text-xs text-muted">已拒絕</span>
+            ) : outcome?.kind === 'blocked' ? (
+              // Harness 的規則擋下（預期中的事，不是失敗）：原因放在 title
+              <span className="ml-auto flex-none text-xs text-muted" title={outcome.reason}>
+                已阻擋
+              </span>
             ) : (
-              outcome === 'failed' && (
+              outcome?.kind === 'failed' && (
                 <span className="ml-auto flex-none text-xs text-danger">失敗</span>
               )
             )}
@@ -16512,6 +16855,7 @@ export function ImplementScreen({
   // 步驟與卡片只改 task 不加事件，所以也看 updatedAt
   const {
     ref: scrollRef,
+    contentRef,
     onScroll,
     stick
   } = useStickToBottom<HTMLDivElement>(`${events.length}:${task.updatedAt}`, task.id, events.length)
@@ -16539,7 +16883,13 @@ export function ImplementScreen({
   const outcomes = new Map<string, ToolOutcome>(
     events
       .filter((e) => e.kind === 'tool_result' && e.tool?.isError)
-      .map((e) => [e.tool!.id, e.tool!.denied ? 'denied' : 'failed'])
+      .map((e): [string, ToolOutcome] => [
+        e.tool!.id,
+        {
+          kind: e.tool!.denied ? 'denied' : e.tool!.blocked ? 'blocked' : 'failed',
+          reason: e.text
+        }
+      ])
   )
   // 重新提問過的問題只在最後一次出現的位置畫卡片
   const latest = latestQuestionEvents(events)
@@ -16598,7 +16948,7 @@ export function ImplementScreen({
             onScroll={onScroll}
             className="flex min-h-0 flex-1 flex-col overflow-y-auto px-7 pt-2 pb-6"
           >
-            <div className="mx-auto flex w-full max-w-[800px] flex-col gap-2.5">
+            <div ref={contentRef} className="mx-auto flex w-full max-w-[800px] flex-col gap-2.5">
               <div className="mb-1.5 flex items-center gap-3">
                 <span className="text-[13px] text-muted">進度</span>
                 <span
@@ -16763,7 +17113,7 @@ ClarifyScreen 最終版：
 
 ```tsx
 // src/renderer/src/screens/ClarifyScreen.tsx
-import { type ReactNode, useEffect, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useRef } from 'react'
 import { flushSync } from 'react-dom'
 import type { Task } from '@shared/types'
 import { call } from '../api'
@@ -16795,24 +17145,28 @@ export function ClarifyScreen({
 }) {
   const act = useStore((s) => s.act)
   const setActiveBranch = useStore((s) => s.setActiveBranch)
-  const activeBranch = useStore((s) => s.activeBranch[task.id])
+  const startBranchDraft = useStore((s) => s.startBranchDraft)
+  const cancelBranchDraft = useStore((s) => s.cancelBranchDraft)
+  // 從訊息開分岔：先在分岔面板問使用者想討論什麼，送出問題才建立分岔（取消就什麼都不建立）。
+  // 草稿放在 store：切到任何分岔（分岔標籤、問題卡片的「查看分岔」「升級成分岔」、建立完成）都會放棄它
+  const draft = useStore((s) => s.branchDrafts[task.id])
   const events = useTimeline(task.id)
   // 卡片內容（反問回覆等）只改 task 不加事件，所以也看 updatedAt
   const {
     ref: scrollRef,
+    contentRef,
     onScroll,
-    stick
+    stick,
+    unstick
   } = useStickToBottom<HTMLDivElement>(`${events.length}:${task.updatedAt}`, task.id, events.length)
   // 主線執行中不能分岔（主程序會拒絕），但可以插話
   const busy = isBusy(task)
   // 問題卡片在等反問的回答時自己會顯示等待中，底部就不再重複顯示「處理中」
   const cardWaiting = task.questions.some((q) => awaitingCounterReply(task, q))
-  // 從訊息開分岔：先在分岔面板問使用者想討論什麼，送出問題才建立分岔（取消就什麼都不建立）。
-  // 記下引用的訊息、按下的分岔按鈕（取消後焦點回去）與當時顯示的分岔
-  const [draft, setDraft] = useState<{ excerpt: string; trigger: HTMLElement; branch?: string }>()
-  // 草稿期間換了分岔（問題卡片的「升級成分岔」「查看分岔」，或建立完成）：放棄草稿，
-  // 分岔面板才看得到那個分岔（React 文件建議的「render 期間依前一個值調整 state」，不用 effect）
-  if (draft && draft.branch !== activeBranch) setDraft(undefined)
+  // 按下的分岔按鈕：取消後焦點回到它（在事件裡寫入）
+  const draftTrigger = useRef<HTMLElement | null>(null)
+  // 離開釐清畫面（換階段或換任務）就放棄草稿，回來時不會冒出舊的輸入框
+  useEffect(() => () => cancelBranchDraft(task.id), [task.id, cancelBranchDraft])
   const [branching, runBranch] = usePending()
   const composerRef = useRef<HTMLInputElement>(null)
   // 跳到指定的問題：等時間軸畫出那張卡片（或已答列）後才捲，同一次指定只捲一次。
@@ -16825,9 +17179,11 @@ export function ClarifyScreen({
     ].find((x) => x.dataset.question === focusQuestion.id)
     if (!el) return
     focused.current = focusQuestion
+    // 不再黏在底部：平滑捲動途中有新事件也不會被拉回底部
+    unstick()
     reveal(el, 'center')
     flash(el)
-  }, [focusQuestion, events, scrollRef])
+  }, [focusQuestion, events, scrollRef, unstick])
   const createBranch = (excerpt: string, question: string) =>
     runBranch(async () => {
       const b = await act(() =>
@@ -16837,7 +17193,7 @@ export function ClarifyScreen({
         })
       )
       if (!b) return
-      // 換到新分岔（上面的檢查會放棄草稿）；畫出來之後把焦點移到新分岔的標籤
+      // 換到新分岔（store 一併放棄草稿）；畫出來之後把焦點移到新分岔的標籤
       flushSync(() => setActiveBranch(task.id, b.id))
       document.querySelector<HTMLElement>(`[data-branch-chip="${b.id}"]`)?.focus()
     })
@@ -16855,7 +17211,7 @@ export function ClarifyScreen({
             onScroll={onScroll}
             className="flex min-h-0 flex-1 flex-col overflow-y-auto px-7 pt-2 pb-6"
           >
-            <div className="mx-auto flex w-full max-w-[800px] flex-col gap-5">
+            <div ref={contentRef} className="mx-auto flex w-full max-w-[800px] flex-col gap-5">
               <Timeline
                 task={task}
                 channel="main"
@@ -16864,7 +17220,10 @@ export function ClarifyScreen({
                 onBranchFrom={
                   busy
                     ? undefined
-                    : (excerpt, trigger) => setDraft({ excerpt, trigger, branch: activeBranch })
+                    : (excerpt, trigger) => {
+                        draftTrigger.current = trigger
+                        startBranchDraft(task.id, excerpt)
+                      }
                 }
                 branchPending={branching}
                 onOpenStage={onOpenStage}
@@ -16901,11 +17260,12 @@ export function ClarifyScreen({
         draft={
           draft && {
             excerpt: draft.excerpt,
+            seq: draft.seq,
             pending: branching,
             onSubmit: (q) => void createBranch(draft.excerpt, q),
-            onCancel: (refocus = true) => {
-              setDraft(undefined)
-              if (refocus) draft.trigger.focus()
+            onCancel: () => {
+              cancelBranchDraft(task.id)
+              draftTrigger.current?.focus()
             }
           }
         }
@@ -19248,25 +19608,33 @@ function DecisionSource({
   source: Decision['source']
   onOpenQuestion?: (questionId: string) => void
 }) {
-  if (source.type === 'branch') return <Pill tone="decision">來自分岔</Pill>
-  if (source.type === 'implementation') return <Pill tone="muted">實作中決定</Pill>
-  // 規格回饋、實作中插話或報告回饋中直接給的指示；ref 是 Claude 摘錄的指示
-  if (source.type === 'user') return <UserInstructionPill excerpt={source.ref} />
-  const i = task.questions.findIndex((q) => q.id === source.ref)
-  const label = i >= 0 ? `問題 ${i + 1}` : '問題'
-  // 點了切到釐清階段並捲到那個問題（回看當時的問答）
-  return onOpenQuestion ? (
-    <button
-      type="button"
-      aria-label={`${label}（查看釐清對話）`}
-      onClick={() => onOpenQuestion(source.ref)}
-      className="cursor-pointer"
-    >
-      <Pill className="hover:bg-chip">{label}</Pill>
-    </button>
-  ) : (
-    <Pill>{label}</Pill>
-  )
+  // 每種來源各自一個 case（noImplicitReturns：新增來源類型時這裡會編譯失敗，不會被當成問題）
+  switch (source.type) {
+    case 'branch':
+      return <Pill tone="decision">來自分岔</Pill>
+    case 'implementation':
+      return <Pill tone="muted">實作中決定</Pill>
+    case 'user':
+      // 規格回饋、實作中插話或報告回饋中直接給的指示；ref 是 Claude 摘錄的指示
+      return <UserInstructionPill excerpt={source.ref} />
+    case 'question': {
+      const i = task.questions.findIndex((q) => q.id === source.ref)
+      const label = i >= 0 ? `問題 ${i + 1}` : '問題'
+      // 點了切到釐清階段並捲到那個問題（回看當時的問答）
+      return onOpenQuestion ? (
+        <button
+          type="button"
+          aria-label={`${label}（查看釐清對話）`}
+          onClick={() => onOpenQuestion(source.ref)}
+          className="cursor-pointer"
+        >
+          <Pill className="hover:bg-chip">{label}</Pill>
+        </button>
+      ) : (
+        <Pill>{label}</Pill>
+      )
+    }
+  }
 }
 
 const SEVERITY: Record<Limitation['severity'], { box: string; body: string; tag: string }> = {
@@ -23082,7 +23450,7 @@ Task 35 的端對端驗證（`docs/verification.md` 的「未解決／觀察」�
 
 **行為重點：**
 - **B 任何階段都能丟棄任務**：`TaskScreen` 把 `StageNav` 與 `TaskMenu` 放在同一個 `ml-auto` 的容器，每個畫面的標題列都有。「⋯」按鈕（`aria-label="任務動作"`、`aria-expanded`）打開 `role="group"` 的小面板：一般任務是「丟棄任務」，已完成（開過 PR／合併）的任務是「清除 worktree」，已丟棄的任務沒有選單。兩段式確認（同之前報告頁的文字），進入確認時焦點移到「取消」；主線或分岔執行中多一句「Claude 正在執行，會先停止。」（`TaskManager.discard` 會中止執行）；整理報告中（`runState === 'finalizing'`）停用並說明「正在整理報告，完成後才能丟棄。」；丟棄失敗（例如另一個收尾操作進行中）把原因以 `role="alert"` 留在面板上。Esc 或點面板外面關閉（Esc 時焦點回到「⋯」）；丟棄進行中不關閉、確定鈕停用（`usePending`）。丟棄成功後 toast「已丟棄任務「標題」」並回到新任務頁（丟棄的任務會從側欄消失；丟棄要等執行停下來、刪除 worktree，期間使用者已經換到別的畫面就不拉回來）；清除 worktree 成功後 toast「已清除 worktree」，這次開著任務時不再顯示選單（`TaskScreen` 記住 `cleared`，換階段畫面也一樣）。報告頁的收尾面板只留開 PR 與合併：每個畫面只有一個丟棄入口。
-- **C 從訊息分岔先問想討論什麼**：按「從這則訊息分岔」只在 `ClarifyScreen` 記下草稿（引用的訊息原文、按下的按鈕、當時顯示的分岔），分岔面板改顯示 `NewBranchForm`（`aria-label="新分岔"`）：引用（去掉 Markdown，最多 3 行，長的有「展開全文／收合」）、「想針對這段討論什麼？」單行輸入框（打開時取得焦點，IME 選字中的 Enter 不送出）、取消與「開始討論」。送出才呼叫 `branch:open`：`title = branchTitle(問題)`（去掉 Markdown、壓成一行、最多 30 字，以 code point 截斷），`seed = branchSeed(引用, 問題)` ＝「針對以下內容：\n<引用原文最多 600 字>\n\n我的問題：<問題>」。成功後切到新分岔（`flushSync` 畫出來後焦點移到新分岔的標籤 `data-branch-chip`），失敗時保留輸入的問題。取消、表單裡任何地方按 Esc（選字中的 Esc 除外）都會放棄草稿、什麼都不建立，焦點回到按下的分岔按鈕；點既有分岔的標籤也會放棄草稿（焦點留在標籤）。草稿期間顯示的分岔換了（問題卡片的「升級成分岔」「查看分岔」，或建立完成）就放棄草稿，分岔面板才看得到那個分岔（render 期間比對 `activeBranch`，不用 effect）。建立中不能取消（取消鈕停用、Esc 沒有作用：分岔已經在建立）。換一則訊息時表單重新開始（`key` 是引用的訊息），不帶著前一則的問題。主線執行中停用「開始討論」並說明原因；建立中停用時間軸上所有分岔按鈕。分岔面板顯示開場訊息時以 `parseBranchSeed` 拆成引用（同樣的 3 行引用）與問題；舊格式照原樣顯示。草稿收起後訊息列表重新畫出，`useStickToBottom` 的 reset key 在草稿期間不同，所以會再捲到底。問題卡片的「升級成分岔」不變（標題＝問題文字）。
+- **C 從訊息分岔先問想討論什麼**：按「從這則訊息分岔」只在 store 記下草稿（`branchDrafts[taskId] = { excerpt, seq }`；按下的按鈕記在 `ClarifyScreen` 的 ref），分岔面板改顯示 `NewBranchForm`（`aria-label="新分岔"`）：引用（去掉 Markdown，最多 3 行，長的有「展開全文／收合」）、「想針對這段討論什麼？」單行輸入框（打開時取得焦點，IME 選字中的 Enter 不送出）、取消與「開始討論」。送出才呼叫 `branch:open`：`title = branchTitle(問題)`（去掉 Markdown、壓成一行、最多 30 字，以 code point 截斷），`seed = branchSeed(引用, 問題)` ＝「針對以下內容：\n<引用原文最多 600 字>\n\n我的問題：<問題>」。成功後切到新分岔（`flushSync` 畫出來後焦點移到新分岔的標籤 `data-branch-chip`），失敗時保留輸入的問題。取消、表單裡任何地方按 Esc（選字中的 Esc 除外）都會放棄草稿、什麼都不建立，焦點回到按下的分岔按鈕；`setActiveBranch` 一律清掉那個任務的草稿：點分岔標籤（焦點留在標籤）、問題卡片的「升級成分岔」「查看分岔」（即使是正在看的那個分岔）、建立完成都會放棄草稿，分岔面板才看得到那個分岔；離開釐清畫面也清掉。建立中不能取消（取消鈕停用、Esc 沒有作用、分岔標籤停用：分岔已經在建立）。再按同一則訊息的分岔按鈕，`seq` 遞增，焦點回到問題輸入框。換一則訊息時表單重新開始（`key` 是引用的訊息），不帶著前一則的問題。主線執行中停用「開始討論」並說明原因；建立中停用時間軸上所有分岔按鈕。分岔面板顯示開場訊息時以 `parseBranchSeed` 拆成引用（同樣的 3 行引用）與問題；舊格式照原樣顯示。草稿收起後訊息列表重新畫出，`useStickToBottom` 的 reset key 在草稿期間不同，所以會再捲到底。問題卡片的「升級成分岔」不變（標題＝問題文字）。
 - **conclude_branch 的 title**：選填，說明「這個分岔的主題，10–20 字（會取代目前的分岔標題）」。標題只是顯示用，不能因為它拒絕整個結論：schema 用 `.overwrite()` 去掉前後空白、超過 30 字以 code point 截斷（給 Claude 的 JSON schema 是沒有長度限制的字串），只有空白就變成空字串；`TaskManager` 收到非空的 `title` 才更新 `branch.title`，結論本身不含標題。`BRANCH_RULES` 新增的規則放在最後一行，之前的三行不變：時間軸的 `stripRules` 才認得舊紀錄裡的規則。
 - **D「問題 N」跳到該問題**：報告決策的來源按鈕、規格決策的「問題 N」（現在也是按鈕，名稱「問題 N（查看釐清對話）」）與規格右側釐清紀錄的已答問題都呼叫 `onOpenQuestion(questionId)`。`TaskScreen.openQuestion` 切到釐清畫面並記下 `{ key, id }`（每次點擊是新的物件；只對點它時的任務與狀態有效，用 StageNav 換階段時清掉）。`ClarifyScreen` 在 effect 裡（排在 `useStickToBottom` 的 layout effect 之後）以 `data-question` 找到卡片或已答列，`reveal(el, 'center')` 捲過去並移動焦點，再 `flash(el)`；找不到（時間軸還沒畫出）就等下一次時間軸更新，同一次指定只捲一次。`flash` 直接設 `data-flash` 屬性 2 秒（`FLASH_MS`，再標示一次重新計時），CSS 讓外框淡出；`prefers-reduced-motion: reduce` 時不做動畫、只顯示外框，`reveal` 也改成直接跳過去（`behavior: 'auto'`）。
 - **E 重新提出的問題放到最新位置**：`askUser` 先看是不是在回答反問（`pendingCounter` 是同一個 question_id）：是的話只更新卡片（留在原位），否則一律寫入新的 `question` 事件（新問題、重新提問已回答或還開著的問題都一樣）；時間軸與實作畫面本來就只畫最後一張卡片。卡片以問題 id 為 key（`question:<id>`）：移到新位置時 React 搬動同一個元件，還沒送出的選擇、補充說明與反問都留著。
@@ -23298,13 +23666,14 @@ test('丟棄失敗時在選單裡顯示原因，留在任務上', async () => {
   await userEvent.click(menuButton())
   await userEvent.click(within(menu()).getByRole('button', { name: '丟棄任務' }))
   await userEvent.click(within(menu()).getByRole('button', { name: '確定丟棄' }))
-  expect(await within(menu()).findByRole('alert')).toHaveTextContent(
-    '丟棄失敗：另一個收尾操作正在進行，請稍候'
-  )
+  const alert = await within(menu()).findByRole('alert')
+  expect(alert).toHaveTextContent('丟棄失敗：另一個收尾操作正在進行，請稍候')
+  // 焦點移到失敗原因，螢幕閱讀器與鍵盤使用者都在這裡繼續
+  expect(alert).toHaveFocus()
   expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 't1' })
 })
 
-test('丟棄進行中停用確定鈕，連點只送一次；選單不會被關掉', async () => {
+test('丟棄進行中確定鈕標成停用但焦點留著，連點只送一次；選單不會被關掉', async () => {
   show()
   await userEvent.click(menuButton())
   await userEvent.click(within(menu()).getByRole('button', { name: '丟棄任務' }))
@@ -23312,7 +23681,14 @@ test('丟棄進行中停用確定鈕，連點只送一次；選單不會被關�
   const ok = within(menu()).getByRole('button', { name: '確定丟棄' })
   await userEvent.dblClick(ok)
   expect(call).toHaveBeenCalledTimes(1)
-  expect(ok).toBeDisabled()
+  // aria-disabled 而不是 disabled：按鈕停用時焦點不會掉到 body
+  expect(ok).toHaveAttribute('aria-disabled', 'true')
+  expect(ok).toHaveFocus()
+  expect(within(menu()).getByRole('button', { name: '取消' })).toHaveAttribute(
+    'aria-disabled',
+    'true'
+  )
+  await userEvent.click(within(menu()).getByRole('button', { name: '取消' }))
   await userEvent.keyboard('{Escape}')
   await userEvent.click(document.body)
   expect(menu()).toBeInTheDocument()
@@ -23344,7 +23720,35 @@ test('已完成：只有清除 worktree；清除後提示，不再顯示選單�
   expect(call).toHaveBeenCalledWith('finish:discard', 't1')
   await waitFor(() => expect(useStore.getState().toast?.text).toBe('已清除 worktree'))
   expect(screen.queryByRole('button', { name: '任務動作' })).not.toBeInTheDocument()
+  // 選單消失後焦點移到階段切換（正在看的階段）
+  const nav = screen.getByRole('navigation', { name: '任務階段' })
+  expect(within(nav).getByRole('button', { name: /報告/ })).toHaveFocus()
   expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 't1' })
+})
+
+test('Claude 要求核准時關掉選單（核准對話框蓋住畫面）', async () => {
+  show({ status: 'implementing', runState: 'running' })
+  await userEvent.click(menuButton())
+  expect(menu()).toBeInTheDocument()
+  act(() =>
+    useStore.setState({
+      tasks: {
+        t1: makeTask({
+          status: 'implementing',
+          runState: 'waiting_permission',
+          pendingPermission: {
+            id: 'p1',
+            taskId: 't1',
+            channel: 'main',
+            toolName: 'Bash',
+            input: { command: 'npm test' },
+            createdAt: ''
+          }
+        })
+      }
+    })
+  )
+  expect(screen.queryByRole('group', { name: '任務動作' })).not.toBeInTheDocument()
 })
 
 test('已丟棄的任務沒有選單', () => {
@@ -23495,6 +23899,7 @@ export function flash(el: HTMLElement) {
 // 已完成（開過 PR／合併）的任務只能清除 worktree；已丟棄的任務沒有選單。
 // 這是每個畫面唯一的丟棄入口（報告頁的收尾面板只留開 PR 與合併）。
 import { type KeyboardEvent, useEffect, useId, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import type { Task } from '@shared/types'
 import { call, errorText } from '../api'
 import { isComposing } from '../lib/ime'
@@ -23522,6 +23927,7 @@ export function TaskMenu({
   const triggerRef = useRef<HTMLButtonElement>(null)
   const itemRef = useRef<HTMLButtonElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
+  const alertRef = useRef<HTMLDivElement>(null)
   const panelId = useId()
   const done = task.status === 'done'
 
@@ -23552,6 +23958,22 @@ export function TaskMenu({
     const target = confirming ? cancelRef.current : itemRef.current
     target?.focus()
   }, [open, confirming])
+  // 失敗時焦點移到原因（role="alert"、tabIndex=-1），鍵盤與螢幕閱讀器的使用者從這裡繼續
+  useEffect(() => {
+    if (failure) alertRef.current?.focus()
+  }, [failure])
+  // 出現新的核准請求時關掉選單：核准對話框會蓋住畫面（丟棄進行中除外，結果要留在這裡）。
+  // React 文件建議的「render 期間依前一個值調整 state」，不用 effect
+  const permissionId = task.pendingPermission?.id
+  const [seenPermission, setSeenPermission] = useState(permissionId)
+  if (seenPermission !== permissionId) {
+    setSeenPermission(permissionId)
+    if (permissionId && open && !pending) {
+      setOpen(false)
+      setConfirming(false)
+      setFailure(undefined)
+    }
+  }
 
   if (task.status === 'discarded' || (done && cleared)) return null
 
@@ -23574,7 +23996,12 @@ export function TaskMenu({
       setOpen(false)
       setConfirming(false)
       if (done) {
-        onCleared?.()
+        // 清除後選單消失：焦點移到旁邊的階段切換（正在看的階段），不掉到 body
+        const stage = rootRef.current?.parentElement?.querySelector<HTMLElement>(
+          'nav [aria-pressed="true"]'
+        )
+        flushSync(() => onCleared?.())
+        stage?.focus()
         showToast('已清除 worktree')
         return
       }
@@ -23613,7 +24040,8 @@ export function TaskMenu({
           id={panelId}
           role="group"
           aria-label="任務動作"
-          className="absolute top-full right-0 z-30 mt-2 flex w-[280px] flex-col gap-2 rounded-xl bg-surface p-2 text-[13px] shadow-dialog"
+          // z-[5]：蓋住時間軸與報告內容，但在核准對話框的遮罩（z-10）之下
+          className="absolute top-full right-0 z-[5] mt-2 flex w-[280px] flex-col gap-2 rounded-xl bg-surface p-2 text-[13px] shadow-dialog"
         >
           {confirming ? (
             <div className="flex flex-col gap-2.5 rounded-lg bg-danger-soft p-3">
@@ -23624,10 +24052,11 @@ export function TaskMenu({
                 {!done && running && ' Claude 正在執行，會先停止。'}
               </span>
               <div className="flex gap-2">
+                {/* 進行中用 aria-disabled 而不是 disabled：停用的按鈕會讓焦點掉到 body */}
                 <Button
                   size="sm"
                   className="bg-danger font-medium text-white hover:bg-danger/90"
-                  disabled={pending}
+                  aria-disabled={pending || undefined}
                   onClick={() => void discard()}
                 >
                   {done ? '確定清除' : '確定丟棄'}
@@ -23636,7 +24065,7 @@ export function TaskMenu({
                   ref={cancelRef}
                   size="sm"
                   variant="ghost"
-                  disabled={pending}
+                  aria-disabled={pending || undefined}
                   onClick={() => close(true)}
                 >
                   取消
@@ -23661,8 +24090,10 @@ export function TaskMenu({
           )}
           {failure && (
             <div
+              ref={alertRef}
               role="alert"
-              className="rounded-lg bg-danger-soft px-3 py-2.5 text-xs break-words whitespace-pre-wrap text-danger"
+              tabIndex={-1}
+              className="rounded-lg bg-danger-soft px-3 py-2.5 text-xs break-words whitespace-pre-wrap text-danger outline-none"
             >
               {failure}
             </div>
@@ -23678,8 +24109,8 @@ export function TaskMenu({
 
 - `taskManager.ts`：`askUser` 以 `counterReply = pendingCounter.get(taskId) === a.question_id` 決定 `added = !counterReply`；`concludeBranch` 在 `b.status = 'concluding'` 之後 `if (a.title) b.title = a.title`。
 - `harnessTools.ts`、`protocol.ts`、`prompts.ts`、`report.ts`、`types.ts`：如行為重點。
-- `ClarifyScreen.tsx`：`draft`（`{ excerpt, trigger, branch }`）與 render 期間的「顯示的分岔換了就放棄」；`createBranch(excerpt, question)`（`usePending`，成功後 `flushSync(() => setActiveBranch(…))` 再把焦點移到 `[data-branch-chip]`）；時間軸的 `onBranchFrom={busy ? undefined : (excerpt, trigger) => setDraft({ excerpt, trigger, branch: activeBranch })}`；`BranchPanel` 的 `draft`（`onCancel(refocus = true)`）；`focusQuestion` 的 effect。
-- `BranchPanel.tsx`：`BranchDraft` 介面、`Quote`、`NewBranchForm`、`BranchMessage` 以 `parseBranchSeed` 顯示開場；有草稿（且不是唯讀）時以表單（`key={draft.excerpt}`）取代訊息與輸入區，分岔標籤 `aria-pressed` 都是 false，點標籤先 `draft.onCancel(false)`；`useStickToBottom(…, drafting ? 'draft' : branchId, list.length)`。
+- `ClarifyScreen.tsx`：草稿從 store 讀（`branchDrafts[task.id]`），按下的按鈕記在 `draftTrigger` ref，卸載時 `cancelBranchDraft`；`createBranch(excerpt, question)`（`usePending`，成功後 `flushSync(() => setActiveBranch(…))` 再把焦點移到 `[data-branch-chip]`）；時間軸的 `onBranchFrom={busy ? undefined : (excerpt, trigger) => { draftTrigger.current = trigger; startBranchDraft(task.id, excerpt) }}`；`BranchPanel` 的 `draft`（`{ excerpt, seq, pending, onSubmit, onCancel }`，取消時焦點回到按下的按鈕）；`focusQuestion` 的 effect（先 `unstick()` 再 `reveal`）。
+- `BranchPanel.tsx`：`BranchDraft` 介面、`Quote`、`NewBranchForm`、`BranchMessage` 以 `parseBranchSeed` 顯示開場；有草稿（且不是唯讀）時以表單（`key={draft.excerpt}`）取代訊息與輸入區，分岔標籤 `aria-pressed` 都是 false、建立中停用，點標籤只呼叫 `setActiveBranch`（store 一併放棄草稿）；`useStickToBottom(…, drafting ? 'draft' : branchId, list.length)`。
 - `TaskScreen.tsx`：`focus`、`cleared` 兩個 state、`openQuestion`；`nav` 是 `<div className="ml-auto flex items-center gap-2">` 包 `StageNav` 與 `TaskMenu`。
 - `SpecScreen.tsx`、`ReportView.tsx`、`ReportScreen.tsx`、`QuestionCard.tsx`、`FeedbackPanel.tsx`、`ArchitectureDiagram.tsx`、`ImplementScreen.tsx`、`useStickToBottom.ts`、`ui.tsx`、`StageNav.tsx`：如行為重點。
 
@@ -23700,6 +24131,21 @@ Expected: 全部通過（690 個測試）。
 4. 在長訊息上按分岔：分岔面板出現 3 行引用（可展開）與「想針對這段討論什麼？」（焦點在輸入框）；輸入問題後按 Esc（焦點在「收合」上也一樣）取消、沒有建立分岔（不送出，避免呼叫 Claude），焦點回到分岔按鈕；草稿開著時點既有分岔的標籤，草稿放棄、顯示那個分岔。
 5. 規格頁 D3 顯示「你的指示」；點 D1 的「問題 1」→ 切到釐清、捲到「鎖定期間 login() 要回傳什麼？」那一列並出現品牌色外框，焦點在那一列；2 秒後外框消失。
 6. 報告頁的架構圖：1440px 時上下排列、原尺寸、沒有被切掉；視窗縮到 1100px 時上下排列、約 0.68 倍、不需要水平捲動。決策卡片在 1100px 時標題完整、「你的指示」換到下一行，滑過顯示摘錄。
+
+**Step 9b: 審閱後的第二輪修正**（在 Task 38 之後提交；程式碼見上面列出的各 Task 區塊，另外：Task 13 `src/main/permissions/gate.ts`、`tests/main/gate.test.ts`；Task 26 `src/renderer/src/store.ts`、`tests/renderer/store.test.ts`；Task 29 `src/renderer/src/lib/timeline.ts`；Task 32 `tests/renderer/ImplementScreen.test.tsx`）
+
+1. 分岔草稿搬進 store：`branchDrafts[taskId] = { excerpt, seq }`，`startBranchDraft`／`cancelBranchDraft`；`setActiveBranch` 一律清掉那個任務的草稿，所以問題卡片「查看分岔」到正在看的分岔也會放棄草稿（之前用 render 期間比對 `activeBranch`，同一個分岔比不出差異）。`ClarifyScreen` 卸載時（換階段、換任務）清掉草稿；按下的分岔按鈕記在 ref，取消時焦點回去。測試：「查看分岔」到已經在看的分岔（`activeBranch` 一開始就是 b1）也放棄草稿；store 的 `seq` 與清除；離開釐清畫面就放棄草稿。
+2. 新分岔建立中停用分岔標籤（`disabled={drafting && draft.pending}`）：建立中不能切走放棄草稿，建立失敗時輸入的問題還在。
+3. `TaskMenu`：丟棄進行中「確定丟棄」「取消」用 `aria-disabled`（`Button` 的 `aria-disabled:` 樣式同 `disabled`）而不是 `disabled`，焦點不會掉到 body；失敗時焦點移到 `role="alert"`（`tabIndex=-1`）；清除 worktree 後選單消失，焦點移到階段切換正在看的那一格（`flushSync` 後 `focus()`）。
+4. 出現新的核准請求時關掉選單（render 期間比對 `pendingPermission.id`；丟棄進行中除外），面板 `z-[5]`，在核准對話框遮罩（`z-10`）之下。
+5. `useStickToBottom` 回傳 `unstick()`：跳到問題前呼叫，平滑捲動途中有新事件不會被拉回底部。
+6. `useStickToBottom` 回傳 `contentRef`（釐清、實作畫面的內容容器；分岔面板的訊息另外包一層），以 `ResizeObserver` 觀察捲動區與內容，黏在底部時內容之後才變高（字型載入、程式碼區塊）或捲動區變矮就再捲到底；換一段對話（`resetKey`）時重新觀察（分岔面板收起草稿時捲動區重新掛上）。初次載入的強制捲到底保留。沒有 `ResizeObserver`（jsdom）時略過。
+7. 報告的決策來源改成窮舉的 `switch`（同規格頁）：新增來源類型時編譯失敗（`noImplicitReturns`），不會被當成問題。
+8. 提示：反問的規則加上「回答反問時可以引用選項，這不算重述；回答會顯示在問題卡片裡」。
+9. Harness 規則擋下的工具顯示「已阻擋」：`GateContext.onBlocked?(toolUseId, reason)`，`evaluateTool` 的 deny（PreToolUse hook 以 `tool_use_id`、`canUseTool` 以 `toolUseID`）與核准後「任務狀態已改變」都通知；使用者拒絕、已取消不算。`TaskManager.blockedToolUses` 記下 id → 執行與原因（同 `deniedToolUses`，執行結束或 shutdown 時清掉），工具結果寫成 `tool.blocked: true`、`text` 是 Harness 的原因（不是 SDK 帶「PreToolUse:… hook error」前綴的文字）。`toolResultLabel(tool)`：已拒絕／已阻擋用 `text-muted`，其他是紅色的「工具錯誤」；釐清時間軸與分岔面板顯示「已阻擋：原因」，實作的工具列表顯示中性的「已阻擋」，原因放在 `title`。
+10. 再按同一則訊息的「從這則訊息分岔」：`seq` 遞增，`NewBranchForm` 的 focus effect 以 `seq` 為依賴，焦點回到問題輸入框（同一則訊息不換 `key`，打的字留著）。
+
+驗證：`npm test`（709 個測試，跑兩次）、`npm run typecheck`、`npm run lint`、`npx electron-vite build`。
 
 **Step 10: Commit**
 
@@ -23727,6 +24173,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 # fix(ui): stay put when a discard finishes after navigating away
 # fix(main): never reject a branch conclusion over its title
 # fix(ui): read the user-instruction excerpt to screen readers
+# 第二輪審閱（Task 38 之後）：
+# fix(ui): keep the branch draft in the store so any branch view drops it
+# fix(ui): keep focus usable in the task menu and yield to approvals
+# fix(ui): re-pin timelines on late layout growth; stop sticking on a jump
+# refactor(ui): switch over every report decision source
+# fix(main): let Claude quote options when answering a counter-question
+# feat: show tool calls blocked by Harness rules as 已阻擋, not errors
 git add docs
 git commit -m "docs: plan the post-E2E UX fixes (Task 37) and record them
 
