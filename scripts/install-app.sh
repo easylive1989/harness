@@ -22,7 +22,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "▸ 建置 $REF（${COMMIT:0:7}）於 $BUILD"
+echo "▸ 建置 ${REF}（${COMMIT:0:7}）於 $BUILD"
 git -C "$REPO" worktree add --detach "$BUILD" "$COMMIT" >/dev/null
 cd "$BUILD"
 npm ci --no-audit --no-fund
@@ -38,5 +38,5 @@ fi
 mkdir -p "$DEST_DIR"
 rm -rf "$DEST"
 ditto "$APP" "$DEST"
-echo "✓ 已安裝 $DEST（${COMMIT:0:7}）"
+echo "✓ 已安裝 ${DEST}（${COMMIT:0:7}）"
 echo "  從 Spotlight 或 Launchpad 開啟，或執行：open \"$DEST\""
