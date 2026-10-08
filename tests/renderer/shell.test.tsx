@@ -175,6 +175,30 @@ describe('TaskScreen / StageNav', () => {
     expect(stage(/規格/)).toHaveAttribute('aria-pressed', 'true')
   })
 
+  test('主畫面拋錯時顯示錯誤、側欄仍可用；換到其他任務就清掉錯誤', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    // 壞掉的任務資料：規格畫面讀 specs 時拋錯（側欄用不到 specs）
+    const broken = {
+      ...makeTask({ id: 'a', repoId: 'r1', title: '任務 A', status: 'spec_review' }),
+      specs: undefined
+    }
+    useStore.setState({
+      init: () => () => {},
+      tasks: {
+        a: broken as never,
+        b: makeTask({ id: 'b', repoId: 'r1', title: '任務 B', status: 'spec_review' })
+      },
+      timelines: { a: [], b: [] },
+      view: { kind: 'task', taskId: 'a' }
+    })
+    render(<App />)
+    expect(screen.getByRole('alert')).toHaveTextContent('這個畫面發生錯誤')
+    await userEvent.click(screen.getByRole('button', { name: /任務 B/ }))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(stage(/規格/)).toHaveAttribute('aria-pressed', 'true')
+    vi.mocked(console.error).mockRestore()
+  })
+
   test('App 外框不會捲動：沒有定位祖先的絕對定位元素（例如架構圖的 sr-only 連線清單）留在外框裡', () => {
     useStore.setState({ init: () => () => {} })
     const { container } = render(<App />)

@@ -1,5 +1,6 @@
 // src/renderer/src/App.tsx
 import { useEffect } from 'react'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { Sidebar } from './components/Sidebar'
 import { Toast } from './components/Toast'
 import { NewTaskScreen } from './screens/NewTaskScreen'
@@ -46,10 +47,13 @@ export default function App() {
         {/* 設定頁自帶左欄（分類與返回） */}
         {view.kind !== 'settings' && <Sidebar />}
         <div className="flex min-w-0 flex-1 gap-3">
-          {view.kind === 'new' && <NewTaskScreen />}
-          {/* key：換任務時重建，回看階段等畫面狀態不會帶到下一個任務 */}
-          {view.kind === 'task' && <TaskScreen key={view.taskId} taskId={view.taskId} />}
-          {view.kind === 'settings' && <SettingsScreen />}
+          {/* 主畫面拋錯時側欄仍可用；key：換畫面或任務時清掉錯誤 */}
+          <ErrorBoundary key={view.kind === 'task' ? `task:${view.taskId}` : view.kind}>
+            {view.kind === 'new' && <NewTaskScreen />}
+            {/* key：換任務時重建，回看階段等畫面狀態不會帶到下一個任務 */}
+            {view.kind === 'task' && <TaskScreen key={view.taskId} taskId={view.taskId} />}
+            {view.kind === 'settings' && <SettingsScreen />}
+          </ErrorBoundary>
         </div>
       </div>
       <Toast />
