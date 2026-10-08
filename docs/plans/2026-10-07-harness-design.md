@@ -69,7 +69,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 - `mcpServers: { harness: HarnessTools }`（`alwaysLoad: true`：Claude Code 預設把 MCP 工具藏在 tool search 後面，沒先載入 schema 時 Claude 會猜錯參數）
 - `canUseTool: PermissionGate`
 - `pathToClaudeCodeExecutable`: 偵測到的本機 `claude`（沿用其訂閱登入）
-- `env`: `process.env` 加上 `ENABLE_CLAUDEAI_MCP_SERVERS=false`（不載入 claude.ai 帳號上的連接器；PermissionGate 本來就會拒絕它們）
+- `env`: `process.env` 加上 `ENABLE_CLAUDEAI_MCP_SERVERS=false`（不載入 claude.ai 帳號上的連接器；PermissionGate 本來就會拒絕它們）與 `CLAUDE_CODE_TERMINAL_MCP_TOOLS=mcp__harness__ask_user,…`（要求結束這一輪的四個工具：`ask_user`、`propose_spec`、`conclude_branch`、`submit_report`。Claude 照指示只思考、不寫字就結束這一輪時，Claude Code 預設會補一句「[Your previous response had no visible output…]」催它寫一段話，Claude 只好重述問題；列在這裡的工具之後不催）
 - `prompt`: AsyncIterable 佇列（串流輸入模式），以支援插話；停止用 `interrupt()`／`AbortController`
 - 續接：`resume: sessionId`；分岔：`resume: mainSessionId, forkSession: true`
 
@@ -94,7 +94,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 階段指示（append 到 system prompt）定義這些格式與行為規則：釐清時一次只問一題、一定用 `ask_user`、收到反問要回答後用同一 `question_id` 重新呼叫 `ask_user`；有把握時呼叫 `propose_spec`；實作時依步驟呼叫 `update_plan`；完成時呼叫 `submit_report`。
 
-回覆的寫法（2026-10-08 端對端驗證後加上）：全程繁體中文，包含簡短說明與過渡語句，只有程式碼、識別字、指令、檔案路徑與錯誤訊息保留原文；問題、選項、規格與報告的內容只放在工具參數裡（介面會顯示），不在文字中重述，也不說「我已在介面上送出問題」，需要脈絡時只寫與問題不重複的 1–2 句。決策來源除了 `question`、`branch`、`implementation`，使用者在規格回饋、實作中插話或報告回饋中直接要求而做的決定用 `{type:"user", ref:指示的簡短摘錄}`（介面顯示「你的指示」）。
+回覆的寫法（2026-10-08 端對端驗證後加上）：全程繁體中文，包含簡短說明與過渡語句，只有程式碼、識別字、指令、檔案路徑與錯誤訊息保留原文；問題、選項、規格與報告的內容只放在工具參數裡（介面會顯示），不在文字中重述，也不說「我已在介面上送出問題」，需要脈絡時只寫與問題不重複的 1–2 句；第二輪驗證後補上：`conclude_branch` 的結論同樣不在文字中重述，也不提到 `[conclude]` 等標記（使用者看不到也不會自己輸入，需要動作時指向介面上的按鈕）。決策來源除了 `question`、`branch`、`implementation`，使用者在規格回饋、實作中插話或報告回饋中直接要求而做的決定用 `{type:"user", ref:指示的簡短摘錄}`（介面顯示「你的指示」）。
 
 ### 3.4 權限（PermissionGate）
 

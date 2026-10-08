@@ -4458,6 +4458,16 @@ export interface ToolSink {
 export type HarnessToolName =
   'ask_user' | 'propose_spec' | 'update_plan' | 'conclude_branch' | 'submit_report'
 
+/**
+ * 呼叫後要 Claude 結束這一輪、不再寫字的工具（結果都寫著「請結束這一輪」），以 Claude Code 看到的全名列出。
+ * 透過 CLAUDE_CODE_TERMINAL_MCP_TOOLS 告訴 Claude Code：否則這一輪只有思考、沒有文字時，
+ * 它會補一句「[Your previous response had no visible output…]」催 Claude 寫一段話，
+ * Claude 只好重述問題或說「已送出」。
+ */
+export const TURN_ENDING_TOOLS = (
+  ['ask_user', 'propose_spec', 'conclude_branch', 'submit_report'] satisfies HarnessToolName[]
+).map((n) => `mcp__harness__${n}`)
+
 type Result = { content: { type: 'text'; text: string }[]; isError?: boolean }
 const ok = (text: string): Result => ({ content: [{ type: 'text', text }] })
 const fail = (text: string): Result => ({ content: [{ type: 'text', text }], isError: true })
@@ -4511,7 +4521,7 @@ export function createToolHandlers(sink: ToolSink) {
     conclude_branch: (a: ConcludeBranchArgs) =>
       guard(async () => {
         await sink.concludeBranch(a)
-        return ok('結論已交給使用者確認。請結束這一輪。')
+        return ok('結論已交給使用者確認，介面會顯示完整內容。請結束這一輪，不要在文字中重述結論。')
       }),
     submit_report: (raw: unknown) =>
       guard(async () => {
@@ -4674,7 +4684,8 @@ export const MAIN_SYSTEM_APPEND = `
 ## 回覆的寫法
 - 全程使用繁體中文，包含簡短說明與過渡語句（例如寫「接著修改測試」，不要寫「Now update tests」）；只有程式碼、識別字、指令、檔案路徑與錯誤訊息保留原文。
 - 呼叫 ask_user 時，問題、選項與取捨只放在工具參數裡，介面會顯示成問題卡片：不要在文字中重述問題或選項，也不要寫「我已在介面上送出問題」「等你在介面上選擇」之類的話。需要先說明脈絡時，只寫與問題不重複的脈絡（1–2 句），或放進 context 參數。
-- 呼叫 propose_spec、submit_report 前後同理：內容只放在工具參數裡，介面會完整顯示，不要在文字中重述規格或報告的內容，也不要寫「我已提出規格」「報告已送出」之類的話。
+- 呼叫 propose_spec、conclude_branch、submit_report 前後同理：內容只放在工具參數裡，介面會完整顯示，不要在文字中重述規格、結論或報告的內容，也不要寫「我已提出規格」「結論已整理好」「報告已送出」之類的話。
+- [tag …] 標記是介面在使用者按按鈕時自動送出的，使用者看不到也不會自己輸入這些標記：回覆中不要提到它們（例如不要寫「送出 [conclude]」），需要使用者動作時指向介面上的按鈕（例如分岔的「帶回主線」、問題卡片的「確認答案」）。
 
 ## 階段
 任務依序經過：釐清 → 規格 → 實作 → 報告。在收到 [spec_approved] 之前都是釐清階段。
@@ -5772,6 +5783,9 @@ describe('TaskManager：建立任務與釐清', () => {
     expect(claude.calls[0].options.tools).toEqual(BUILTIN_TOOLS)
     expect(claude.calls[0].options.env).toMatchObject({
       ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
+      // 呼叫這些工具後安靜結束這一輪是對的：Claude Code 不要再催 Claude 寫一段話（重述問題、說已送出）
+      CLAUDE_CODE_TERMINAL_MCP_TOOLS:
+        'mcp__harness__ask_user,mcp__harness__propose_spec,mcp__harness__conclude_branch,mcp__harness__submit_report',
       PATH: process.env.PATH
     })
     expect(claude.calls[0].tools).toEqual([
@@ -5978,7 +5992,7 @@ import {
   type GateContext
 } from '../permissions/gate'
 import type { Repository } from '../store/repository'
-import type { HarnessToolName, ToolSink } from '../tools/harnessTools'
+import { type HarnessToolName, type ToolSink, TURN_ENDING_TOOLS } from '../tools/harnessTools'
 import { prBody } from './prBody'
 import { phaseOf, type TaskEventType, transition } from './stateMachine'
 
@@ -6405,8 +6419,13 @@ export class TaskManager {
       hooks: { PreToolUse: [{ hooks: [createPreToolUseHook(gateCtx)] }] },
       pathToClaudeCodeExecutable: this.d.getClaudePath(),
       // claude.ai 帳號上的連接器（Gmail、Notion…）不載入：PermissionGate 一律拒絕，只會佔用 context，
-      // Claude 還會在回覆裡提到它們
-      env: { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: 'false' }
+      // Claude 還會在回覆裡提到它們。
+      // 呼叫提問、規格、結論、報告工具後安靜結束這一輪是對的：Claude Code 不要再催 Claude 寫一段話
+      env: {
+        ...process.env,
+        ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
+        CLAUDE_CODE_TERMINAL_MCP_TOOLS: TURN_ENDING_TOOLS.join(',')
+      }
     }
 
     const run = new AgentRun(this.d.queryFn, { options, firstPrompt: prompt }, (e) => {
@@ -10666,6 +10685,14 @@ describe('TaskScreen / StageNav', () => {
     await userEvent.click(screen.getByRole('button', { name: /任務 B/ }))
     expect(screen.getByText('shop-api · 任務 B')).toBeInTheDocument()
     expect(stage(/規格/)).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  test('App 外框不會捲動：沒有定位祖先的絕對定位元素（例如架構圖的 sr-only 連線清單）留在外框裡', () => {
+    useStore.setState({ init: () => () => {} })
+    const { container } = render(<App />)
+    // relative：當它們的 containing block；overflow-clip：裁掉且不是捲動容器，
+    // 文件不會變高，捲到報告底再滾或 scrollIntoView 都不會把整個視窗捲走
+    expect(container.firstElementChild).toHaveClass('relative', 'overflow-clip')
   })
 })
 
@@ -21777,8 +21804,10 @@ export default function App() {
         載入中…
       </div>
     )
+  // relative + overflow-clip：沒有定位祖先的絕對定位元素（例如架構圖的 sr-only 連線清單）以外框為準並被裁掉，
+  // 文件不會比視窗高；否則捲到報告底再滾、或跳到某個位置（scrollIntoView）會把整個視窗往上捲走
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative flex h-full flex-col overflow-clip">
       <TitleBar title={title} />
       <div className="flex min-h-0 flex-1 gap-3 px-3 pb-3">
         {/* 設定頁自帶左欄（分類與返回） */}
@@ -23700,6 +23729,47 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 # fix(ui): read the user-instruction excerpt to screen readers
 git add docs
 git commit -m "docs: plan the post-E2E UX fixes (Task 37) and record them
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 38：第二輪端對端驗證的修正
+
+Task 36、37 之後以真實 Claude Code 再驗證一次（`docs/verification.md` 的「第二輪端對端驗證」），找到四個問題：
+1. 呼叫 `ask_user` 後 Claude 照指示只思考、不寫字就結束這一輪，但 Claude Code（2.1.294）看到沒有文字的回覆，會補一句 `[Your previous response had no visible output. Please continue and produce a user-visible response.]`，Claude 只好在問題卡片下面再寫一段重述脈絡的話。Claude Code 對最後的工具結果來自 `CLAUDE_CODE_TERMINAL_MCP_TOOLS` 列出的工具時不會補這句。
+2. 分岔裡呼叫 `conclude_branch` 後，Claude 在結論預覽上面用文字把整個結論再寫一次：`conclude_branch` 的回傳文字只說「請結束這一輪」，「回覆的寫法」也只涵蓋 `propose_spec`、`submit_report`。
+3. 報告頁架構圖的 sr-only 連線清單（絕對定位）沒有定位祖先，停在報告欄深處的靜態位置，文件因此比視窗高（900px 視窗中 2248px）：捲到報告底再滾會把整個 app 捲出視窗，跳到測試檔（`scrollIntoView`）時標題列與側欄往上移 16px。
+4. 分岔的回覆結尾寫「送出 [conclude] 我就把結論帶回主線」：提示把協定寫成「使用者送出 [conclude] 時…」，沒有說使用者看不到也不會自己輸入這些標記。
+
+**Files:**
+- Modify（各 Task 的程式碼區塊已更新為最終版本）：
+  - Task 18：`src/main/tools/harnessTools.ts`（`TURN_ENDING_TOOLS`；`conclude_branch` 的回傳文字要求不重述結論）
+  - Task 19：`src/main/agent/prompts.ts`（「回覆的寫法」：`conclude_branch` 一併不重述；不要提到 `[tag …]` 標記，改指向介面上的按鈕）
+  - Task 21：`src/main/tasks/taskManager.ts`（`env` 加 `CLAUDE_CODE_TERMINAL_MCP_TOOLS`）、`tests/main/taskManager.test.ts`
+  - Task 27：`tests/renderer/shell.test.tsx`（外框不會捲動）
+  - Task 34：`src/renderer/src/App.tsx`（外框 `relative overflow-clip`；Task 27 的區塊保留當時的寫法）
+- Test: `tests/main/harnessTools.test.ts`（`conclude_branch` 要求不重述結論）、`tests/main/prompts.test.ts`
+- Modify: `docs/plans/2026-10-07-harness-design.md`（§3.2 的 `env`、§3.3 回覆的寫法）、`docs/verification.md`（第二輪端對端驗證）
+
+**行為重點：**
+- `TURN_ENDING_TOOLS` 是回傳文字要求結束這一輪的工具（`ask_user`、`propose_spec`、`conclude_branch`、`submit_report`，不含 `update_plan`），以 Claude Code 看到的全名 `mcp__harness__…` 列出，逗號連接後放進 `CLAUDE_CODE_TERMINAL_MCP_TOOLS`。這個設定只讓 Claude Code 不補那句催促；Claude 自己要寫字時仍然會寫，所以提示與工具回傳文字的「不重述」照樣需要。工具回傳錯誤（`isError`）時不算，Claude 還是會被要求修正。
+- 外框用 `overflow: clip` 而不是 `hidden`：`hidden` 仍是捲動容器，`scrollIntoView` 還是捲得動；`clip` 不是捲動容器，裁掉的內容也不會讓文件變高。
+
+**驗證：** `npm test`（692 個測試）、`npm run typecheck`、`npm run lint` 通過；`npx electron-vite build` 後以真實 Claude 重新驗證：四個新 session 都沒有出現催促、問題卡片後面沒有文字；第二個分岔帶回主線後沒有文字；報告頁文件高度等於視窗高度，捲到底再滾、跳到測試檔都不會移動外框。
+
+**Commit**
+
+```bash
+git add src tests
+git commit -m "fix(main): stop Claude Code from nudging Claude to narrate after asking
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+# 依序：
+# fix(main): ask Claude not to restate the branch conclusion
+# fix(ui): keep the app shell from scrolling away
+# fix(main): keep Harness message tags out of Claude's replies
+git add docs
+git commit -m "docs: record the second end-to-end verification and its fixes (Task 38)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
