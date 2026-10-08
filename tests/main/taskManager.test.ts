@@ -229,6 +229,35 @@ describe('TaskManager：建立任務與釐清', () => {
     ])
   })
 
+  test('子代理的工具呼叫寫入時間軸並標成 subagent；子代理的文字不寫入', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async () => [
+      {
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          content: [{ type: 'tool_use', id: 'a1', name: 'Agent', input: { prompt: '找檔案' } }]
+        }
+      },
+      {
+        type: 'assistant',
+        parent_tool_use_id: 'a1',
+        message: {
+          content: [
+            { type: 'text', text: '我來找找' },
+            { type: 'tool_use', id: 's1', name: 'Read', input: { file_path: '/x/a.ts' } }
+          ]
+        }
+      }
+    ]
+    const id = await create()
+    const events = (await tm.timeline(id)).filter((e) => e.kind !== 'user_text')
+    expect(events.map((e) => [e.kind, e.tool])).toEqual([
+      ['tool_call', { id: 'a1', name: 'Agent', input: { prompt: '找檔案' } }],
+      ['tool_call', { id: 's1', name: 'Read', input: { file_path: '/x/a.ts' }, subagent: true }]
+    ])
+  })
+
   test('同時送出兩則訊息不會開兩段執行', async () => {
     const { tm, claude, create } = await setup()
     const id = await create()

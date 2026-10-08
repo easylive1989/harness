@@ -23,7 +23,14 @@ export type TurnEnd = {
 export type RunnerEvent =
   | { type: 'session'; sessionId: string }
   | { type: 'assistant_text'; text: string }
-  | { type: 'tool_call'; id: string; name: string; input: Record<string, unknown> }
+  | {
+      type: 'tool_call'
+      id: string
+      name: string
+      input: Record<string, unknown>
+      /** 子代理（Agent／Task 工具）裡的呼叫 */
+      subagent?: boolean
+    }
   | { type: 'tool_result'; id: string; isError: boolean; text: string }
   | TurnEnd
   | { type: 'notice'; message: string }
@@ -111,7 +118,22 @@ export function mapMessage(raw: SDKMessage): MappedEvent[] {
         ? [{ type: 'session', sessionId: m.session_id }]
         : []
     case 'assistant': {
-      if (m.parent_tool_use_id) return []
+      const content = Array.isArray(m.message?.content) ? m.message.content : []
+      // 子代理的訊息：只留工具呼叫（讓使用者看得到它讀了什麼、跑了什麼），文字與錯誤不顯示
+      if (m.parent_tool_use_id)
+        return content.flatMap((b): MappedEvent[] =>
+          b.type === 'tool_use'
+            ? [
+                {
+                  type: 'tool_call',
+                  id: b.id ?? '',
+                  name: b.name ?? '',
+                  input: (b.input ?? {}) as Record<string, unknown>,
+                  subagent: true
+                }
+              ]
+            : []
+        )
       const events: MappedEvent[] = m.error
         ? [
             {
@@ -120,7 +142,6 @@ export function mapMessage(raw: SDKMessage): MappedEvent[] {
             }
           ]
         : []
-      const content = Array.isArray(m.message?.content) ? m.message.content : []
       for (const b of content) {
         if (b.type === 'text' && b.text?.trim())
           events.push({ type: 'assistant_text', text: b.text })

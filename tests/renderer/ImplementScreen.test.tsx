@@ -321,6 +321,31 @@ test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已
   await screen.findByText('src/auth/lockout.ts')
 })
 
+test('子代理的工具呼叫列在步驟的工具列表裡，標「子代理」', async () => {
+  useStore.setState({
+    timelines: {
+      t1: [
+        start,
+        tool('Agent', { prompt: '找出登入相關的檔案' }),
+        ev({
+          kind: 'tool_call',
+          tool: {
+            id: 'sub1',
+            name: 'Read',
+            input: { file_path: '/tmp/wt/t1/src/auth/login.ts' },
+            subagent: true
+          }
+        })
+      ]
+    }
+  })
+  renderImpl(implTask())
+  const rows = within(screen.getByRole('region', { name: '進行中的步驟' })).getAllByRole('listitem')
+  expect(rows.map((r) => r.textContent)).toEqual(['子代理', '讀取子代理src/auth/login.ts'])
+  expect(within(rows[1]).getByText('子代理')).toHaveClass('text-muted')
+  await screen.findByText('src/auth/lockout.ts')
+})
+
 test('等待核准的工具不在最近 8 個裡時仍然列出來（最近 7 個＋它）', async () => {
   const many = Array.from({ length: 9 }, (_, i) => tool('Read', { file_path: `src/f${i}.ts` }))
   useStore.setState({

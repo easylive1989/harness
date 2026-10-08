@@ -31,6 +31,9 @@ export type ToolCall = NonNullable<TimelineEvent['tool']>
 
 export const toolLabel = (name: string) => TOOL_LABEL[name] ?? name
 
+/** 子代理（Agent／Task 工具）裡的工具呼叫的標籤 */
+export const SUBAGENT_LABEL = '子代理'
+
 /** worktree 內的絕對路徑顯示成相對路徑（Claude Code 的檔案工具都用絕對路徑）；其他原樣回傳 */
 export function relativeTo(root: string, p: string): string {
   const base = root.endsWith('/') ? root : `${root}/`

@@ -140,6 +140,31 @@ describe('Timeline', () => {
     expect(onOpenStage).toHaveBeenCalledWith('spec')
   })
 
+  test('子代理的工具呼叫：摘要與明細都標「子代理」', async () => {
+    const sub = (id: string, name: string, input: Record<string, unknown>) =>
+      ev({ kind: 'tool_call', tool: { id, name, input, subagent: true } })
+    render(
+      <Timeline
+        task={makeTask()}
+        channel="main"
+        events={[
+          ev({ kind: 'tool_call', tool: { id: 'a1', name: 'Agent', input: { prompt: '找檔案' } } }),
+          sub('s1', 'Read', { file_path: '/tmp/wt/t1/src/a.ts' }),
+          sub('s2', 'Read', { file_path: '/tmp/wt/t1/src/b.ts' }),
+          sub('s3', 'Grep', { pattern: 'lockout' })
+        ]}
+      />
+    )
+    await userEvent.click(
+      screen.getByRole('button', { name: '子代理 1 次 · 子代理讀取 2 次 · 子代理搜尋內容 1 次' })
+    )
+    expect(screen.getByText('讀取 src/a.ts').parentElement).toHaveTextContent('子代理讀取 src/a.ts')
+    expect(screen.getByText('搜尋內容 lockout').parentElement).toHaveTextContent('子代理')
+    // 主線自己呼叫的子代理（Agent 工具）是一般的一行，不加標籤
+    const labels = screen.getAllByText('子代理')
+    expect(labels.map((l) => l.tagName)).toEqual(['CODE', 'SPAN', 'SPAN', 'SPAN'])
+  })
+
   test('工具錯誤、系統訊息、報告與非分岔決策', async () => {
     const onOpenStage = vi.fn()
     const t = makeTask({

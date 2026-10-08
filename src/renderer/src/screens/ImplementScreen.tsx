@@ -13,6 +13,7 @@ import { isBusy } from '../lib/stage'
 import {
   implementEvents,
   latestQuestionEvents,
+  SUBAGENT_LABEL,
   type ToolCall,
   toolLabel,
   toolSummary,
@@ -67,6 +68,11 @@ function ToolRows({
             >
               {toolLabel(e.tool.name)}
             </span>
+            {e.tool.subagent && (
+              <span className="flex-none rounded-full bg-surface px-1.5 text-[11px] text-muted">
+                {SUBAGENT_LABEL}
+              </span>
+            )}
             <code className="min-w-0 truncate" title={target}>
               {target}
             </code>

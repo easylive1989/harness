@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 import type { Channel, Task, TimelineEvent } from '@shared/types'
 import {
   latestQuestionEvents,
+  SUBAGENT_LABEL,
   type ToolCall,
   toolLabel,
   toolResultLabel,
@@ -34,7 +35,8 @@ function ToolGroup({ events, root }: { events: ToolEvent[]; root: string }) {
   const [open, setOpen] = useState(false)
   const counts = new Map<string, number>()
   for (const e of events) {
-    const l = toolLabel(e.tool.name)
+    // 子代理裡的呼叫分開計數，例如「子代理讀取 2 次」
+    const l = `${e.tool.subagent ? SUBAGENT_LABEL : ''}${toolLabel(e.tool.name)}`
     counts.set(l, (counts.get(l) ?? 0) + 1)
   }
   return (
@@ -49,11 +51,20 @@ function ToolGroup({ events, root }: { events: ToolEvent[]; root: string }) {
         <span aria-hidden>{open ? '▴' : '▾'}</span>
       </button>
       {open &&
-        events.map((e) => (
-          <code key={e.id} className="self-start break-all">
-            {toolSummary(e.tool, root)}
-          </code>
-        ))}
+        events.map((e) =>
+          e.tool.subagent ? (
+            <span key={e.id} className="flex items-baseline gap-1.5 self-start">
+              <span className="flex-none rounded-full bg-fill px-1.5 text-[11px] text-muted">
+                {SUBAGENT_LABEL}
+              </span>
+              <code className="break-all">{toolSummary(e.tool, root)}</code>
+            </span>
+          ) : (
+            <code key={e.id} className="self-start break-all">
+              {toolSummary(e.tool, root)}
+            </code>
+          )
+        )}
     </div>
   )
 }

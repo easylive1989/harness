@@ -38,13 +38,32 @@ describe('mapMessage', () => {
       { type: 'tool_call', id: 'tu1', name: 'Read', input: { file_path: 'a' } }
     ])
   })
-  test('子代理的訊息略過', () => {
+  test('子代理的工具呼叫標成 subagent；子代理的文字與工具結果略過', () => {
     expect(
       mapMessage(
         m({
           type: 'assistant',
           parent_tool_use_id: 'x',
-          message: { content: [{ type: 'text', text: 'hi' }] }
+          error: 'rate_limit',
+          message: {
+            content: [
+              { type: 'text', text: 'hi' },
+              { type: 'tool_use', id: 'tu9', name: 'Grep', input: { pattern: 'lockout' } }
+            ]
+          }
+        })
+      )
+    ).toEqual([
+      { type: 'tool_call', id: 'tu9', name: 'Grep', input: { pattern: 'lockout' }, subagent: true }
+    ])
+    expect(
+      mapMessage(
+        m({
+          type: 'user',
+          parent_tool_use_id: 'x',
+          message: {
+            content: [{ type: 'tool_result', tool_use_id: 'tu9', is_error: true, content: 'x' }]
+          }
         })
       )
     ).toEqual([])

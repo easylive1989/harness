@@ -587,7 +587,12 @@ export class TaskManager {
           await this.addTimeline(taskId, {
             channel,
             kind: 'tool_call',
-            tool: { id: e.id, name: e.name, input: e.input }
+            tool: {
+              id: e.id,
+              name: e.name,
+              input: e.input,
+              ...(e.subagent ? { subagent: true } : {})
+            }
           })
         }
         return
