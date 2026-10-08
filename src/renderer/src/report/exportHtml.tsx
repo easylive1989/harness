@@ -1,6 +1,6 @@
 // src/renderer/src/report/exportHtml.tsx
-// 匯出單一自含的 HTML：靜態渲染 ReportView（React 會轉義所有報告文字）＋ 目前頁面的 CSS
-import { renderToStaticMarkup } from 'react-dom/server'
+// 匯出單一自含的 HTML：靜態渲染 ReportView（React 會轉義所有報告文字）＋ 目前頁面的 CSS。
+// react-dom/server 只有匯出時才用到：按下匯出才載入（獨立的 chunk）。
 import type { Report, Task } from '@shared/types'
 import { BLOCK_MAX_H, BLOCK_MIN_H } from './blocks'
 import { ExportHeader, ReportView } from './ReportView'
@@ -37,17 +37,25 @@ function collectCss(): string {
   return out.join('\n').replace(/<\/style/gi, '<\\/style')
 }
 
-/** 匯出檔名：去掉不能用在檔名的字元 */
+/** 匯出檔名（不含 .html）的長度上限 */
+const MAX_NAME = 80
+
+/** 匯出檔名：去掉控制字元與不能用在檔名的字元，太長時截短標題 */
 export function exportFileName(task: Task, version: number): string {
-  const title =
-    task.title
-      .replace(/[\\/:*?"<>|]/g, '-')
-      .replace(/\s+/g, ' ')
-      .trim() || '任務'
-  return `${title}-變更報告-v${version}.html`
+  const suffix = `-變更報告-v${version}`
+  const cleaned = task.title
+    .replace(/\p{Cc}/gu, ' ')
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+  // 以字元（code point）截短，不會切開 emoji 等兩個 UTF-16 單位的字
+  const room = MAX_NAME - Array.from(suffix).length
+  const title = Array.from(cleaned).slice(0, room).join('').trim() || '任務'
+  return `${title}${suffix}.html`
 }
 
-export function buildReportHtml(task: Task, report: Report): string {
+export async function buildReportHtml(task: Task, report: Report): Promise<string> {
+  const { renderToStaticMarkup } = await import('react-dom/server')
   const body = renderToStaticMarkup(
     <>
       <ExportHeader task={task} report={report} />

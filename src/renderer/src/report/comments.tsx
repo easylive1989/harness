@@ -5,11 +5,13 @@ import { cx, Icons } from '../components/ui'
 
 export function CommentButton({
   label,
+  text = '留言',
   onClick,
   className
 }: {
-  /** 螢幕閱讀器唸的名稱，例如「對「概觀」留言」 */
-  label: string
+  /** 螢幕閱讀器唸的名稱（例如「對「概觀」留言」）；不給就用按鈕上的文字 */
+  label?: string
+  text?: string
   onClick: () => void
   className?: string
 }) {
@@ -17,7 +19,6 @@ export function CommentButton({
     <button
       type="button"
       aria-label={label}
-      title="留言"
       onClick={onClick}
       className={cx(
         'flex h-7 flex-none cursor-pointer items-center gap-1 rounded-lg px-2 text-xs text-muted hover:bg-fill hover:text-ink',
@@ -25,12 +26,15 @@ export function CommentButton({
       )}
     >
       <Icons.Comment width={13} height={13} />
-      留言
+      {text}
     </button>
   )
 }
 
-/** 輸入一則回饋：Enter 加入、Esc 取消；dark 用在程式碼區塊裡 */
+/**
+ * 輸入一則回饋：Enter 加入、Esc 取消；dark 用在程式碼區塊裡。
+ * 加入或取消後，焦點回到打開它的按鈕（輸入框出現前的焦點）。
+ */
 export function CommentForm({
   initial = '',
   placeholder,
@@ -47,9 +51,18 @@ export function CommentForm({
   className?: string
 }) {
   const [text, setText] = useState(initial)
+  // 第一次 render 時輸入框還沒取得焦點：這時的焦點就是按下的「留言」或行號按鈕
+  const [opener] = useState(() =>
+    document.activeElement instanceof HTMLElement ? document.activeElement : null
+  )
+  const close = (fn: () => void) => {
+    fn()
+    if (opener?.isConnected) opener.focus()
+  }
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    if (text.trim()) onSubmit(text.trim())
+    const value = text.trim()
+    if (value) close(() => onSubmit(value))
   }
   return (
     <form onSubmit={submit} className={cx('flex items-center gap-2 font-sans', className)}>
@@ -60,7 +73,7 @@ export function CommentForm({
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Escape') onCancel()
+          if (e.key === 'Escape') close(onCancel)
         }}
         placeholder={placeholder}
         className={cx(
@@ -77,7 +90,7 @@ export function CommentForm({
       </button>
       <button
         type="button"
-        onClick={onCancel}
+        onClick={() => close(onCancel)}
         className={cx(
           'h-9 flex-none cursor-pointer px-1.5 text-xs',
           dark ? 'text-code-muted hover:text-white' : 'text-muted hover:text-ink'

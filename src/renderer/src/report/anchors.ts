@@ -1,19 +1,24 @@
 // src/renderer/src/report/anchors.ts
-// 回饋錨點（主程序原樣轉給 Claude）：section:<id>、decision:<id>、block:<id>、diff:<路徑>:<新檔行號>
+// 回饋錨點（主程序原樣轉給 Claude）：section:<id>、decision:<id>、block:<id>、
+// file:<路徑>（整個檔案）、diff:<路徑>:<新檔行號>
 import type { FeedbackItem } from '@shared/types'
 
 export const diffAnchor = (path: string, line: number) => `diff:${path}:${line}`
+export const fileAnchor = (path: string) => `file:${path}`
 
-/** diff 錨點的檔案路徑（路徑本身可能含冒號，所以取最後一個冒號之前） */
-export function diffAnchorPath(anchor: string): string | undefined {
+/** 指向 diff 的錨點對應的檔案與行號（路徑本身可能含冒號，所以行號取最後一個冒號之後） */
+export function anchorTarget(anchor: string): { path: string; line?: number } | undefined {
+  if (anchor.startsWith('file:')) return { path: anchor.slice('file:'.length) }
   if (!anchor.startsWith('diff:')) return undefined
   const rest = anchor.slice('diff:'.length)
   const i = rest.lastIndexOf(':')
-  return i > 0 ? rest.slice(0, i) : undefined
+  const line = Number(rest.slice(i + 1))
+  return i > 0 && Number.isInteger(line) ? { path: rest.slice(0, i), line } : undefined
 }
 
 const KIND: Record<string, string> = {
   diff: '程式碼',
+  file: '檔案',
   decision: '決策',
   block: '視覺化',
   section: '區塊'

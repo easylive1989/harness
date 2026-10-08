@@ -254,6 +254,27 @@ test('讀取失敗時顯示原因與重試', async () => {
   await loaded()
 })
 
+test('讀取失敗的版本：換到別的版本再回來會重新讀取，不顯示舊的錯誤', async () => {
+  let failV1 = true
+  replies['report:get'] = (_t: string, version: number) => {
+    if (version === 1 && failV1) throw new Error('暫時讀不到')
+    return makeReport({ version })
+  }
+  renderReport(reviewTask({ reportVersions: [1, 2] }))
+  await loaded()
+  await userEvent.selectOptions(screen.getByRole('combobox'), '1')
+  expect(await screen.findByText(/暫時讀不到/)).toBeInTheDocument()
+  failV1 = false
+  await userEvent.selectOptions(screen.getByRole('combobox'), '2')
+  expect(screen.queryByText(/暫時讀不到/)).not.toBeInTheDocument()
+  await userEvent.selectOptions(screen.getByRole('combobox'), '1')
+  expect(screen.queryByText(/暫時讀不到/)).not.toBeInTheDocument()
+  expect(await screen.findByText(/正在看 v1（舊版本）/)).toBeInTheDocument()
+  expect(
+    vi.mocked(call).mock.calls.filter((c) => c[0] === 'report:get' && c[2] === 1)
+  ).toHaveLength(2)
+})
+
 test('匯出 HTML：送出自含的 HTML 與安全的檔名', async () => {
   renderReport(reviewTask({ title: '登入/鎖定' }))
   await loaded()
@@ -261,6 +282,10 @@ test('匯出 HTML：送出自含的 HTML 與安全的檔名', async () => {
   const release = holdNextCall(vi.mocked(call))
   await userEvent.dblClick(button)
   expect(button).toBeDisabled()
+  // react-dom/server 是按下匯出才載入：等 HTML 產生、送出後再讓它完成
+  await waitFor(() =>
+    expect(vi.mocked(call).mock.calls.some((c) => c[0] === 'report:saveHtml')).toBe(true)
+  )
   await release('/Users/me/報告.html')
   const calls = vi.mocked(call).mock.calls.filter((c) => c[0] === 'report:saveHtml')
   expect(calls).toHaveLength(1)
@@ -280,7 +305,7 @@ test('點決策的問題來源打開釐清階段；點架構節點切換到對�
   replies['report:get'] = () => report
   renderReport(reviewTask(), false, onOpenStage)
   await loaded()
-  await userEvent.click(screen.getByRole('button', { name: '問題 1' }))
+  await userEvent.click(screen.getByRole('button', { name: '問題 1（查看釐清對話）' }))
   expect(onOpenStage).toHaveBeenCalledWith('clarify')
   const files = screen.getByRole('group', { name: '變更的檔案' })
   expect(within(files).getByRole('button', { name: /lockout\.ts/ })).toHaveAttribute(
@@ -320,6 +345,9 @@ test('已完成：顯示 PR 連結與清除 worktree', async () => {
   await userEvent.click(within(panel()).getByRole('button', { name: '清除 worktree' }))
   await userEvent.click(within(panel()).getByRole('button', { name: '確定清除' }))
   expect(call).toHaveBeenCalledWith('finish:discard', 't1')
+  // 清除後提示，這次開著畫面時不再顯示按鈕
+  await waitFor(() => expect(useStore.getState().toast?.text).toBe('已清除 worktree'))
+  expect(within(panel()).queryByRole('button', { name: '清除 worktree' })).not.toBeInTheDocument()
 })
 
 test('TaskScreen：待審閱顯示報告；依回饋修改中可以回看報告但只能看', async () => {
@@ -340,4 +368,28 @@ test('TaskScreen：待審閱顯示報告；依回饋修改中可以回看報告�
   await userEvent.click(screen.getByRole('button', { name: /報告/ }))
   await loaded()
   expect(screen.queryByRole('button', { name: /留言/ })).not.toBeInTheDocument()
+})
+
+test('對整個檔案留言：清單標成「檔案」，點它切換到那個檔案；關掉留言後焦點回到按鈕', async () => {
+  renderReport(reviewTask())
+  await loaded()
+  const files = screen.getByRole('group', { name: '變更的檔案' })
+  await userEvent.click(within(files).getByRole('button', { name: /login\.ts/ }))
+  await userEvent.click(screen.getByRole('button', { name: '對此檔案留言' }))
+  await userEvent.type(screen.getByRole('textbox', { name: '回饋' }), '拆成兩個函式{Enter}')
+  expect(useStore.getState().feedback.t1).toEqual([
+    { anchor: 'file:src/auth/login.ts', label: 'src/auth/login.ts', text: '拆成兩個函式' }
+  ])
+  expect(screen.getByRole('button', { name: '對此檔案留言' })).toHaveFocus()
+  await userEvent.click(within(files).getByRole('button', { name: /lockout\.ts/ }))
+  await userEvent.click(within(panel()).getByText('檔案 · src/auth/login.ts'))
+  expect(within(files).getByRole('button', { name: /login\.ts/ })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  // 區塊留言按 Esc 關掉後，焦點也回到留言按鈕
+  const overview = screen.getByRole('button', { name: '對「概觀」留言' })
+  await userEvent.click(overview)
+  await userEvent.keyboard('{Escape}')
+  expect(overview).toHaveFocus()
 })

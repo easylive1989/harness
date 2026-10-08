@@ -6,7 +6,7 @@ import { call, errorText } from '../api'
 import { Button, Spinner } from '../components/ui'
 import { shortTime } from '../lib/format'
 import { usePending } from '../lib/usePending'
-import { diffAnchorPath } from '../report/anchors'
+import { anchorTarget } from '../report/anchors'
 import { buildReportHtml, exportFileName } from '../report/exportHtml'
 import { FeedbackPanel } from '../report/FeedbackPanel'
 import { ReportView } from '../report/ReportView'
@@ -32,30 +32,41 @@ export function ReportScreen({
   const version = picked?.latest === latest ? picked.version : latest
   // 報告產生後不會再變：讀過的版本留著，切回來不必重讀
   const [reports, setReports] = useState<Record<number, Report>>({})
-  const [attempt, setAttempt] = useState(0)
-  const [failed, setFailed] = useState<{ version: number; attempt: number; text: string }>()
-  // diff 選取的檔案（點回饋清單時切換），只對選它時的版本有效
-  const [diffFile, setDiffFile] = useState<{ version: number; path: string }>()
+  // 讀取失敗的原因，以版本為鍵；換到某個版本（或按重試）時清掉它的錯誤，就會重新讀取
+  const [errors, setErrors] = useState<Record<number, string>>({})
+  // diff 選取的檔案與要捲到的行：唯一的來源，只對選它時的版本有效
+  const [diffFocus, setDiffFocus] = useState<{ version: number; path: string; line?: number }>()
   const [exporting, runExport] = usePending()
   const report = reports[version]
   const has = !!report
-  const loadError = failed?.version === version && failed.attempt === attempt ? failed : undefined
+  const loadError = errors[version]
+  const failed = loadError !== undefined
 
   useEffect(() => {
-    if (!version || has) return
-    let alive = true
+    if (!version || has || failed) return
+    // 結果以版本為鍵存放：途中換了版本也不會放錯地方
     void (async () => {
       try {
         const r = await call('report:get', task.id, version)
-        if (alive) setReports((m) => ({ ...m, [version]: r }))
+        setReports((m) => ({ ...m, [version]: r }))
       } catch (e) {
-        if (alive) setFailed({ version, attempt, text: errorText(e) })
+        setErrors((m) => ({ ...m, [version]: errorText(e) }))
       }
     })()
-    return () => {
-      alive = false
-    }
-  }, [task.id, version, has, attempt])
+  }, [task.id, version, has, failed])
+
+  const clearError = (v: number) =>
+    setErrors((m) => {
+      if (!(v in m)) return m
+      const rest = { ...m }
+      delete rest[v]
+      return rest
+    })
+  /** 換到某個版本（undefined：最新版）；之前讀取失敗的話重新讀取 */
+  const goTo = (v?: number) => {
+    clearError(v ?? latest)
+    setPicked(v === undefined ? undefined : { latest, version: v })
+  }
 
   const viewingOld = version !== latest
   const canComment = !readOnly && task.status === 'reviewing' && !viewingOld
@@ -64,21 +75,18 @@ export function ReportScreen({
     report &&
     runExport(() =>
       act(async () => {
-        const path = await call(
-          'report:saveHtml',
-          exportFileName(task, report.version),
-          buildReportHtml(task, report)
-        )
+        const html = await buildReportHtml(task, report)
+        const path = await call('report:saveHtml', exportFileName(task, report.version), html)
         if (path) showToast(`已匯出：${path}`)
       })
     )
 
-  /** 回饋都是對最新版本留的：切回最新版、選到那個檔案，再捲到留言的位置 */
+  /** 回饋都是對最新版本留的：切回最新版、選到那個檔案（與行），再捲到留言的位置 */
   const jump = (anchor: string) => {
     flushSync(() => {
-      if (viewingOld) setPicked(undefined)
-      const path = diffAnchorPath(anchor)
-      if (path) setDiffFile({ version: latest, path })
+      if (viewingOld) goTo()
+      const target = anchorTarget(anchor)
+      if (target) setDiffFocus({ version: latest, ...target })
     })
     const el = [...document.querySelectorAll<HTMLElement>('[data-anchor]')].find(
       (e) => e.dataset.anchor === anchor
@@ -98,7 +106,7 @@ export function ReportScreen({
                 版本
                 <select
                   value={version}
-                  onChange={(e) => setPicked({ latest, version: Number(e.target.value) })}
+                  onChange={(e) => goTo(Number(e.target.value))}
                   className="h-[34px] cursor-pointer rounded-[10px] border border-line bg-surface px-2.5 text-xs text-ink outline-none focus:border-brand"
                 >
                   {task.reportVersions.map((v) => (
@@ -124,7 +132,7 @@ export function ReportScreen({
               正在看 v{version}（舊版本），只能看；留言請到最新的 v{latest}。{' '}
               <button
                 type="button"
-                onClick={() => setPicked(undefined)}
+                onClick={() => goTo()}
                 className="cursor-pointer text-brand hover:text-brand-hover"
               >
                 回到 v{latest}
@@ -139,16 +147,17 @@ export function ReportScreen({
             task={task}
             report={report}
             canComment={canComment}
-            diffFile={diffFile?.version === version ? diffFile.path : undefined}
-            onDiffFile={(path) => setDiffFile({ version, path })}
+            diffFile={diffFocus?.version === version ? diffFocus.path : undefined}
+            diffLine={diffFocus?.version === version ? diffFocus.line : undefined}
+            onDiffFile={(path) => setDiffFocus({ version, path })}
             onOpenQuestion={() => onOpenStage('clarify')}
           />
-        ) : loadError ? (
+        ) : failed ? (
           <div className="flex items-center gap-3 rounded-2xl bg-surface p-7 text-[13px] shadow-card">
             <span className="text-danger">
-              無法讀取報告 v{version}：{loadError.text}
+              無法讀取報告 v{version}：{loadError}
             </span>
-            <Button size="sm" onClick={() => setAttempt((a) => a + 1)}>
+            <Button size="sm" onClick={() => clearError(version)}>
               重試
             </Button>
           </div>

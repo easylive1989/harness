@@ -1,6 +1,7 @@
 // src/renderer/src/report/ReportView.tsx
 // 對照 docs/design/B5-Report.dc.html 的 <main>；isStatic 給匯出 HTML 用，不含任何互動控制
 import { type ReactNode, useState } from 'react'
+import { layoutGraph } from '@shared/layout'
 import { wrapBlockHtml } from '@shared/blockHtml'
 import type { ReportInput } from '@shared/report'
 import type { Report, Task, VerificationResult } from '@shared/types'
@@ -124,7 +125,12 @@ function DecisionSource({
   const label = i >= 0 ? `問題 ${i + 1}` : '問題'
   // 點了打開釐清階段（回看當時的問答）
   return onOpenQuestion ? (
-    <button type="button" onClick={onOpenQuestion} className="cursor-pointer">
+    <button
+      type="button"
+      aria-label={`${label}（查看釐清對話）`}
+      onClick={onOpenQuestion}
+      className="cursor-pointer"
+    >
       <Pill className="hover:bg-chip">{label}</Pill>
     </button>
   ) : (
@@ -205,6 +211,7 @@ export function ReportView({
   isStatic,
   canComment,
   diffFile,
+  diffLine,
   onDiffFile,
   onOpenQuestion
 }: {
@@ -214,19 +221,23 @@ export function ReportView({
   isStatic?: boolean
   /** 可以留言（待審閱且正在看最新版本） */
   canComment?: boolean
-  /** diff 選取的檔案（由外部控制時給） */
+  /** diff 選取的檔案與要捲到的行（由 ReportScreen 控制） */
   diffFile?: string
+  diffLine?: number
   onDiffFile?: (path: string) => void
   onOpenQuestion?: () => void
 }) {
   const r = report.input
-  const [ownFile, setOwnFile] = useState<string>()
   const [commentOn, setCommentOn] = useState<string>()
   const commentable = !isStatic && !!canComment
-  const selectFile = (path: string) => {
-    setOwnFile(path)
-    onDiffFile?.(path)
-  }
+  // 匯出檔不需要回饋清單捲動用的錨點
+  const anchorAttr = (anchor: string) => (isStatic ? undefined : anchor)
+  // 前後兩張架構圖用同樣的比例縮放
+  const fitWidth = Math.max(
+    ...(['before', 'after'] as const).map(
+      (side) => layoutGraph(r.architecture[side].nodes, r.architecture[side].edges).width
+    )
+  )
   const changed = new Set(report.stats.perFile.map((f) => f.path))
   const ran = report.verification.filter((v) => !v.skipped)
   const passed = ran.filter((v) => v.exitCode === 0).length
@@ -246,7 +257,7 @@ export function ReportView({
       />
     )
   const jumpToFile = (path: string) => {
-    selectFile(path)
+    onDiffFile?.(path)
     document.getElementById('report-diff')?.scrollIntoView?.({ behavior: 'smooth' })
   }
 
@@ -254,7 +265,7 @@ export function ReportView({
     <div className="flex flex-col gap-3">
       <section
         id="report-overview"
-        data-anchor="section:overview"
+        data-anchor={anchorAttr('section:overview')}
         aria-label="概觀"
         className="flex flex-col gap-[18px] rounded-2xl bg-surface p-7 shadow-card"
       >
@@ -295,7 +306,7 @@ export function ReportView({
 
       <Section
         id="arch"
-        anchor="section:architecture"
+        anchor={anchorAttr('section:architecture')}
         title="架構前後對照"
         end={
           <>
@@ -331,6 +342,8 @@ export function ReportView({
               </span>
               <ArchitectureDiagram
                 graph={r.architecture[side]}
+                label={side === 'before' ? '之前的架構' : '之後的架構'}
+                fitWidth={fitWidth}
                 changedFiles={changed}
                 onSelectFile={isStatic ? undefined : jumpToFile}
               />
@@ -353,7 +366,7 @@ export function ReportView({
               return (
                 <div
                   key={d.id}
-                  data-anchor={anchor}
+                  data-anchor={anchorAttr(anchor)}
                   className="flex min-w-0 flex-col gap-2 rounded-[14px] p-4 shadow-[0_0_0_1px_var(--color-chip)]"
                 >
                   <div className="flex items-center gap-2">
@@ -399,7 +412,7 @@ export function ReportView({
         <Section
           key={b.id}
           id={`block-${b.id}`}
-          anchor={`block:${b.id}`}
+          anchor={anchorAttr(`block:${b.id}`)}
           title={b.title}
           tag={<Pill>Claude 自訂視覺化</Pill>}
           end={button(`block:${b.id}`, b.title)}
@@ -430,7 +443,7 @@ export function ReportView({
 
       <section
         id="report-limits"
-        data-anchor="section:limitations"
+        data-anchor={anchorAttr('section:limitations')}
         aria-label="限制與後續"
         className="flex flex-col gap-4 rounded-2xl bg-surface p-7 shadow-card"
       >
@@ -498,8 +511,9 @@ export function ReportView({
           diff={report.diff}
           perFile={report.stats.perFile}
           notes={r.file_notes}
-          selected={diffFile ?? ownFile}
-          onSelect={selectFile}
+          selected={diffFile}
+          focusLine={diffLine}
+          onSelect={onDiffFile}
           readOnly={!commentable}
           isStatic={isStatic}
         />

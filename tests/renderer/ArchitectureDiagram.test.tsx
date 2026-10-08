@@ -65,4 +65,12 @@ test('略過指向自己的連線', () => {
   )
   expect(container.querySelectorAll('line')).toHaveLength(1)
   expect(screen.getByText('呼叫')).toBeInTheDocument()
+  expect(screen.getByText('A → B（呼叫）')).toBeInTheDocument()
+})
+
+test('連線另外列給螢幕閱讀器；圖有名稱', () => {
+  render(<ArchitectureDiagram graph={sampleReport.architecture.after} label="之後的架構" />)
+  expect(screen.getByRole('group', { name: '之後的架構' })).toBeInTheDocument()
+  expect(screen.getByText('Client → lockoutGuard').closest('.sr-only')).not.toBeNull()
+  expect(screen.getByText('lockoutGuard → login.ts')).toBeInTheDocument()
 })

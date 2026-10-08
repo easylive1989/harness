@@ -117,3 +117,16 @@ export function makeReport(over: Partial<Report> = {}): Report {
     ...over
   }
 }
+
+/** 一個新增 n 行的檔案（測試大 diff 的截斷與匯出摘要） */
+export function bigDiff(path: string, n: number): string {
+  return [
+    `diff --git a/${path} b/${path}`,
+    'new file mode 100644',
+    '--- /dev/null',
+    `+++ b/${path}`,
+    `@@ -0,0 +1,${n} @@`,
+    ...Array.from({ length: n }, (_, i) => `+line ${i + 1}`),
+    ''
+  ].join('\n')
+}

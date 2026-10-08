@@ -20,8 +20,11 @@ export function FeedbackPanel({
   const items = useStore((s) => s.feedback[task.id]) ?? []
   const removeFeedback = useStore((s) => s.removeFeedback)
   const act = useStore((s) => s.act)
+  const showToast = useStore((s) => s.showToast)
   const [overall, setOverall] = useState('')
   const [confirmDiscard, setConfirmDiscard] = useState(false)
+  // 已完成的任務清除過 worktree：任務本身沒有記錄，這次開著畫面時就不再顯示按鈕
+  const [cleared, setCleared] = useState(false)
   // 收尾失敗的原因（例如合併衝突）留在面板上，不只是幾秒就消失的 toast
   const [failure, setFailure] = useState<{ title: string; text: string }>()
   // 送出回饋與收尾操作共用：其中一個進行中時全部停用（主程序也只允許一個收尾操作）
@@ -70,6 +73,10 @@ export function FeedbackPanel({
     finish(done ? '清除 worktree 失敗' : '丟棄失敗', async () => {
       await call('finish:discard', task.id)
       setConfirmDiscard(false)
+      if (done) {
+        setCleared(true)
+        showToast('已清除 worktree')
+      }
     })
 
   return (
@@ -176,6 +183,7 @@ export function FeedbackPanel({
       )}
 
       {task.status !== 'discarded' &&
+        !(done && cleared) &&
         (confirmDiscard ? (
           <div className="flex flex-col gap-2.5 rounded-xl bg-danger-soft p-3 text-[13px]">
             <span className="text-danger">

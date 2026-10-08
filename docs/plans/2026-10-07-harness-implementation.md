@@ -4182,6 +4182,8 @@ test('提示涵蓋所有工具與訊息格式', () => {
     '[conclude]',
     'conclude_branch',
     'diff:檔案路徑:行號',
+    'file:檔案路徑',
+    '高度由內容決定，不要使用 vh 或 100% 高度',
     '繁體中文'
   ]) {
     expect(MAIN_SYSTEM_APPEND).toContain(s)
@@ -4229,9 +4231,9 @@ export const MAIN_SYSTEM_APPEND = `
 - limitations：已知限制與風險；followups：刻意延後的事項。
 - file_notes：每個變更檔案說明為什麼改；重要段落用 hunks 標出「新版檔案」的行號範圍與原因。
 - verification：列出本次實作中實際執行過的驗證指令（Harness 會重新執行）。
-- custom_blocks：只有在圖比文字清楚時才加（狀態機、資料流、時序等）。使用自含的 HTML 與 inline CSS，不可載入任何外部資源；寬度自適應、淺色背景。
+- custom_blocks：只有在圖比文字清楚時才加（狀態機、資料流、時序等）。使用自含的 HTML 與 inline CSS，不可載入任何外部資源；寬度自適應、淺色背景；高度由內容決定，不要使用 vh 或 100% 高度。
 - 收到 [report_feedback] 時，依回饋修改程式碼並重新呼叫 submit_report 產生新版本。
-- [report_feedback] 的每一行格式為「- (錨點) 回饋內容」，錨點指出回饋針對的位置，例如 diff:檔案路徑:行號、decision:D1、section:architecture、block:id；最後可能有一行「整體：…」是整體回饋。
+- [report_feedback] 的每一行格式為「- (錨點) 回饋內容」，錨點指出回饋針對的位置，例如 diff:檔案路徑:行號（新版檔案的行號）、file:檔案路徑（整個檔案）、decision:D1、section:architecture、block:id；最後可能有一行「整體：…」是整體回饋。
 
 ### 中斷
 - 收到 [resume] 時，先檢查目前 worktree 的狀態，再從中斷的地方繼續。
@@ -15339,7 +15341,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `src/main/report/blockHtml.ts`（改成 re-export）、`tests/main/blockHtml.test.ts`
 - Modify: `src/renderer/src/styles/app.css`（補 diff 與架構圖用的 tokens）、`src/renderer/src/components/ui.tsx`（`Icons.Minus`、`Icons.Chevron`）
 - Create: `src/renderer/src/lib/format.ts`
-- Create: `src/renderer/src/report/anchors.ts`、`blocks.ts`、`comments.tsx`
+- Create: `src/renderer/src/report/anchors.ts`、`blocks.ts`、`comments.tsx`、`diffFiles.ts`
 - Create: `src/renderer/src/report/ArchitectureDiagram.tsx`
 - Create: `src/renderer/src/report/CustomBlockFrame.tsx`
 - Create: `src/renderer/src/report/DiffView.tsx`
@@ -15348,17 +15350,21 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `src/renderer/src/report/exportHtml.tsx`
 - Create: `src/renderer/src/screens/ReportScreen.tsx`
 - Modify: `src/renderer/src/screens/TaskScreen.tsx`
-- Modify: `tests/fixtures/report.ts`（`sampleDiff`、`makeReport`）
-- Test: `tests/renderer/DiffView.test.tsx`、`tests/renderer/ArchitectureDiagram.test.tsx`、`tests/renderer/CustomBlockFrame.test.tsx`、`tests/renderer/ReportScreen.test.tsx`、`tests/renderer/exportHtml.test.tsx`
+- Modify: `src/main/agent/prompts.ts`、`tests/main/prompts.test.ts`（Task 19：區塊高度、`file:` 錨點）
+- Modify: `tests/fixtures/report.ts`（`sampleDiff`、`makeReport`、`bigDiff`）
+- Test: `tests/renderer/DiffView.test.tsx`、`tests/renderer/ArchitectureDiagram.test.tsx`、`tests/renderer/CustomBlockFrame.test.tsx`、`tests/renderer/ReportScreen.test.tsx`、`tests/renderer/exportHtml.test.tsx`、`tests/renderer/format.test.ts`
 
 **行為重點：**
 - 只有「待審閱且正在看最新版本」可以留言；依回饋修改中（implementing）回看報告、已完成、已丟棄、看舊版本都只能看。回饋清單與送出回饋只在待審閱時出現；看舊版本時回饋仍是針對最新版本送出。
-- 回饋錨點（主程序原樣轉給 Claude）：`section:overview|architecture|limitations`、`decision:<id>`、`block:<id>`、`diff:<路徑>:<新檔行號>`。刪除的行沒有新檔行號，不能留言。
+- 回饋錨點（主程序原樣轉給 Claude）：`section:overview|architecture|limitations`、`decision:<id>`、`block:<id>`、`file:<路徑>`（每個檔頭的「對此檔案留言」，刪除或二進位檔也可以）、`diff:<路徑>:<新檔行號>`。刪除的行沒有新檔行號，不能對那一行留言。留言加入或取消後，焦點回到打開它的按鈕。
+- diff 選取的檔案只有一份 state：ReportScreen 的 `diffFocus`（版本、路徑、行），ReportView／DiffView 都是受控的；沒有選時預設第一個不是鎖定檔或產生檔（`package-lock.json`、`yarn.lock`、`pnpm-lock.yaml`、`*.min.js`、`dist/`、`build/`）的檔案。改名的檔案標出「從 <舊路徑> 改名」。
+- 大 diff：`FileDiff`／`HunkRows` 用 `memo`，段落說明用 `useMemo` 排好，待送出的回饋以錨點為鍵放進 Map；超過 1500 行的檔案先畫前 300 行，附「顯示全部（共 N 行）」，從回饋清單跳到截斷範圍外的行時自動展開。匯出時超過 3000 行的檔案與鎖定檔只放「此檔案變更 N 行，未包含在匯出中」。
 - 段落說明（`file_notes[].hunks`，行號是新檔的）放在範圍內第一個顯示出來的行之前；範圍內沒有任何顯示出來的行就列在檔案說明下方，不會消失。
-- 架構圖只有對應到變更檔案的方塊可以點（跳到那個檔案的 diff）；圖比欄寬寬時縮小（最小 0.6 倍），再寬就水平捲動；連線畫到方塊邊緣，每張圖的箭頭 marker id 不重複。
+- 架構圖是有 viewBox 的 SVG（方塊在 foreignObject 裡），寬度 `min(原寬, 原寬 / 兩張圖較寬者 × 100%)`：前後兩張用同樣的比例縮放，最小 0.6 倍（再窄就水平捲動），匯出檔沒有 script 也一樣。只有對應到變更檔案的方塊可以點；連線畫到方塊邊緣，每張圖的箭頭 marker id 不重複，連線另外以 sr-only 清單（「A → B（標籤）」）給螢幕閱讀器。
+- 讀取報告失敗的錯誤以版本為鍵；換到某個版本（或按重試）時清掉它的錯誤並重新讀取。決策的問題來源按鈕名稱為「問題 N（查看釐清對話）」。
 - 自訂區塊：`harness-block://` + `sandbox="allow-scripts"`（沒有 same-origin），只接受 `e.source === iframe.contentWindow` 的高度訊息，高度夾在 80–1600。包裝量的是包住內容的 flow-root 容器高度（`documentElement.scrollHeight` 至少是 iframe 目前的高度，內容變矮時縮不回來）。
-- 收尾操作（送出回饋、開 PR、合併、丟棄）共用一個 `usePending`；開 PR／合併／丟棄失敗的原因（例如合併衝突）留在面板上；PR 開好但瀏覽器打不開只用 toast 提示。丟棄要再確認一次。
-- 匯出 HTML：`renderToStaticMarkup` 靜態渲染（React 轉義所有報告文字），沒有任何按鈕／輸入框，所有檔案的 diff 依序列出，自訂區塊用同一份包裝放進 `<iframe sandbox="allow-scripts" srcdoc>`；整份檔案有 `default-src 'none'` 的 CSP（srcdoc 會繼承），字型檔不打包，唯一的 script 是依區塊回報調整 iframe 高度。待送出的回饋不會出現在匯出檔。
+- 收尾操作（送出回饋、開 PR、合併、丟棄）共用一個 `usePending`；開 PR／合併／丟棄失敗的原因（例如合併衝突）留在面板上；PR 開好但瀏覽器打不開只用 toast 提示。丟棄要再確認一次；已完成的任務清除 worktree 後提示「已清除 worktree」，這次開著畫面時不再顯示按鈕。
+- 匯出 HTML：按下匯出才以 `import('react-dom/server')` 載入（獨立的 chunk），`renderToStaticMarkup` 靜態渲染（React 轉義所有報告文字），沒有 `data-anchor` 屬性，沒有任何按鈕／輸入框，所有檔案的 diff 依序列出（太長的檔案只放摘要），自訂區塊用同一份包裝放進 `<iframe sandbox="allow-scripts" srcdoc>`；整份檔案有 `default-src 'none'` 的 CSP（srcdoc 會繼承），字型檔不打包，唯一的 script 是依區塊回報調整 iframe 高度。待送出的回饋不會出現在匯出檔。檔名去掉控制字元與不能用在檔名的字元，`.html` 前最多 80 個字元。
 
 **Step 1: 寫失敗測試**
 
@@ -15435,12 +15441,26 @@ export function makeReport(over: Partial<Report> = {}): Report {
     ...over
   }
 }
+
+/** 一個新增 n 行的檔案（測試大 diff 的截斷與匯出摘要） */
+export function bigDiff(path: string, n: number): string {
+  return [
+    `diff --git a/${path} b/${path}`,
+    'new file mode 100644',
+    '--- /dev/null',
+    `+++ b/${path}`,
+    `@@ -0,0 +1,${n} @@`,
+    ...Array.from({ length: n }, (_, i) => `+line ${i + 1}`),
+    ''
+  ].join('\n')
+}
 ```
 
 ```tsx
 // tests/renderer/DiffView.test.tsx
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { type ComponentProps, useState } from 'react'
 import { beforeEach, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
   call: vi.fn(),
@@ -15449,7 +15469,13 @@ vi.mock('@renderer/api', () => ({
 }))
 import { DiffView } from '@renderer/report/DiffView'
 import { useStore } from '@renderer/store'
-import { makeReport } from '../fixtures/report'
+import { bigDiff, makeReport } from '../fixtures/report'
+
+/** DiffView 的選取由外部控制：測試用一個有 state 的外層 */
+function Controlled(props: Omit<ComponentProps<typeof DiffView>, 'selected' | 'onSelect'>) {
+  const [selected, setSelected] = useState<string>()
+  return <DiffView {...props} selected={selected} onSelect={setSelected} />
+}
 
 const diff = `diff --git a/src/a.ts b/src/a.ts
 --- a/src/a.ts
@@ -15542,7 +15568,7 @@ test('唯讀時沒有留言按鈕、不顯示待送出的回饋，行號顯示�
 test('切換檔案；檔案標籤附增刪行數；刪除的行顯示舊檔行號', async () => {
   const report = makeReport()
   render(
-    <DiffView
+    <Controlled
       taskId="t1"
       diff={report.diff}
       perFile={report.stats.perFile}
@@ -15606,6 +15632,111 @@ test('匯出（static）時依序列出每個檔案，沒有任何按鈕', () =>
   expect(screen.getByText(/登入前先檢查鎖定/)).toBeInTheDocument()
   expect(screen.getByRole('heading', { name: /src\/auth\/login\.ts/ })).toBeInTheDocument()
   expect(screen.queryByRole('button')).not.toBeInTheDocument()
+})
+
+test('對整個檔案留言（二進位檔也可以）；加入或取消後焦點回到按鈕', async () => {
+  const bin = `diff --git a/logo.png b/logo.png
+new file mode 100644
+Binary files /dev/null and b/logo.png differ
+`
+  render(<DiffView taskId="t1" diff={bin} perFile={[]} notes={[]} />)
+  const button = screen.getByRole('button', { name: '對此檔案留言' })
+  await userEvent.click(button)
+  await userEvent.type(screen.getByRole('textbox', { name: '回饋' }), '換成 SVG{Enter}')
+  expect(useStore.getState().feedback.t1).toEqual([
+    { anchor: 'file:logo.png', label: 'logo.png', text: '換成 SVG' }
+  ])
+  expect(screen.getByText('回饋 · 整個檔案')).toBeInTheDocument()
+  expect(button).toHaveFocus()
+})
+
+test('行號留言按 Esc 取消後，焦點回到行號', async () => {
+  render(<DiffView taskId="t1" diff={diff} perFile={[]} notes={[]} />)
+  const line = screen.getByRole('button', { name: '對第 2 行留言' })
+  await userEvent.click(line)
+  expect(screen.getByRole('textbox', { name: '回饋' })).toHaveFocus()
+  await userEvent.keyboard('{Escape}')
+  expect(line).toHaveFocus()
+})
+
+test('改名的檔案標出原本的路徑', () => {
+  const renamed = `diff --git a/src/old.ts b/src/new.ts
+similarity index 90%
+rename from src/old.ts
+rename to src/new.ts
+--- a/src/old.ts
++++ b/src/new.ts
+@@ -1 +1 @@
+-export const a = 1
++export const a = 2
+`
+  render(<DiffView taskId="t1" diff={renamed} perFile={[]} notes={[]} />)
+  expect(screen.getByText('src/old.ts').parentElement).toHaveTextContent('從 src/old.ts 改名')
+  expect(screen.getByText('改名')).toBeInTheDocument()
+})
+
+test('預設選第一個不是鎖定檔或產生檔的檔案', () => {
+  const d = [
+    bigDiff('package-lock.json', 3),
+    bigDiff('dist/app.min.js', 2),
+    bigDiff('src/a.ts', 1)
+  ].join('')
+  render(<Controlled taskId="t1" diff={d} perFile={[]} notes={[]} />)
+  expect(screen.getByRole('button', { name: 'src/a.ts' })).toHaveAttribute('aria-pressed', 'true')
+  // 全部都是產生的檔案時選第一個
+  render(<DiffView taskId="t2" diff={bigDiff('yarn.lock', 1)} perFile={[]} notes={[]} />)
+  expect(screen.getByRole('button', { name: 'yarn.lock' })).toHaveAttribute('aria-pressed', 'true')
+})
+
+test('2 萬行的檔案只畫前 300 行，附上顯示全部的按鈕', () => {
+  const { container } = render(
+    <DiffView taskId="t1" diff={bigDiff('src/huge.ts', 20000)} perFile={[]} notes={[]} />
+  )
+  expect(container.querySelectorAll('[data-line]')).toHaveLength(300)
+  expect(screen.getByRole('button', { name: '顯示全部（共 20000 行）' })).toBeInTheDocument()
+})
+
+test('超過 1500 行才截斷；按顯示全部後全部畫出來', async () => {
+  const { container, unmount } = render(
+    <DiffView taskId="t1" diff={bigDiff('src/a.ts', 1500)} perFile={[]} notes={[]} />
+  )
+  expect(container.querySelectorAll('[data-line]')).toHaveLength(1500)
+  expect(screen.queryByRole('button', { name: /顯示全部/ })).not.toBeInTheDocument()
+  unmount()
+  const r = render(
+    <DiffView taskId="t1" diff={bigDiff('src/a.ts', 1501)} perFile={[]} notes={[]} />
+  )
+  expect(r.container.querySelectorAll('[data-line]')).toHaveLength(300)
+  await userEvent.click(screen.getByRole('button', { name: '顯示全部（共 1501 行）' }))
+  expect(r.container.querySelectorAll('[data-line]')).toHaveLength(1501)
+})
+
+test('要捲到的行在截斷範圍外時自動展開', () => {
+  const { container } = render(
+    <DiffView
+      taskId="t1"
+      diff={bigDiff('src/a.ts', 1600)}
+      perFile={[]}
+      notes={[]}
+      selected="src/a.ts"
+      focusLine={1200}
+    />
+  )
+  expect(container.querySelector('[data-anchor="diff:src/a.ts:1200"]')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /顯示全部/ })).not.toBeInTheDocument()
+})
+
+test('匯出時鎖定檔與超過 3000 行的檔案只放摘要，也沒有錨點屬性', () => {
+  const d = [
+    bigDiff('package-lock.json', 10),
+    bigDiff('src/huge.ts', 3001),
+    bigDiff('src/a.ts', 3000)
+  ].join('')
+  const { container } = render(<DiffView taskId="t1" diff={d} perFile={[]} notes={[]} isStatic />)
+  expect(screen.getByText('此檔案變更 10 行，未包含在匯出中')).toBeInTheDocument()
+  expect(screen.getByText('此檔案變更 3001 行，未包含在匯出中')).toBeInTheDocument()
+  expect(container.querySelectorAll('[data-line]')).toHaveLength(3000)
+  expect(container.querySelector('[data-anchor]')).toBeNull()
 })
 ```
 
@@ -15677,6 +15808,14 @@ test('略過指向自己的連線', () => {
   )
   expect(container.querySelectorAll('line')).toHaveLength(1)
   expect(screen.getByText('呼叫')).toBeInTheDocument()
+  expect(screen.getByText('A → B（呼叫）')).toBeInTheDocument()
+})
+
+test('連線另外列給螢幕閱讀器；圖有名稱', () => {
+  render(<ArchitectureDiagram graph={sampleReport.architecture.after} label="之後的架構" />)
+  expect(screen.getByRole('group', { name: '之後的架構' })).toBeInTheDocument()
+  expect(screen.getByText('Client → lockoutGuard').closest('.sr-only')).not.toBeNull()
+  expect(screen.getByText('lockoutGuard → login.ts')).toBeInTheDocument()
 })
 ```
 
@@ -15983,6 +16122,27 @@ test('讀取失敗時顯示原因與重試', async () => {
   await loaded()
 })
 
+test('讀取失敗的版本：換到別的版本再回來會重新讀取，不顯示舊的錯誤', async () => {
+  let failV1 = true
+  replies['report:get'] = (_t: string, version: number) => {
+    if (version === 1 && failV1) throw new Error('暫時讀不到')
+    return makeReport({ version })
+  }
+  renderReport(reviewTask({ reportVersions: [1, 2] }))
+  await loaded()
+  await userEvent.selectOptions(screen.getByRole('combobox'), '1')
+  expect(await screen.findByText(/暫時讀不到/)).toBeInTheDocument()
+  failV1 = false
+  await userEvent.selectOptions(screen.getByRole('combobox'), '2')
+  expect(screen.queryByText(/暫時讀不到/)).not.toBeInTheDocument()
+  await userEvent.selectOptions(screen.getByRole('combobox'), '1')
+  expect(screen.queryByText(/暫時讀不到/)).not.toBeInTheDocument()
+  expect(await screen.findByText(/正在看 v1（舊版本）/)).toBeInTheDocument()
+  expect(
+    vi.mocked(call).mock.calls.filter((c) => c[0] === 'report:get' && c[2] === 1)
+  ).toHaveLength(2)
+})
+
 test('匯出 HTML：送出自含的 HTML 與安全的檔名', async () => {
   renderReport(reviewTask({ title: '登入/鎖定' }))
   await loaded()
@@ -15990,6 +16150,10 @@ test('匯出 HTML：送出自含的 HTML 與安全的檔名', async () => {
   const release = holdNextCall(vi.mocked(call))
   await userEvent.dblClick(button)
   expect(button).toBeDisabled()
+  // react-dom/server 是按下匯出才載入：等 HTML 產生、送出後再讓它完成
+  await waitFor(() =>
+    expect(vi.mocked(call).mock.calls.some((c) => c[0] === 'report:saveHtml')).toBe(true)
+  )
   await release('/Users/me/報告.html')
   const calls = vi.mocked(call).mock.calls.filter((c) => c[0] === 'report:saveHtml')
   expect(calls).toHaveLength(1)
@@ -16009,7 +16173,7 @@ test('點決策的問題來源打開釐清階段；點架構節點切換到對�
   replies['report:get'] = () => report
   renderReport(reviewTask(), false, onOpenStage)
   await loaded()
-  await userEvent.click(screen.getByRole('button', { name: '問題 1' }))
+  await userEvent.click(screen.getByRole('button', { name: '問題 1（查看釐清對話）' }))
   expect(onOpenStage).toHaveBeenCalledWith('clarify')
   const files = screen.getByRole('group', { name: '變更的檔案' })
   expect(within(files).getByRole('button', { name: /lockout\.ts/ })).toHaveAttribute(
@@ -16049,6 +16213,9 @@ test('已完成：顯示 PR 連結與清除 worktree', async () => {
   await userEvent.click(within(panel()).getByRole('button', { name: '清除 worktree' }))
   await userEvent.click(within(panel()).getByRole('button', { name: '確定清除' }))
   expect(call).toHaveBeenCalledWith('finish:discard', 't1')
+  // 清除後提示，這次開著畫面時不再顯示按鈕
+  await waitFor(() => expect(useStore.getState().toast?.text).toBe('已清除 worktree'))
+  expect(within(panel()).queryByRole('button', { name: '清除 worktree' })).not.toBeInTheDocument()
 })
 
 test('TaskScreen：待審閱顯示報告；依回饋修改中可以回看報告但只能看', async () => {
@@ -16070,6 +16237,30 @@ test('TaskScreen：待審閱顯示報告；依回饋修改中可以回看報告�
   await loaded()
   expect(screen.queryByRole('button', { name: /留言/ })).not.toBeInTheDocument()
 })
+
+test('對整個檔案留言：清單標成「檔案」，點它切換到那個檔案；關掉留言後焦點回到按鈕', async () => {
+  renderReport(reviewTask())
+  await loaded()
+  const files = screen.getByRole('group', { name: '變更的檔案' })
+  await userEvent.click(within(files).getByRole('button', { name: /login\.ts/ }))
+  await userEvent.click(screen.getByRole('button', { name: '對此檔案留言' }))
+  await userEvent.type(screen.getByRole('textbox', { name: '回饋' }), '拆成兩個函式{Enter}')
+  expect(useStore.getState().feedback.t1).toEqual([
+    { anchor: 'file:src/auth/login.ts', label: 'src/auth/login.ts', text: '拆成兩個函式' }
+  ])
+  expect(screen.getByRole('button', { name: '對此檔案留言' })).toHaveFocus()
+  await userEvent.click(within(files).getByRole('button', { name: /lockout\.ts/ }))
+  await userEvent.click(within(panel()).getByText('檔案 · src/auth/login.ts'))
+  expect(within(files).getByRole('button', { name: /login\.ts/ })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  // 區塊留言按 Esc 關掉後，焦點也回到留言按鈕
+  const overview = screen.getByRole('button', { name: '對「概觀」留言' })
+  await userEvent.click(overview)
+  await userEvent.keyboard('{Escape}')
+  expect(overview).toHaveFocus()
+})
 ```
 
 ```tsx
@@ -16083,12 +16274,12 @@ vi.mock('@renderer/api', () => ({
 import { buildReportHtml, exportFileName } from '@renderer/report/exportHtml'
 import { useStore } from '@renderer/store'
 import { BLOCK_CSP } from '@shared/blockHtml'
-import { makeReport } from '../fixtures/report'
+import { bigDiff, makeReport } from '../fixtures/report'
 import { makeTask } from '../fixtures/task'
 
 const parse = (html: string) => new DOMParser().parseFromString(html, 'text/html')
 
-test('匯出的 HTML 自含、轉義所有報告文字、沒有互動控制', () => {
+test('匯出的 HTML 自含、轉義所有報告文字、沒有互動控制', async () => {
   // 待送出的回饋不應該出現在匯出檔
   useStore.setState({
     feedback: { t1: [{ anchor: 'diff:src/auth/login.ts:11', label: 'x', text: '私人意見' }] }
@@ -16099,7 +16290,7 @@ test('匯出的 HTML 自含、轉義所有報告文字、沒有互動控制', ()
     summary: '</style><script>alert(2)</script>'
   }
   const task = makeTask({ status: 'reviewing', reportVersions: [1], title: '鎖定 <b>&</b>' })
-  const html = buildReportHtml(task, report)
+  const html = await buildReportHtml(task, report)
   expect(html).toMatch(/^<!doctype html>/)
   expect(html).not.toContain('<img src=x')
   expect(html).not.toContain('<script>alert(2)')
@@ -16113,6 +16304,8 @@ test('匯出的 HTML 自含、轉義所有報告文字、沒有互動控制', ()
   expect(doc.querySelectorAll('link, script[src], img[src^="http"]')).toHaveLength(0)
   expect(doc.querySelector('h1')?.textContent).toBe('<img src=x onerror=alert(1)>標題')
   expect(doc.querySelectorAll('button, input, textarea, select, form')).toHaveLength(0)
+  // 匯出檔不需要回饋清單用的錨點
+  expect(doc.querySelectorAll('[data-anchor]')).toHaveLength(0)
   // 所有檔案的 diff 都在（沒有切換檔案的按鈕可用）
   expect(doc.body.textContent).toContain('獨立計數邏輯')
   expect(doc.body.textContent).toContain('登入前先檢查鎖定')
@@ -16127,13 +16320,73 @@ test('匯出的 HTML 自含、轉義所有報告文字、沒有互動控制', ()
   expect(srcdoc).toContain(`content="${BLOCK_CSP}"`)
 })
 
-test('匯出檔名去掉不能用在檔名的字元', () => {
+test('匯出檔名去掉控制字元與不能用在檔名的字元，並限制長度', () => {
   expect(exportFileName(makeTask({ title: 'a/b:c*?"<>|d\n e' }), 3)).toBe(
     'a-b-c------d e-變更報告-v3.html'
   )
+  expect(exportFileName(makeTask({ title: 'x\u0000\u0007y\u007f' }), 1)).toBe(
+    'x y-變更報告-v1.html'
+  )
   expect(exportFileName(makeTask({ title: '  ' }), 1)).toBe('任務-變更報告-v1.html')
+  const long = exportFileName(makeTask({ title: '登入'.repeat(100) + '😀' }), 12)
+  expect(long.endsWith('-變更報告-v12.html')).toBe(true)
+  expect(Array.from(long.replace(/\.html$/, ''))).toHaveLength(80)
+})
+
+test('前後兩張架構圖用同樣的比例縮放（匯出檔沒有 script 也一樣）', async () => {
+  const report = makeReport()
+  // 之後的圖有一層並排兩個方塊：寬 400；之前的圖寬 180
+  report.input.architecture.after = {
+    nodes: [
+      ...report.input.architecture.after.nodes,
+      { id: 'redis', label: 'Redis', status: 'unchanged', files: [] }
+    ],
+    edges: [...report.input.architecture.after.edges, { from: 'guard', to: 'redis' }]
+  }
+  const html = await buildReportHtml(makeTask(), report)
+  const widths = [...parse(html).querySelectorAll('svg[role="group"]')].map((svg) =>
+    svg.getAttribute('style')
+  )
+  expect(widths).toEqual([
+    'width:min(180px, 45%);min-width:108px',
+    'width:min(400px, 100%);min-width:240px'
+  ])
+})
+
+test('大 diff：超過 3000 行的檔案與鎖定檔只放摘要，匯出檔維持小', async () => {
+  const report = makeReport({
+    diff:
+      bigDiff('src/generated/huge.ts', 20000) +
+      bigDiff('package-lock.json', 40) +
+      bigDiff('src/a.ts', 2),
+    stats: { files: 3, additions: 20042, deletions: 0, perFile: [] }
+  })
+  const html = await buildReportHtml(makeTask(), report)
+  expect(html).toContain('此檔案變更 20000 行，未包含在匯出中')
+  expect(html).toContain('此檔案變更 40 行，未包含在匯出中')
+  expect(html).toContain('line 2')
+  expect(html).not.toContain('line 2999')
+  expect(html.length).toBeLessThan(60_000)
 })
 ```
+
+```ts
+// tests/renderer/format.test.ts
+import { expect, test } from 'vitest'
+import { shortTime } from '@renderer/lib/format'
+
+test('以本地時間顯示月/日 時:分，補零', () => {
+  expect(shortTime(new Date(2026, 9, 7, 14, 5).toISOString())).toBe('10/07 14:05')
+  expect(shortTime(new Date(2026, 0, 3, 9, 0).toISOString())).toBe('01/03 09:00')
+})
+
+test('無法解析的時間回傳空字串', () => {
+  expect(shortTime('')).toBe('')
+  expect(shortTime('not a date')).toBe('')
+})
+```
+
+`tests/main/prompts.test.ts` 的清單補上 `'file:檔案路徑'` 與 `'高度由內容決定，不要使用 vh 或 100% 高度'`。
 
 `tests/main/blockHtml.test.ts` 加上：
 
@@ -16148,7 +16401,7 @@ test('回報包住內容的容器高度（不是 scrollHeight：那至少是 ifr
 
 **Step 2: 確認失敗**
 
-Run: `npx vitest run tests/renderer/DiffView.test.tsx tests/renderer/ArchitectureDiagram.test.tsx tests/renderer/CustomBlockFrame.test.tsx tests/renderer/ReportScreen.test.tsx tests/renderer/exportHtml.test.tsx tests/main/blockHtml.test.ts` → FAIL（模組不存在）
+Run: `npx vitest run tests/renderer/DiffView.test.tsx tests/renderer/ArchitectureDiagram.test.tsx tests/renderer/CustomBlockFrame.test.tsx tests/renderer/ReportScreen.test.tsx tests/renderer/exportHtml.test.tsx tests/renderer/format.test.ts tests/main/blockHtml.test.ts tests/main/prompts.test.ts` → FAIL（模組不存在、提示缺字）
 
 **Step 3: 共用的區塊包裝、tokens 與圖示**
 
@@ -16223,11 +16476,13 @@ export function shortTime(iso: string): string {
 }
 ```
 
+`src/main/agent/prompts.ts`（Task 19）的 submit_report 寫法改成：custom_blocks 一行結尾補「；高度由內容決定，不要使用 vh 或 100% 高度。」，[report_feedback] 的錨點例子改成「diff:檔案路徑:行號（新版檔案的行號）、file:檔案路徑（整個檔案）、decision:D1、section:architecture、block:id」。
+
 **Step 4: ArchitectureDiagram.tsx**
 
 ```tsx
 // src/renderer/src/report/ArchitectureDiagram.tsx
-import { useEffect, useId, useRef, useState } from 'react'
+import { useId } from 'react'
 import { BOX_H, BOX_W, layoutGraph } from '@shared/layout'
 import type { ReportInput } from '@shared/report'
 import { cx } from '../components/ui'
@@ -16241,7 +16496,7 @@ const STATUS_CLASS = {
   unchanged: 'bg-surface'
 } as const
 const STATUS_LABEL = { added: '新增', modified: '修改', unchanged: '未變' } as const
-/** 圖比欄寬寬時縮小到塞得下，但不小於這個比例（再寬就水平捲動） */
+/** 縮小的下限；欄位再窄就水平捲動 */
 const MIN_SCALE = 0.6
 /** 箭頭與方塊之間留的空隙 */
 const GAP = 3
@@ -16253,137 +16508,148 @@ function edgeT(dx: number, dy: number) {
   return Math.min(tx, ty)
 }
 
-/** 量容器寬度，算出讓整張圖塞進去的縮放比例（沒有 ResizeObserver 時不縮放） */
-function useFitScale(width: number) {
-  const ref = useRef<HTMLDivElement>(null)
-  const [avail, setAvail] = useState<number>()
-  useEffect(() => {
-    const el = ref.current
-    if (!el || typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(([entry]) => setAvail(entry.contentRect.width))
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
-  const scale = avail && width > avail ? Math.max(MIN_SCALE, avail / width) : 1
-  return { ref, scale }
-}
-
 /**
- * 架構圖：自動分層排版，方塊是 HTML（可以點、可以截斷文字），連線畫在下面的 SVG。
- * 有 onSelectFile 時，對應到變更檔案的方塊可以點（跳到那個檔案的 diff）。
+ * 架構圖：自動分層排版，整張是一個有 viewBox 的 SVG，用 CSS 寬度縮放（匯出 HTML 沒有 script 也一樣）。
+ * 寬度是 min(原寬, 原寬 / fitWidth × 100%)：前後兩張給同一個 fitWidth，縮放比例就相同。
+ * 方塊放在 foreignObject 裡（HTML 才能截斷文字）；有 onSelectFile 時，對應到變更檔案的方塊可以點。
  */
 export function ArchitectureDiagram({
   graph,
+  label,
+  fitWidth,
   onSelectFile,
   changedFiles
 }: {
   graph: Graph
+  /** 給螢幕閱讀器的名稱，例如「之後的架構」 */
+  label?: string
+  /** 和另一張圖一起縮放時，兩張圖裡比較寬的寬度 */
+  fitWidth?: number
   onSelectFile?: (path: string) => void
   /** 這次變更的檔案；有給的話，只有檔案在裡面的方塊可以點 */
   changedFiles?: ReadonlySet<string>
 }) {
   const markerId = useId()
   const { nodes, width, height } = layoutGraph(graph.nodes, graph.edges)
-  const { ref, scale } = useFitScale(width)
+  const fit = Math.max(width, fitWidth ?? width)
   const pos = new Map(nodes.map((n) => [n.node.id, n]))
+  const labelOf = new Map(graph.nodes.map((n) => [n.id, n.label]))
+  const edges = graph.edges.filter((e) => e.from !== e.to && pos.has(e.from) && pos.has(e.to))
   const targetOf = (node: GraphNode) =>
     changedFiles ? node.files.find((f) => changedFiles.has(f)) : node.files[0]
 
   return (
-    <div ref={ref} className="overflow-x-auto">
-      <div className="mx-auto" style={{ width: width * scale, height: height * scale }}>
-        <div
-          className="relative origin-top-left"
-          style={{ width, height, transform: scale < 1 ? `scale(${scale})` : undefined }}
-        >
-          <svg width={width} height={height} className="absolute inset-0" aria-hidden>
-            <defs>
-              <marker
-                id={markerId}
-                viewBox="0 0 10 10"
-                refX="9"
-                refY="5"
-                markerWidth="7"
-                markerHeight="7"
-                orient="auto-start-reverse"
-              >
-                <path d="M0 0L10 5L0 10z" className="fill-connector" />
-              </marker>
-            </defs>
-            {graph.edges.map((e, i) => {
-              const a = pos.get(e.from)
-              const b = pos.get(e.to)
-              if (!a || !b || a === b) return null
-              // 從起點方塊的邊緣畫到終點方塊的邊緣（沿兩個中心的連線）
-              const ax = a.x + BOX_W / 2
-              const ay = a.y + BOX_H / 2
-              const dx = b.x + BOX_W / 2 - ax
-              const dy = b.y + BOX_H / 2 - ay
-              const len = Math.hypot(dx, dy)
-              const t0 = edgeT(dx, dy) + GAP / len
-              const t1 = 1 - edgeT(dx, dy) - GAP / len
-              if (t1 <= t0) return null
-              const x1 = ax + dx * t0
-              const y1 = ay + dy * t0
-              const x2 = ax + dx * t1
-              const y2 = ay + dy * t1
-              return (
-                <g key={i}>
-                  <line
-                    x1={x1}
-                    y1={y1}
-                    x2={x2}
-                    y2={y2}
-                    className="stroke-connector"
-                    strokeWidth={1.5}
-                    markerEnd={`url(#${markerId})`}
-                  />
-                  {e.label && (
-                    <text
-                      x={(x1 + x2) / 2 + 6}
-                      y={(y1 + y2) / 2 + 4}
-                      className="fill-muted text-[11px]"
-                    >
-                      {e.label}
-                    </text>
-                  )}
-                </g>
-              )
-            })}
-          </svg>
-          {nodes.map(({ node, x, y }) => {
-            const target = onSelectFile && targetOf(node)
-            const className = cx(
-              'absolute flex items-center justify-center rounded-xl px-2.5 text-[13px]',
-              STATUS_CLASS[node.status]
-            )
-            const style = { left: x, top: y, width: BOX_W, height: BOX_H }
-            const title = node.files.join('\n') || undefined
-            const label = <span className="min-w-0 truncate">{node.label}</span>
-            return target ? (
-              <button
-                key={node.id}
-                type="button"
-                title={title}
-                aria-label={`${node.label}（${STATUS_LABEL[node.status]}）`}
-                onClick={() => onSelectFile?.(target)}
-                className={cx(
-                  className,
-                  'cursor-pointer hover:brightness-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand'
+    <div className="overflow-x-auto">
+      <svg
+        role="group"
+        aria-label={label}
+        viewBox={`0 0 ${width} ${height}`}
+        width={width}
+        height={height}
+        className="mx-auto block h-auto max-w-full"
+        style={{
+          width: `min(${width}px, ${+((width / fit) * 100).toFixed(3)}%)`,
+          minWidth: width * MIN_SCALE
+        }}
+      >
+        <defs>
+          <marker
+            id={markerId}
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse"
+          >
+            <path d="M0 0L10 5L0 10z" className="fill-connector" />
+          </marker>
+        </defs>
+        <g aria-hidden>
+          {edges.map((e, i) => {
+            const a = pos.get(e.from)!
+            const b = pos.get(e.to)!
+            // 從起點方塊的邊緣畫到終點方塊的邊緣（沿兩個中心的連線）
+            const ax = a.x + BOX_W / 2
+            const ay = a.y + BOX_H / 2
+            const dx = b.x + BOX_W / 2 - ax
+            const dy = b.y + BOX_H / 2 - ay
+            const len = Math.hypot(dx, dy)
+            const t0 = edgeT(dx, dy) + GAP / len
+            const t1 = 1 - edgeT(dx, dy) - GAP / len
+            if (t1 <= t0) return null
+            const x1 = ax + dx * t0
+            const y1 = ay + dy * t0
+            const x2 = ax + dx * t1
+            const y2 = ay + dy * t1
+            return (
+              <g key={i}>
+                <line
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  className="stroke-connector"
+                  strokeWidth={1.5}
+                  markerEnd={`url(#${markerId})`}
+                />
+                {e.label && (
+                  <text
+                    x={(x1 + x2) / 2 + 6}
+                    y={(y1 + y2) / 2 + 4}
+                    className="fill-muted text-[11px]"
+                  >
+                    {e.label}
+                  </text>
                 )}
-                style={style}
-              >
-                {label}
-              </button>
-            ) : (
-              <div key={node.id} title={title} className={className} style={style}>
-                {label}
-                <span className="sr-only">（{STATUS_LABEL[node.status]}）</span>
-              </div>
+              </g>
             )
           })}
-        </div>
-      </div>
+        </g>
+        {nodes.map(({ node, x, y }) => {
+          const target = onSelectFile && targetOf(node)
+          const className = cx(
+            'flex size-full items-center justify-center rounded-xl px-2.5 text-[13px]',
+            STATUS_CLASS[node.status]
+          )
+          const title = node.files.join('\n') || undefined
+          const text = <span className="min-w-0 truncate">{node.label}</span>
+          return (
+            <foreignObject key={node.id} x={x} y={y} width={BOX_W} height={BOX_H}>
+              {target ? (
+                <button
+                  type="button"
+                  title={title}
+                  aria-label={`${node.label}（${STATUS_LABEL[node.status]}）`}
+                  onClick={() => onSelectFile?.(target)}
+                  className={cx(
+                    className,
+                    'cursor-pointer hover:brightness-95 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand'
+                  )}
+                >
+                  {text}
+                </button>
+              ) : (
+                <div title={title} className={className}>
+                  {text}
+                  <span className="sr-only">（{STATUS_LABEL[node.status]}）</span>
+                </div>
+              )}
+            </foreignObject>
+          )
+        })}
+      </svg>
+      {/* 連線只畫在圖上；螢幕閱讀器改唸這份清單 */}
+      {edges.length > 0 && (
+        <ul className="sr-only">
+          {edges.map((e, i) => (
+            <li key={i}>
+              {labelOf.get(e.from)} → {labelOf.get(e.to)}
+              {e.label && `（${e.label}）`}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
@@ -16457,25 +16723,30 @@ export function CustomBlockFrame({
 }
 ```
 
-**Step 6: 錨點、留言元件與 DiffView.tsx**
+**Step 6: 錨點、留言元件、大 diff 規則與 DiffView.tsx**
 
 ```ts
 // src/renderer/src/report/anchors.ts
-// 回饋錨點（主程序原樣轉給 Claude）：section:<id>、decision:<id>、block:<id>、diff:<路徑>:<新檔行號>
+// 回饋錨點（主程序原樣轉給 Claude）：section:<id>、decision:<id>、block:<id>、
+// file:<路徑>（整個檔案）、diff:<路徑>:<新檔行號>
 import type { FeedbackItem } from '@shared/types'
 
 export const diffAnchor = (path: string, line: number) => `diff:${path}:${line}`
+export const fileAnchor = (path: string) => `file:${path}`
 
-/** diff 錨點的檔案路徑（路徑本身可能含冒號，所以取最後一個冒號之前） */
-export function diffAnchorPath(anchor: string): string | undefined {
+/** 指向 diff 的錨點對應的檔案與行號（路徑本身可能含冒號，所以行號取最後一個冒號之後） */
+export function anchorTarget(anchor: string): { path: string; line?: number } | undefined {
+  if (anchor.startsWith('file:')) return { path: anchor.slice('file:'.length) }
   if (!anchor.startsWith('diff:')) return undefined
   const rest = anchor.slice('diff:'.length)
   const i = rest.lastIndexOf(':')
-  return i > 0 ? rest.slice(0, i) : undefined
+  const line = Number(rest.slice(i + 1))
+  return i > 0 && Number.isInteger(line) ? { path: rest.slice(0, i), line } : undefined
 }
 
 const KIND: Record<string, string> = {
   diff: '程式碼',
+  file: '檔案',
   decision: '決策',
   block: '視覺化',
   section: '區塊'
@@ -16488,6 +16759,36 @@ export function feedbackTitle(f: FeedbackItem): string {
 }
 ```
 
+```ts
+// src/renderer/src/report/diffFiles.ts
+// 大 diff 的處理：自動產生的檔案、截斷與匯出摘要的門檻
+import type { DiffFile } from '@shared/diff'
+
+/** 畫面上超過這麼多行的檔案先只顯示前 TRUNCATED_LINES 行，按「顯示全部」才全部畫出來 */
+export const TRUNCATE_OVER = 1500
+export const TRUNCATED_LINES = 300
+/** 匯出時超過這麼多行的檔案只放一行摘要（鎖定檔一律只放摘要） */
+export const EXPORT_OVER = 3000
+
+const LOCKFILES = new Set(['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'])
+const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
+
+export const isLockfile = (path: string) => LOCKFILES.has(baseName(path))
+
+/** 鎖定檔、壓縮過的 js、dist/ 與 build/ 底下的檔案 */
+export function isGenerated(path: string): boolean {
+  return isLockfile(path) || path.endsWith('.min.js') || /(^|\/)(dist|build)\//.test(path)
+}
+
+/** 預設選取的檔案：第一個不是自動產生的檔案；全部都是的話取第一個 */
+export function defaultFile(files: DiffFile[]): DiffFile | undefined {
+  return files.find((f) => !isGenerated(f.path)) ?? files[0]
+}
+
+/** 檔案 diff 的行數（新增、刪除與上下文行，不含段落標頭） */
+export const lineCount = (file: DiffFile) => file.hunks.reduce((n, h) => n + h.lines.length, 0)
+```
+
 ```tsx
 // src/renderer/src/report/comments.tsx
 // 報告上的留言：留言按鈕、輸入框，以及已經留下（還沒送出）的回饋
@@ -16496,11 +16797,13 @@ import { cx, Icons } from '../components/ui'
 
 export function CommentButton({
   label,
+  text = '留言',
   onClick,
   className
 }: {
-  /** 螢幕閱讀器唸的名稱，例如「對「概觀」留言」 */
-  label: string
+  /** 螢幕閱讀器唸的名稱（例如「對「概觀」留言」）；不給就用按鈕上的文字 */
+  label?: string
+  text?: string
   onClick: () => void
   className?: string
 }) {
@@ -16508,7 +16811,6 @@ export function CommentButton({
     <button
       type="button"
       aria-label={label}
-      title="留言"
       onClick={onClick}
       className={cx(
         'flex h-7 flex-none cursor-pointer items-center gap-1 rounded-lg px-2 text-xs text-muted hover:bg-fill hover:text-ink',
@@ -16516,12 +16818,15 @@ export function CommentButton({
       )}
     >
       <Icons.Comment width={13} height={13} />
-      留言
+      {text}
     </button>
   )
 }
 
-/** 輸入一則回饋：Enter 加入、Esc 取消；dark 用在程式碼區塊裡 */
+/**
+ * 輸入一則回饋：Enter 加入、Esc 取消；dark 用在程式碼區塊裡。
+ * 加入或取消後，焦點回到打開它的按鈕（輸入框出現前的焦點）。
+ */
 export function CommentForm({
   initial = '',
   placeholder,
@@ -16538,9 +16843,18 @@ export function CommentForm({
   className?: string
 }) {
   const [text, setText] = useState(initial)
+  // 第一次 render 時輸入框還沒取得焦點：這時的焦點就是按下的「留言」或行號按鈕
+  const [opener] = useState(() =>
+    document.activeElement instanceof HTMLElement ? document.activeElement : null
+  )
+  const close = (fn: () => void) => {
+    fn()
+    if (opener?.isConnected) opener.focus()
+  }
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    if (text.trim()) onSubmit(text.trim())
+    const value = text.trim()
+    if (value) close(() => onSubmit(value))
   }
   return (
     <form onSubmit={submit} className={cx('flex items-center gap-2 font-sans', className)}>
@@ -16551,7 +16865,7 @@ export function CommentForm({
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Escape') onCancel()
+          if (e.key === 'Escape') close(onCancel)
         }}
         placeholder={placeholder}
         className={cx(
@@ -16568,7 +16882,7 @@ export function CommentForm({
       </button>
       <button
         type="button"
-        onClick={onCancel}
+        onClick={() => close(onCancel)}
         className={cx(
           'h-9 flex-none cursor-pointer px-1.5 text-xs',
           dark ? 'text-code-muted hover:text-white' : 'text-muted hover:text-ink'
@@ -16614,22 +16928,34 @@ export function FeedbackNote({
 
 ```tsx
 // src/renderer/src/report/DiffView.tsx
-import { useMemo, useState } from 'react'
-import { type DiffFile, parseUnifiedDiff } from '@shared/diff'
+import { memo, useCallback, useMemo, useState } from 'react'
+import { type DiffFile, type DiffHunk, parseUnifiedDiff } from '@shared/diff'
 import type { ReportInput } from '@shared/report'
 import type { DiffStats } from '@shared/types'
 import { InlineCode } from '../components/Markdown'
-import { cx } from '../components/ui'
+import { cx, Pill } from '../components/ui'
 import { useStore } from '../store'
-import { diffAnchor } from './anchors'
-import { CommentForm, FeedbackNote } from './comments'
+import { diffAnchor, fileAnchor } from './anchors'
+import { CommentButton, CommentForm, FeedbackNote } from './comments'
+import {
+  defaultFile,
+  EXPORT_OVER,
+  isLockfile,
+  lineCount,
+  TRUNCATE_OVER,
+  TRUNCATED_LINES
+} from './diffFiles'
 
 type Note = ReportInput['file_notes'][number]
 type HunkNote = Note['hunks'][number]
 type PerFile = DiffStats['perFile']
+/** 正在對哪裡留言：新檔行號，或整個檔案 */
+type Commenting = number | 'file'
+
+const EMPTY_NOTES: HunkNote[] = []
 
 /**
- * 段落說明（行號是新檔的）放在範圍內第一個顯示出來的行之前；
+ * 段落說明（行號是新檔的）放在範圍內第一個顯示出來的行之前（鍵為 `段落:行`）；
  * 範圍內沒有任何顯示出來的行（例如只刪除、或 Claude 給的行號不在 diff 裡）就列在檔案說明下方。
  */
 function placeHunkNotes(file: DiffFile, notes: HunkNote[]) {
@@ -16655,39 +16981,227 @@ const statText = (s?: PerFile[number]) =>
     ? ` +${s.additions}${s.deletions ? ` −${s.deletions}` : ''}`
     : ''
 
-/** 一個檔案的 diff：檔案說明、段落說明、每一行（可以點行號留言） */
-function FileDiff({
+const STATUS_LABEL: Partial<Record<DiffFile['status'], string>> = {
+  added: '新增',
+  deleted: '刪除',
+  renamed: '改名'
+}
+
+/** 一個段落的行。memo：打開某一行的留言時，其他段落不重新 render */
+const HunkRows = memo(function HunkRows({
+  path,
+  hunk,
+  hunkIndex,
+  limit,
+  notesBefore,
+  feedback,
+  commenting,
+  isStatic,
+  interactive,
+  onOpen,
+  onSubmit,
+  onCancel
+}: {
+  path: string
+  hunk: DiffHunk
+  hunkIndex: number
+  /** 只畫前幾行（截斷顯示時） */
+  limit: number
+  notesBefore: Map<string, HunkNote[]>
+  /** 待送出的回饋，以錨點為鍵；唯讀時沒有 */
+  feedback?: Map<string, string>
+  /** 正在留言的行（只有在這個段落裡時才給） */
+  commenting?: number
+  isStatic?: boolean
+  interactive: boolean
+  onOpen: (line: number) => void
+  onSubmit: (line: number, text: string) => void
+  onCancel: () => void
+}) {
+  return (
+    <div>
+      <div className="px-3 whitespace-pre text-code-line">{hunk.header}</div>
+      {hunk.lines.slice(0, limit).map((l, li) => {
+        const n = l.newNo
+        const anchor = n !== undefined ? diffAnchor(path, n) : undefined
+        const fb = anchor ? feedback?.get(anchor) : undefined
+        return (
+          <div key={li} data-anchor={isStatic ? undefined : anchor}>
+            {notesBefore.get(`${hunkIndex}:${li}`)?.map((x, i) => (
+              <div
+                key={i}
+                className="mx-3 my-1 rounded-lg bg-brand-deep px-3 py-1.5 font-sans text-xs leading-relaxed text-brand-soft"
+              >
+                <span className="font-medium">
+                  為什麼（第 {x.line_start}–{x.line_end} 行）：
+                </span>
+                <InlineCode text={x.why} />
+              </div>
+            ))}
+            <div
+              className={cx(
+                'grid grid-cols-[52px_minmax(0,1fr)]',
+                l.type === 'add' && 'bg-diff-add/14',
+                l.type === 'del' && 'bg-diff-del/16',
+                fb !== undefined && 'bg-diff-flag/22 shadow-[inset_3px_0_0_var(--color-diff-flag)]'
+              )}
+            >
+              {n !== undefined && interactive ? (
+                <button
+                  type="button"
+                  data-line
+                  aria-label={`對第 ${n} 行留言`}
+                  onClick={() => onOpen(n)}
+                  className="cursor-pointer pr-3 text-right text-code-line hover:text-white"
+                >
+                  {n}
+                </button>
+              ) : (
+                // 刪除的行沒有新檔行號：顯示舊檔行號，顏色淡一點
+                <span
+                  data-line
+                  className={cx(
+                    'pr-3 text-right select-none',
+                    n === undefined ? 'text-code-line/60' : 'text-code-line'
+                  )}
+                >
+                  {n ?? l.oldNo}
+                </span>
+              )}
+              <span className="whitespace-pre">
+                {l.type === 'add' ? '+ ' : l.type === 'del' ? '- ' : '  '}
+                {l.text}
+              </span>
+            </div>
+            {n !== undefined && commenting === n ? (
+              <CommentForm
+                dark
+                initial={fb}
+                placeholder="這一行要怎麼改？"
+                onSubmit={(text) => onSubmit(n, text)}
+                onCancel={onCancel}
+                className="my-1.5 mr-3 ml-[52px]"
+              />
+            ) : (
+              fb !== undefined && (
+                <FeedbackNote
+                  title={`回饋 · 第 ${n} 行`}
+                  text={fb}
+                  className="my-1.5 mr-3 ml-[52px]"
+                />
+              )
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+})
+
+const notice = (text: string) => (
+  <div className="rounded-xl bg-fill-2 px-3.5 py-3 text-[13px] text-muted">{text}</div>
+)
+
+/**
+ * 一個檔案的 diff：檔頭（狀態、改名、對整個檔案留言）、檔案說明、段落說明、每一行。
+ * memo：報告其他地方的狀態（例如區塊留言）改變時不重新 render 整個 diff。
+ * 很長的檔案先只畫前 TRUNCATED_LINES 行；匯出時太長的檔案與鎖定檔只放摘要。
+ */
+const FileDiff = memo(function FileDiff({
   taskId,
   file,
   note,
   stats,
   readOnly,
-  heading
+  isStatic,
+  focusLine
 }: {
   taskId: string
   file: DiffFile
   note?: Note
   stats?: PerFile[number]
   readOnly?: boolean
-  /** 匯出時每個檔案前面加上檔名標題 */
-  heading?: boolean
+  isStatic?: boolean
+  /** 要捲到的行（從回饋清單跳過來）：在截斷的範圍外時自動展開 */
+  focusLine?: number
 }) {
   const items = useStore((s) => s.feedback[taskId])
   const addFeedback = useStore((s) => s.addFeedback)
-  const [commenting, setCommenting] = useState<number>()
-  const { before, rest } = placeHunkNotes(file, note?.hunks ?? [])
+  const [commenting, setCommenting] = useState<Commenting>()
+  const [expanded, setExpanded] = useState(false)
+  const interactive = !readOnly && !isStatic
+  const { before, rest } = useMemo(
+    () => placeHunkNotes(file, note?.hunks ?? EMPTY_NOTES),
+    [file, note]
+  )
   // 唯讀（舊版本、回看、匯出）不顯示待送出的回饋：那些是針對最新版本留的
-  const feedbackOf = (line: number) =>
-    readOnly ? undefined : items?.find((f) => f.anchor === diffAnchor(file.path, line))?.text
+  const feedback = useMemo(
+    () => (interactive ? new Map(items?.map((f) => [f.anchor, f.text])) : undefined),
+    [items, interactive]
+  )
+  const total = useMemo(() => lineCount(file), [file])
+  const path = file.path
+
+  const openLine = useCallback((line: number) => setCommenting(line), [])
+  const cancel = useCallback(() => setCommenting(undefined), [])
+  const submitLine = useCallback(
+    (line: number, text: string) => {
+      addFeedback(taskId, { anchor: diffAnchor(path, line), label: `${path}:${line}`, text })
+      setCommenting(undefined)
+    },
+    [addFeedback, taskId, path]
+  )
+
+  const truncated = !isStatic && total > TRUNCATE_OVER
+  const showAll =
+    !truncated ||
+    expanded ||
+    (focusLine !== undefined && focusIndex(file, focusLine) >= TRUNCATED_LINES)
+  const summarized = isStatic && (isLockfile(path) || total > EXPORT_OVER)
+  const fileFeedback = feedback?.get(fileAnchor(path))
+  const limits = hunkLimits(file, showAll ? Infinity : TRUNCATED_LINES)
 
   return (
     <div className="flex flex-col gap-3.5">
-      {heading && (
-        <h3 className="m-0 font-mono text-[13px] font-medium">
-          {file.path}
-          <span className="font-normal text-muted">{statText(stats)}</span>
-        </h3>
-      )}
+      <div data-anchor={isStatic ? undefined : fileAnchor(path)} className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+          {/* 匯出時沒有檔案標籤，檔名用標題 */}
+          {isStatic ? (
+            <h3 className="m-0 font-mono text-[13px] font-medium">
+              {path}
+              <span className="font-normal text-muted">{statText(stats)}</span>
+            </h3>
+          ) : (
+            <span className="font-mono text-[13px] font-medium">{path}</span>
+          )}
+          {STATUS_LABEL[file.status] && <Pill tone="muted">{STATUS_LABEL[file.status]}</Pill>}
+          {file.status === 'renamed' && file.oldPath && (
+            <span className="text-xs text-muted">
+              從 <code>{file.oldPath}</code> 改名
+            </span>
+          )}
+          {interactive && (
+            <CommentButton
+              text="對此檔案留言"
+              onClick={() => setCommenting('file')}
+              className="ml-auto"
+            />
+          )}
+        </div>
+        {commenting === 'file' ? (
+          <CommentForm
+            initial={fileFeedback}
+            placeholder={`對 ${path} 整個檔案的回饋…`}
+            onSubmit={(text) => {
+              addFeedback(taskId, { anchor: fileAnchor(path), label: path, text })
+              setCommenting(undefined)
+            }}
+            onCancel={cancel}
+          />
+        ) : (
+          fileFeedback !== undefined && <FeedbackNote title="回饋 · 整個檔案" text={fileFeedback} />
+        )}
+      </div>
       {(note || rest.length > 0) && (
         <div className="flex flex-col gap-1 rounded-xl bg-brand-tint px-3.5 py-3 text-[13px] text-brand-deep">
           {note && (
@@ -16707,115 +17221,86 @@ function FileDiff({
         </div>
       )}
       {file.binary ? (
-        <div className="rounded-xl bg-fill-2 px-3.5 py-3 text-[13px] text-muted">
-          二進位檔案，不顯示內容
-        </div>
+        notice('二進位檔案，不顯示內容')
       ) : file.hunks.length === 0 ? (
-        <div className="rounded-xl bg-fill-2 px-3.5 py-3 text-[13px] text-muted">
-          {file.status === 'added'
+        notice(
+          file.status === 'added'
             ? '新增的空白檔案'
             : file.status === 'deleted'
               ? '刪除的空白檔案'
-              : '只有檔名或權限變更'}
-        </div>
+              : '只有檔名或權限變更'
+        )
+      ) : summarized ? (
+        notice(`此檔案變更 ${total} 行，未包含在匯出中`)
       ) : (
-        <div className="overflow-x-auto rounded-xl bg-code py-1.5 font-mono text-[12.5px] leading-[1.8] text-code-ink">
-          {file.hunks.map((h, hi) => (
-            <div key={hi}>
-              <div className="px-3 whitespace-pre text-code-line">{h.header}</div>
-              {h.lines.map((l, li) => {
-                const n = l.newNo
-                const fb = n !== undefined ? feedbackOf(n) : undefined
-                return (
-                  <div
-                    key={li}
-                    data-anchor={n !== undefined ? diffAnchor(file.path, n) : undefined}
-                  >
-                    {before.get(`${hi}:${li}`)?.map((x, i) => (
-                      <div
-                        key={i}
-                        className="mx-3 my-1 rounded-lg bg-brand-deep px-3 py-1.5 font-sans text-xs leading-relaxed text-brand-soft"
-                      >
-                        <span className="font-medium">
-                          為什麼（第 {x.line_start}–{x.line_end} 行）：
-                        </span>
-                        <InlineCode text={x.why} />
-                      </div>
-                    ))}
-                    <div
-                      className={cx(
-                        'grid grid-cols-[52px_minmax(0,1fr)]',
-                        l.type === 'add' && 'bg-diff-add/14',
-                        l.type === 'del' && 'bg-diff-del/16',
-                        fb !== undefined &&
-                          'bg-diff-flag/22 shadow-[inset_3px_0_0_var(--color-diff-flag)]'
-                      )}
-                    >
-                      {n !== undefined && !readOnly ? (
-                        <button
-                          type="button"
-                          data-line
-                          aria-label={`對第 ${n} 行留言`}
-                          onClick={() => setCommenting(n)}
-                          className="cursor-pointer pr-3 text-right text-code-line hover:text-white"
-                        >
-                          {n}
-                        </button>
-                      ) : (
-                        // 刪除的行沒有新檔行號：顯示舊檔行號，顏色淡一點
-                        <span
-                          data-line
-                          className={cx(
-                            'pr-3 text-right select-none',
-                            n === undefined ? 'text-code-line/60' : 'text-code-line'
-                          )}
-                        >
-                          {n ?? l.oldNo}
-                        </span>
-                      )}
-                      <span className="whitespace-pre">
-                        {l.type === 'add' ? '+ ' : l.type === 'del' ? '- ' : '  '}
-                        {l.text}
-                      </span>
-                    </div>
-                    {n !== undefined && commenting === n ? (
-                      <CommentForm
-                        dark
-                        initial={fb}
-                        placeholder="這一行要怎麼改？"
-                        onSubmit={(text) => {
-                          addFeedback(taskId, {
-                            anchor: diffAnchor(file.path, n),
-                            label: `${file.path}:${n}`,
-                            text
-                          })
-                          setCommenting(undefined)
-                        }}
-                        onCancel={() => setCommenting(undefined)}
-                        className="my-1.5 mr-3 ml-[52px]"
-                      />
-                    ) : (
-                      fb !== undefined && (
-                        <FeedbackNote
-                          title={`回饋 · 第 ${n} 行`}
-                          text={fb}
-                          className="my-1.5 mr-3 ml-[52px]"
-                        />
-                      )
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          ))}
-        </div>
+        <>
+          <div className="overflow-x-auto rounded-xl bg-code py-1.5 font-mono text-[12.5px] leading-[1.8] text-code-ink">
+            {file.hunks.map((h, hi) => {
+              const limit = limits[hi]
+              if (limit === 0) return null
+              const here =
+                typeof commenting === 'number' && h.lines.some((l) => l.newNo === commenting)
+                  ? commenting
+                  : undefined
+              return (
+                <HunkRows
+                  key={hi}
+                  path={path}
+                  hunk={h}
+                  hunkIndex={hi}
+                  limit={limit}
+                  notesBefore={before}
+                  feedback={feedback}
+                  commenting={here}
+                  isStatic={isStatic}
+                  interactive={interactive}
+                  onOpen={openLine}
+                  onSubmit={submitLine}
+                  onCancel={cancel}
+                />
+              )
+            })}
+          </div>
+          {!showAll && (
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              className="cursor-pointer self-start rounded-lg bg-fill px-3 py-1.5 text-xs text-ink-2 hover:bg-chip"
+            >
+              顯示全部（共 {total} 行）
+            </button>
+          )}
+        </>
       )}
     </div>
   )
+})
+
+/** 截斷顯示時每個段落畫幾行：從頭開始一共畫 max 行 */
+function hunkLimits(file: DiffFile, max: number): number[] {
+  let remaining = max
+  return file.hunks.map((h) => {
+    const n = Math.min(h.lines.length, remaining)
+    remaining -= n
+    return n
+  })
+}
+
+/** 某個新檔行號在檔案 diff 裡是第幾行（找不到時回傳 -1） */
+function focusIndex(file: DiffFile, line: number): number {
+  let i = 0
+  for (const h of file.hunks) {
+    for (const l of h.lines) {
+      if (l.newNo === line) return i
+      i++
+    }
+  }
+  return -1
 }
 
 /**
- * 程式碼變更：上方是檔案標籤，下方是選取檔案的 diff。
+ * 程式碼變更：上方是檔案標籤，下方是選取檔案的 diff。選取的檔案由外部控制（selected／onSelect），
+ * 沒有選或選的檔案不在 diff 裡時，預設第一個不是自動產生的檔案。
  * isStatic（匯出 HTML）時沒有 script 可以切換，依序列出所有檔案。
  */
 export function DiffView({
@@ -16824,6 +17309,7 @@ export function DiffView({
   perFile,
   notes,
   selected,
+  focusLine,
   onSelect,
   readOnly,
   isStatic
@@ -16832,16 +17318,15 @@ export function DiffView({
   diff: string
   perFile: PerFile
   notes: Note[]
-  /** 由外部控制選取的檔案（例如點架構圖的方塊） */
   selected?: string
+  /** 選取檔案裡要捲到的行（從回饋清單跳過來） */
+  focusLine?: number
   onSelect?: (path: string) => void
   readOnly?: boolean
   isStatic?: boolean
 }) {
   const files = useMemo(() => parseUnifiedDiff(diff), [diff])
-  const [own, setOwn] = useState<string>()
-  const current = selected ?? own
-  const file = files.find((f) => f.path === current) ?? files[0]
+  const file = files.find((f) => f.path === selected) ?? defaultFile(files)
   const statsOf = (path: string) => perFile.find((p) => p.path === path)
   const noteOf = (path: string) => notes.find((n) => n.path === path)
 
@@ -16857,7 +17342,7 @@ export function DiffView({
             note={noteOf(f.path)}
             stats={statsOf(f.path)}
             readOnly
-            heading
+            isStatic
           />
         ))}
       </div>
@@ -16870,10 +17355,7 @@ export function DiffView({
             key={f.path}
             type="button"
             aria-pressed={f.path === file.path}
-            onClick={() => {
-              setOwn(f.path)
-              onSelect?.(f.path)
-            }}
+            onClick={() => onSelect?.(f.path)}
             className={cx(
               'cursor-pointer rounded-full px-3 py-1.5 font-mono',
               f.path === file.path ? 'bg-ink text-white' : 'bg-fill hover:bg-chip'
@@ -16884,13 +17366,14 @@ export function DiffView({
           </button>
         ))}
       </div>
-      {/* key：換檔案時關掉正在輸入的留言 */}
+      {/* key：換檔案時關掉正在輸入的留言、收起展開的長檔案 */}
       <FileDiff
         key={file.path}
         taskId={taskId}
         file={file}
         note={noteOf(file.path)}
         readOnly={readOnly}
+        focusLine={file.path === selected ? focusLine : undefined}
       />
     </div>
   )
@@ -16903,6 +17386,7 @@ export function DiffView({
 // src/renderer/src/report/ReportView.tsx
 // 對照 docs/design/B5-Report.dc.html 的 <main>；isStatic 給匯出 HTML 用，不含任何互動控制
 import { type ReactNode, useState } from 'react'
+import { layoutGraph } from '@shared/layout'
 import { wrapBlockHtml } from '@shared/blockHtml'
 import type { ReportInput } from '@shared/report'
 import type { Report, Task, VerificationResult } from '@shared/types'
@@ -17026,7 +17510,12 @@ function DecisionSource({
   const label = i >= 0 ? `問題 ${i + 1}` : '問題'
   // 點了打開釐清階段（回看當時的問答）
   return onOpenQuestion ? (
-    <button type="button" onClick={onOpenQuestion} className="cursor-pointer">
+    <button
+      type="button"
+      aria-label={`${label}（查看釐清對話）`}
+      onClick={onOpenQuestion}
+      className="cursor-pointer"
+    >
       <Pill className="hover:bg-chip">{label}</Pill>
     </button>
   ) : (
@@ -17107,6 +17596,7 @@ export function ReportView({
   isStatic,
   canComment,
   diffFile,
+  diffLine,
   onDiffFile,
   onOpenQuestion
 }: {
@@ -17116,19 +17606,23 @@ export function ReportView({
   isStatic?: boolean
   /** 可以留言（待審閱且正在看最新版本） */
   canComment?: boolean
-  /** diff 選取的檔案（由外部控制時給） */
+  /** diff 選取的檔案與要捲到的行（由 ReportScreen 控制） */
   diffFile?: string
+  diffLine?: number
   onDiffFile?: (path: string) => void
   onOpenQuestion?: () => void
 }) {
   const r = report.input
-  const [ownFile, setOwnFile] = useState<string>()
   const [commentOn, setCommentOn] = useState<string>()
   const commentable = !isStatic && !!canComment
-  const selectFile = (path: string) => {
-    setOwnFile(path)
-    onDiffFile?.(path)
-  }
+  // 匯出檔不需要回饋清單捲動用的錨點
+  const anchorAttr = (anchor: string) => (isStatic ? undefined : anchor)
+  // 前後兩張架構圖用同樣的比例縮放
+  const fitWidth = Math.max(
+    ...(['before', 'after'] as const).map(
+      (side) => layoutGraph(r.architecture[side].nodes, r.architecture[side].edges).width
+    )
+  )
   const changed = new Set(report.stats.perFile.map((f) => f.path))
   const ran = report.verification.filter((v) => !v.skipped)
   const passed = ran.filter((v) => v.exitCode === 0).length
@@ -17148,7 +17642,7 @@ export function ReportView({
       />
     )
   const jumpToFile = (path: string) => {
-    selectFile(path)
+    onDiffFile?.(path)
     document.getElementById('report-diff')?.scrollIntoView?.({ behavior: 'smooth' })
   }
 
@@ -17156,7 +17650,7 @@ export function ReportView({
     <div className="flex flex-col gap-3">
       <section
         id="report-overview"
-        data-anchor="section:overview"
+        data-anchor={anchorAttr('section:overview')}
         aria-label="概觀"
         className="flex flex-col gap-[18px] rounded-2xl bg-surface p-7 shadow-card"
       >
@@ -17197,7 +17691,7 @@ export function ReportView({
 
       <Section
         id="arch"
-        anchor="section:architecture"
+        anchor={anchorAttr('section:architecture')}
         title="架構前後對照"
         end={
           <>
@@ -17233,6 +17727,8 @@ export function ReportView({
               </span>
               <ArchitectureDiagram
                 graph={r.architecture[side]}
+                label={side === 'before' ? '之前的架構' : '之後的架構'}
+                fitWidth={fitWidth}
                 changedFiles={changed}
                 onSelectFile={isStatic ? undefined : jumpToFile}
               />
@@ -17255,7 +17751,7 @@ export function ReportView({
               return (
                 <div
                   key={d.id}
-                  data-anchor={anchor}
+                  data-anchor={anchorAttr(anchor)}
                   className="flex min-w-0 flex-col gap-2 rounded-[14px] p-4 shadow-[0_0_0_1px_var(--color-chip)]"
                 >
                   <div className="flex items-center gap-2">
@@ -17301,7 +17797,7 @@ export function ReportView({
         <Section
           key={b.id}
           id={`block-${b.id}`}
-          anchor={`block:${b.id}`}
+          anchor={anchorAttr(`block:${b.id}`)}
           title={b.title}
           tag={<Pill>Claude 自訂視覺化</Pill>}
           end={button(`block:${b.id}`, b.title)}
@@ -17332,7 +17828,7 @@ export function ReportView({
 
       <section
         id="report-limits"
-        data-anchor="section:limitations"
+        data-anchor={anchorAttr('section:limitations')}
         aria-label="限制與後續"
         className="flex flex-col gap-4 rounded-2xl bg-surface p-7 shadow-card"
       >
@@ -17400,8 +17896,9 @@ export function ReportView({
           diff={report.diff}
           perFile={report.stats.perFile}
           notes={r.file_notes}
-          selected={diffFile ?? ownFile}
-          onSelect={selectFile}
+          selected={diffFile}
+          focusLine={diffLine}
+          onSelect={onDiffFile}
           readOnly={!commentable}
           isStatic={isStatic}
         />
@@ -17470,8 +17967,11 @@ export function FeedbackPanel({
   const items = useStore((s) => s.feedback[task.id]) ?? []
   const removeFeedback = useStore((s) => s.removeFeedback)
   const act = useStore((s) => s.act)
+  const showToast = useStore((s) => s.showToast)
   const [overall, setOverall] = useState('')
   const [confirmDiscard, setConfirmDiscard] = useState(false)
+  // 已完成的任務清除過 worktree：任務本身沒有記錄，這次開著畫面時就不再顯示按鈕
+  const [cleared, setCleared] = useState(false)
   // 收尾失敗的原因（例如合併衝突）留在面板上，不只是幾秒就消失的 toast
   const [failure, setFailure] = useState<{ title: string; text: string }>()
   // 送出回饋與收尾操作共用：其中一個進行中時全部停用（主程序也只允許一個收尾操作）
@@ -17520,6 +18020,10 @@ export function FeedbackPanel({
     finish(done ? '清除 worktree 失敗' : '丟棄失敗', async () => {
       await call('finish:discard', task.id)
       setConfirmDiscard(false)
+      if (done) {
+        setCleared(true)
+        showToast('已清除 worktree')
+      }
     })
 
   return (
@@ -17626,6 +18130,7 @@ export function FeedbackPanel({
       )}
 
       {task.status !== 'discarded' &&
+        !(done && cleared) &&
         (confirmDiscard ? (
           <div className="flex flex-col gap-2.5 rounded-xl bg-danger-soft p-3 text-[13px]">
             <span className="text-danger">
@@ -17678,8 +18183,8 @@ export function FeedbackPanel({
 
 ```tsx
 // src/renderer/src/report/exportHtml.tsx
-// 匯出單一自含的 HTML：靜態渲染 ReportView（React 會轉義所有報告文字）＋ 目前頁面的 CSS
-import { renderToStaticMarkup } from 'react-dom/server'
+// 匯出單一自含的 HTML：靜態渲染 ReportView（React 會轉義所有報告文字）＋ 目前頁面的 CSS。
+// react-dom/server 只有匯出時才用到：按下匯出才載入（獨立的 chunk）。
 import type { Report, Task } from '@shared/types'
 import { BLOCK_MAX_H, BLOCK_MIN_H } from './blocks'
 import { ExportHeader, ReportView } from './ReportView'
@@ -17716,17 +18221,25 @@ function collectCss(): string {
   return out.join('\n').replace(/<\/style/gi, '<\\/style')
 }
 
-/** 匯出檔名：去掉不能用在檔名的字元 */
+/** 匯出檔名（不含 .html）的長度上限 */
+const MAX_NAME = 80
+
+/** 匯出檔名：去掉控制字元與不能用在檔名的字元，太長時截短標題 */
 export function exportFileName(task: Task, version: number): string {
-  const title =
-    task.title
-      .replace(/[\\/:*?"<>|]/g, '-')
-      .replace(/\s+/g, ' ')
-      .trim() || '任務'
-  return `${title}-變更報告-v${version}.html`
+  const suffix = `-變更報告-v${version}`
+  const cleaned = task.title
+    .replace(/\p{Cc}/gu, ' ')
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+  // 以字元（code point）截短，不會切開 emoji 等兩個 UTF-16 單位的字
+  const room = MAX_NAME - Array.from(suffix).length
+  const title = Array.from(cleaned).slice(0, room).join('').trim() || '任務'
+  return `${title}${suffix}.html`
 }
 
-export function buildReportHtml(task: Task, report: Report): string {
+export async function buildReportHtml(task: Task, report: Report): Promise<string> {
+  const { renderToStaticMarkup } = await import('react-dom/server')
   const body = renderToStaticMarkup(
     <>
       <ExportHeader task={task} report={report} />
@@ -17756,7 +18269,7 @@ import { call, errorText } from '../api'
 import { Button, Spinner } from '../components/ui'
 import { shortTime } from '../lib/format'
 import { usePending } from '../lib/usePending'
-import { diffAnchorPath } from '../report/anchors'
+import { anchorTarget } from '../report/anchors'
 import { buildReportHtml, exportFileName } from '../report/exportHtml'
 import { FeedbackPanel } from '../report/FeedbackPanel'
 import { ReportView } from '../report/ReportView'
@@ -17782,30 +18295,41 @@ export function ReportScreen({
   const version = picked?.latest === latest ? picked.version : latest
   // 報告產生後不會再變：讀過的版本留著，切回來不必重讀
   const [reports, setReports] = useState<Record<number, Report>>({})
-  const [attempt, setAttempt] = useState(0)
-  const [failed, setFailed] = useState<{ version: number; attempt: number; text: string }>()
-  // diff 選取的檔案（點回饋清單時切換），只對選它時的版本有效
-  const [diffFile, setDiffFile] = useState<{ version: number; path: string }>()
+  // 讀取失敗的原因，以版本為鍵；換到某個版本（或按重試）時清掉它的錯誤，就會重新讀取
+  const [errors, setErrors] = useState<Record<number, string>>({})
+  // diff 選取的檔案與要捲到的行：唯一的來源，只對選它時的版本有效
+  const [diffFocus, setDiffFocus] = useState<{ version: number; path: string; line?: number }>()
   const [exporting, runExport] = usePending()
   const report = reports[version]
   const has = !!report
-  const loadError = failed?.version === version && failed.attempt === attempt ? failed : undefined
+  const loadError = errors[version]
+  const failed = loadError !== undefined
 
   useEffect(() => {
-    if (!version || has) return
-    let alive = true
+    if (!version || has || failed) return
+    // 結果以版本為鍵存放：途中換了版本也不會放錯地方
     void (async () => {
       try {
         const r = await call('report:get', task.id, version)
-        if (alive) setReports((m) => ({ ...m, [version]: r }))
+        setReports((m) => ({ ...m, [version]: r }))
       } catch (e) {
-        if (alive) setFailed({ version, attempt, text: errorText(e) })
+        setErrors((m) => ({ ...m, [version]: errorText(e) }))
       }
     })()
-    return () => {
-      alive = false
-    }
-  }, [task.id, version, has, attempt])
+  }, [task.id, version, has, failed])
+
+  const clearError = (v: number) =>
+    setErrors((m) => {
+      if (!(v in m)) return m
+      const rest = { ...m }
+      delete rest[v]
+      return rest
+    })
+  /** 換到某個版本（undefined：最新版）；之前讀取失敗的話重新讀取 */
+  const goTo = (v?: number) => {
+    clearError(v ?? latest)
+    setPicked(v === undefined ? undefined : { latest, version: v })
+  }
 
   const viewingOld = version !== latest
   const canComment = !readOnly && task.status === 'reviewing' && !viewingOld
@@ -17814,21 +18338,18 @@ export function ReportScreen({
     report &&
     runExport(() =>
       act(async () => {
-        const path = await call(
-          'report:saveHtml',
-          exportFileName(task, report.version),
-          buildReportHtml(task, report)
-        )
+        const html = await buildReportHtml(task, report)
+        const path = await call('report:saveHtml', exportFileName(task, report.version), html)
         if (path) showToast(`已匯出：${path}`)
       })
     )
 
-  /** 回饋都是對最新版本留的：切回最新版、選到那個檔案，再捲到留言的位置 */
+  /** 回饋都是對最新版本留的：切回最新版、選到那個檔案（與行），再捲到留言的位置 */
   const jump = (anchor: string) => {
     flushSync(() => {
-      if (viewingOld) setPicked(undefined)
-      const path = diffAnchorPath(anchor)
-      if (path) setDiffFile({ version: latest, path })
+      if (viewingOld) goTo()
+      const target = anchorTarget(anchor)
+      if (target) setDiffFocus({ version: latest, ...target })
     })
     const el = [...document.querySelectorAll<HTMLElement>('[data-anchor]')].find(
       (e) => e.dataset.anchor === anchor
@@ -17848,7 +18369,7 @@ export function ReportScreen({
                 版本
                 <select
                   value={version}
-                  onChange={(e) => setPicked({ latest, version: Number(e.target.value) })}
+                  onChange={(e) => goTo(Number(e.target.value))}
                   className="h-[34px] cursor-pointer rounded-[10px] border border-line bg-surface px-2.5 text-xs text-ink outline-none focus:border-brand"
                 >
                   {task.reportVersions.map((v) => (
@@ -17874,7 +18395,7 @@ export function ReportScreen({
               正在看 v{version}（舊版本），只能看；留言請到最新的 v{latest}。{' '}
               <button
                 type="button"
-                onClick={() => setPicked(undefined)}
+                onClick={() => goTo()}
                 className="cursor-pointer text-brand hover:text-brand-hover"
               >
                 回到 v{latest}
@@ -17889,16 +18410,17 @@ export function ReportScreen({
             task={task}
             report={report}
             canComment={canComment}
-            diffFile={diffFile?.version === version ? diffFile.path : undefined}
-            onDiffFile={(path) => setDiffFile({ version, path })}
+            diffFile={diffFocus?.version === version ? diffFocus.path : undefined}
+            diffLine={diffFocus?.version === version ? diffFocus.line : undefined}
+            onDiffFile={(path) => setDiffFocus({ version, path })}
             onOpenQuestion={() => onOpenStage('clarify')}
           />
-        ) : loadError ? (
+        ) : failed ? (
           <div className="flex items-center gap-3 rounded-2xl bg-surface p-7 text-[13px] shadow-card">
             <span className="text-danger">
-              無法讀取報告 v{version}：{loadError.text}
+              無法讀取報告 v{version}：{loadError}
             </span>
-            <Button size="sm" onClick={() => setAttempt((a) => a + 1)}>
+            <Button size="sm" onClick={() => clearError(version)}>
               重試
             </Button>
           </div>
@@ -17966,11 +18488,11 @@ git add src/shared/blockHtml.ts src/main/report/blockHtml.ts tests/main/blockHtm
 git commit -m "refactor: share the custom block wrapper and size blocks by their content
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-git add src/renderer/src/styles/app.css src/renderer/src/components/ui.tsx src/renderer/src/report/{anchors.ts,blocks.ts,comments.tsx,ArchitectureDiagram.tsx,CustomBlockFrame.tsx,DiffView.tsx} tests/fixtures/report.ts tests/renderer/{DiffView,ArchitectureDiagram,CustomBlockFrame}.test.tsx
+git add src/renderer/src/styles/app.css src/renderer/src/components/ui.tsx src/renderer/src/report/{anchors.ts,blocks.ts,comments.tsx,diffFiles.ts,ArchitectureDiagram.tsx,CustomBlockFrame.tsx,DiffView.tsx} tests/fixtures/report.ts tests/renderer/{DiffView,ArchitectureDiagram,CustomBlockFrame}.test.tsx
 git commit -m "feat(ui): add architecture diagram, custom block frame and commentable diff view
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-git add src/renderer/src docs/plans tests/renderer
+git add src/renderer/src docs/plans tests/renderer src/main/agent/prompts.ts tests/main/prompts.test.ts
 git commit -m "feat(ui): add change report screen with feedback, finish actions and HTML export
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
