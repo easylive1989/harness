@@ -79,6 +79,33 @@ test('顯示指令與原因，勾選後允許並記住樣式', async () => {
   })
 })
 
+test('「本任務內都允許」的樣式範圍很廣或有危險時，顯示和設定頁一樣的提醒', async () => {
+  const { rerender } = await renderDialog()
+  expect(screen.getByRole('checkbox', { name: /本任務內都允許/ })).not.toHaveAccessibleDescription()
+  rerender(
+    <PermissionDialog
+      request={{ ...req, input: { command: 'ls -la' }, suggestedPattern: 'ls *' }}
+      cwd="/wt"
+    />
+  )
+  expect(screen.getByRole('checkbox', { name: /本任務內都允許/ })).toHaveAccessibleDescription(
+    '「ls *」會允許所有 ls 開頭的指令，範圍很廣'
+  )
+  rerender(
+    <PermissionDialog
+      request={{
+        ...req,
+        input: { command: 'sudo apt install jq' },
+        suggestedPattern: 'sudo apt install jq'
+      }}
+      cwd="/wt"
+    />
+  )
+  expect(
+    screen.getByText('「sudo apt install jq」會允許以管理員權限執行指令，請確認真的需要')
+  ).toBeInTheDocument()
+})
+
 test('沒有勾選時只允許這一次', async () => {
   await renderDialog()
   await user().click(screen.getByRole('button', { name: '允許' }))

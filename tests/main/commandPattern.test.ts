@@ -38,7 +38,22 @@ describe('hasShellOperators', () => {
 describe('suggestPattern', () => {
   test.each([
     ['npm test -- auth', 'npm test *'],
-    ['git diff', 'git diff *'],
+    ['  npm   run build ', 'npm run *'],
+    ['git status', 'git status *'],
     ['ls', 'ls *']
   ])('%s → %s', (c, p) => expect(suggestPattern(c)).toBe(p))
+
+  // 這些指令換個參數就可能刪檔、把結果寫到 worktree 外、連網或推送：只建議記住完全相同的指令
+  test.each([
+    ['git diff', 'git diff'],
+    ['git diff --stat HEAD~1', 'git diff --stat HEAD~1'],
+    ['git  log  -5', 'git log -5'],
+    ['git push origin main', 'git push origin main'],
+    ['rm -rf build', 'rm -rf build'],
+    ['curl -s https://example.com', 'curl -s https://example.com'],
+    ['sudo apt install jq', 'sudo apt install jq']
+  ])('危險的指令只建議完全相同的指令：%s → %s', (c, p) => {
+    expect(suggestPattern(c)).toBe(p)
+    expect(matchesPattern(c, suggestPattern(c))).toBe(true)
+  })
 })

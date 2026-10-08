@@ -2,6 +2,7 @@
 import { type KeyboardEvent, useEffect, useEffectEvent, useId, useRef, useState } from 'react'
 import type { PermissionRequest, Task } from '@shared/types'
 import { call } from '../api'
+import { checkNewPattern } from '../lib/allowedCommands'
 import { isComposing } from '../lib/ime'
 import { APPROVAL_ARM_MS, describeRequest, PREVIEW_COLLAPSED, requesterOf } from '../lib/permission'
 import { usePending } from '../lib/usePending'
@@ -37,6 +38,11 @@ export function PermissionDialog({
   const [pending, run] = usePending()
   const v = describeRequest(r, cwd, branch)
   const locked = pending || !armed
+  // 記住的樣式範圍很廣或有危險時，和設定頁新增指令一樣提醒
+  const patternWarning = r.suggestedPattern
+    ? checkNewPattern(r.suggestedPattern, []).warning
+    : undefined
+  const patternWarningId = useId()
 
   useEffect(() => {
     const t = setTimeout(() => setArmed(true), APPROVAL_ARM_MS)
@@ -142,18 +148,29 @@ export function PermissionDialog({
         )}
         {v.reason && <span className="text-[13px] text-ink-2">{v.reason}</span>}
         {r.suggestedPattern ? (
-          <label className="flex cursor-pointer items-center gap-2.5 text-[13px]">
-            <input
-              type="checkbox"
-              checked={remember}
-              disabled={pending}
-              onChange={(e) => setRemember(e.target.checked)}
-              className="size-4 flex-none accent-brand"
-            />
-            <span>
-              本任務內都允許 <code>{r.suggestedPattern}</code>
-            </span>
-          </label>
+          <div className="flex flex-col gap-1.5">
+            <label className="flex cursor-pointer items-center gap-2.5 text-[13px]">
+              <input
+                type="checkbox"
+                checked={remember}
+                disabled={pending}
+                onChange={(e) => setRemember(e.target.checked)}
+                aria-describedby={patternWarning ? patternWarningId : undefined}
+                className="size-4 flex-none accent-brand"
+              />
+              <span>
+                本任務內都允許 <code>{r.suggestedPattern}</code>
+              </span>
+            </label>
+            {patternWarning && (
+              <span
+                id={patternWarningId}
+                className="ml-[26px] rounded-[10px] bg-decision px-3 py-2 text-xs text-decision-ink"
+              >
+                {patternWarning}
+              </span>
+            )}
+          </div>
         ) : (
           r.toolName === 'Bash' && (
             <span className="text-xs text-muted">這個指令含有串接、重導或變數，只能逐次核准。</span>

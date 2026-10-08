@@ -102,7 +102,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 - 釐清／規格／分岔階段：允許 `Read`、`Glob`、`Grep`、harness 工具；`WebFetch`／`WebSearch` 和實作階段一樣需核准（刻意的：釐清時查文件、找資料常常需要，而且不會改動任何檔案；分岔提出的請求在核准對話框標出分岔名稱）；其他一律 deny（附說明）。
 - 實作階段：
   - `Read`/`Glob`/`Grep`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit`：路徑在 worktree 內自動允許，否則 deny。
-  - `Bash`：符合全域永遠允許清單或本任務允許清單 → allow；否則推送核准請求到 UI，等待使用者「允許／拒絕並說明」，可勾選加入本任務允許清單（以指令前綴樣式比對，如 `npm test *`）。
+  - `Bash`：符合全域永遠允許清單或本任務允許清單 → allow；否則推送核准請求到 UI，等待使用者「允許／拒絕並說明」，可勾選加入本任務允許清單（以指令前綴樣式比對，如 `npm test *`）。建議的樣式是前兩個詞加 ` *`；`rm`、`curl`、`sudo`、`git diff`、`git log`、`git push` 換個參數就可能刪檔、寫到 worktree 外、連網或推送，只建議完全相同的指令。建議的樣式範圍很廣（例如 `ls *`）或有危險（例如 `sudo …`）時，核准對話框在勾選框下顯示和設定頁新增指令時一樣的提醒（共用 `checkNewPattern`）。
   - `WebFetch`/`WebSearch`：需核准。
   - 其他：deny。
 - 執行方式：規則集中在純函式 `evaluateTool`。硬性規則（deny／ask）由 **PreToolUse hook** 執行，因為 SDK 會先套用專案 `.claude/settings.json` 的 allow 規則才呼叫 `canUseTool`，只靠 `canUseTool` 會被繞過；`canUseTool` 負責核准流程（等待使用者、核准後再確認任務階段）。harness 工具只信任 `mcpServer.source === 'sdk'` 且名稱為 `harness` 的伺服器。規則擋下的呼叫（hook 或 `canUseTool` 的 deny、核准後任務狀態已改變）透過 `onBlocked(tool_use_id, 原因)` 通知 TaskManager，時間軸上的工具結果標成「已阻擋：原因」（中性的顏色）；使用者在核准對話框拒絕的標「已拒絕」；只有真的失敗才是紅色的「工具錯誤」。
