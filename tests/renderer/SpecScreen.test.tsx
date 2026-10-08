@@ -107,10 +107,11 @@ test('顯示規格內容與每個決策的來源', () => {
     'D1計數單位為帳號 + IP 組合問題 1',
     'D2計數存在 lockout:{userId}分岔',
     'D3錯誤訊息放進 i18n實作',
-    'D4一併修正空密碼漏洞你的指示'
+    // 使用者的指示：Claude 摘錄的指示給螢幕閱讀器唸（sr-only），滑過時也看得到
+    'D4一併修正空密碼漏洞你的指示：順便修空密碼'
   ])
-  // 使用者的指示：滑過時看得到 Claude 摘錄的指示
   expect(within(rows[3]).getByText('你的指示')).toHaveAttribute('title', '順便修空密碼')
+  expect(within(rows[3]).getByText('：順便修空密碼')).toHaveClass('sr-only')
   // 反引號包住的內容顯示成程式碼
   expect(within(rows[1]).getByText('lockout:{userId}').tagName).toBe('CODE')
   expect(screen.getByText('src/auth/lockout.ts').tagName).toBe('CODE')

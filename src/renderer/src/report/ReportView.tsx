@@ -9,7 +9,7 @@ import type { ReportInput } from '@shared/report'
 import { undocumentedTestFiles } from '@shared/testFiles'
 import type { Report, Task, VerificationResult } from '@shared/types'
 import { InlineCode } from '../components/Markdown'
-import { cx, Icons, Pill } from '../components/ui'
+import { cx, Icons, Pill, UserInstructionPill } from '../components/ui'
 import { shortTime } from '../lib/format'
 import { useStore } from '../store'
 import { reveal } from '../lib/reveal'
@@ -130,12 +130,7 @@ function DecisionSource({
   if (source.type === 'branch') return <Pill tone="decision">來自分岔</Pill>
   if (source.type === 'implementation') return <Pill tone="muted">實作中決定</Pill>
   // 規格回饋、實作中插話或報告回饋中直接給的指示；ref 是 Claude 摘錄的指示
-  if (source.type === 'user')
-    return (
-      <Pill tone="brand" title={source.ref || undefined}>
-        你的指示
-      </Pill>
-    )
+  if (source.type === 'user') return <UserInstructionPill excerpt={source.ref} />
   const i = task.questions.findIndex((q) => q.id === source.ref)
   const label = i >= 0 ? `問題 ${i + 1}` : '問題'
   // 點了切到釐清階段並捲到那個問題（回看當時的問答）

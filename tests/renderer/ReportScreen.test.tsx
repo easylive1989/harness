@@ -319,6 +319,8 @@ test('決策來源：使用者的指示顯示「你的指示」，實作中自�
   await loaded()
   const decisions = screen.getByRole('region', { name: '決策與原因' })
   expect(within(decisions).getByText('你的指示')).toHaveAttribute('title', '插話：用繁體中文')
+  // 摘錄也給螢幕閱讀器唸（title 只有滑鼠看得到）
+  expect(within(decisions).getByText('：插話：用繁體中文')).toHaveClass('sr-only')
   expect(within(decisions).getByText('實作中決定')).toBeInTheDocument()
   expect(within(decisions).queryByText(/^問題/)).not.toBeInTheDocument()
 })

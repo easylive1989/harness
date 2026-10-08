@@ -96,6 +96,19 @@ export function Pill({
   )
 }
 
+/**
+ * 決策來源「你的指示」（規格回饋、插話或報告回饋中直接給的指示）：
+ * Claude 摘錄的指示滑過時看得到，螢幕閱讀器也唸得到（title 只有滑鼠看得到）
+ */
+export function UserInstructionPill({ excerpt }: { excerpt?: string }) {
+  return (
+    <Pill tone="brand" title={excerpt || undefined}>
+      你的指示
+      {excerpt && <span className="sr-only">：{excerpt}</span>}
+    </Pill>
+  )
+}
+
 /** decorative：旁邊已有文字說明（例如放在 LiveStatus 裡）時不再自己宣告狀態 */
 export function Spinner({ className, decorative }: { className?: string; decorative?: boolean }) {
   return (

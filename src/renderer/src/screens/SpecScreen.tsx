@@ -4,7 +4,7 @@ import type { DecisionSource, Spec, Task } from '@shared/types'
 import { call } from '../api'
 import { InlineCode } from '../components/Markdown'
 import { PendingPermission } from '../components/PermissionDialog'
-import { Button, cx, inputClass, LiveStatus, Pill } from '../components/ui'
+import { Button, cx, inputClass, LiveStatus, Pill, UserInstructionPill } from '../components/ui'
 import { blockImeSubmit } from '../lib/ime'
 import { currentStage, isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
@@ -24,11 +24,7 @@ function SourcePill({
       return <Pill tone="decision">分岔</Pill>
     case 'user':
       // 規格回饋或訊息中直接給的指示；ref 是 Claude 摘錄的指示
-      return (
-        <Pill tone="brand" title={source.ref || undefined}>
-          你的指示
-        </Pill>
-      )
+      return <UserInstructionPill excerpt={source.ref} />
     case 'implementation':
       return <Pill tone="muted">實作</Pill>
     case 'question': {
