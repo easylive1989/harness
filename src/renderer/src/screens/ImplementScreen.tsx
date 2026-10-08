@@ -229,7 +229,7 @@ export function ImplementScreen({
     ref: scrollRef,
     onScroll,
     stick
-  } = useStickToBottom<HTMLDivElement>(`${events.length}:${task.updatedAt}`, task.id)
+  } = useStickToBottom<HTMLDivElement>(`${events.length}:${task.updatedAt}`, task.id, events.length)
   const [stopping, runStop] = usePending()
   const [showing, runShow] = usePending()
   const [, runResume] = usePending()

@@ -200,7 +200,7 @@ export function BranchPanel({
     ref: scrollRef,
     onScroll,
     stick
-  } = useStickToBottom<HTMLDivElement>(`${list.length}:${task.updatedAt}`, branchId)
+  } = useStickToBottom<HTMLDivElement>(`${list.length}:${task.updatedAt}`, branchId, list.length)
   const fromIndex = b?.fromQuestionId
     ? task.questions.findIndex((q) => q.id === b.fromQuestionId) + 1
     : 0

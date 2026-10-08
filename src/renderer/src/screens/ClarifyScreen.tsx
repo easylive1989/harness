@@ -36,7 +36,7 @@ export function ClarifyScreen({
     ref: scrollRef,
     onScroll,
     stick
-  } = useStickToBottom<HTMLDivElement>(`${events.length}:${task.updatedAt}`, task.id)
+  } = useStickToBottom<HTMLDivElement>(`${events.length}:${task.updatedAt}`, task.id, events.length)
   // 主線執行中不能分岔（主程序會拒絕），但可以插話
   const busy = isBusy(task)
   // 問題卡片在等反問的回答時自己會顯示等待中，底部就不再重複顯示「處理中」
