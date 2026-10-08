@@ -1,5 +1,6 @@
 // src/renderer/src/components/Composer.tsx
 import { type FormEvent, type ReactNode, type Ref, useState } from 'react'
+import { blockImeSubmit } from '../lib/ime'
 import { Icons } from './ui'
 
 /** 畫面底部的圓角輸入列（對照 `StyleB.dc.html` 底部的訊息框） */
@@ -37,6 +38,7 @@ export function Composer({
           ref={inputRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onKeyDown={blockImeSubmit}
           placeholder={placeholder}
           disabled={disabled}
           className="h-8 flex-1 border-none bg-transparent text-ink outline-none placeholder:text-muted-2"

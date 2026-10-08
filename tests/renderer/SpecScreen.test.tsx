@@ -1,5 +1,5 @@
 // tests/renderer/SpecScreen.test.tsx
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
@@ -145,6 +145,16 @@ test('要求修改：沒有內容時停用；送出後清空，Enter 也能送�
   expect(input).toHaveValue('')
   await userEvent.type(input, '鎖定改 30 分鐘{Enter}')
   expect(call).toHaveBeenLastCalledWith('spec:requestChanges', 't1', '鎖定改 30 分鐘')
+})
+
+test('要求修改：輸入法選字中的 Enter 不送出', async () => {
+  renderSpec(specTask())
+  const input = screen.getByRole('textbox', { name: '修改意見' })
+  await userEvent.type(input, '上限改成十次')
+  expect(fireEvent.keyDown(input, { key: 'Enter', isComposing: true })).toBe(false)
+  expect(fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 })).toBe(false)
+  expect(call).not.toHaveBeenCalledWith('spec:requestChanges', 't1', '上限改成十次')
+  expect(input).toHaveValue('上限改成十次')
 })
 
 test('要求修改失敗時保留內容並顯示錯誤', async () => {

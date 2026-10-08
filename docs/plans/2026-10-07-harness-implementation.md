@@ -1649,8 +1649,12 @@ describe('Repository', () => {
     expect(read.branchPrefix).toBe('a/')
   })
 
-  test('cachedSettings：尚未讀取時是預設值，之後是最近一次讀取或寫入的設定', async () => {
-    expect(repo.cachedSettings().branchPrefix).toBe('harness/')
+  test('cachedSettings：尚未讀取時是預設值但不允許任何指令，之後是最近一次讀取或寫入的設定', async () => {
+    // 還不知道使用者的允許清單：寧可多問，不自動允許預設的指令
+    expect(repo.cachedSettings()).toMatchObject({
+      branchPrefix: 'harness/',
+      alwaysAllowedCommands: []
+    })
     await writeFile(join(root, 'settings.json'), JSON.stringify({ branchPrefix: 'disk/' }))
     await repo.getSettings()
     expect(repo.cachedSettings().branchPrefix).toBe('disk/')
@@ -1659,6 +1663,12 @@ describe('Repository', () => {
       branchPrefix: 'disk/',
       alwaysAllowedCommands: ['npm test']
     })
+  })
+
+  test('讀取失敗（設定檔壞掉）時 cachedSettings 仍不允許任何指令', async () => {
+    await writeFile(join(root, 'settings.json'), '{"alwaysAllowedCommands":')
+    await expect(repo.getSettings()).rejects.toThrow()
+    expect(repo.cachedSettings().alwaysAllowedCommands).toEqual([])
   })
 
   test('寫入失敗時快取維持原值，之後的更新照常進行', async () => {
@@ -1789,11 +1799,13 @@ export class Repository {
     })
   }
   /**
-   * 同步取得最近一次讀取或寫入的設定（尚未讀取時是預設值）。
+   * 同步取得最近一次讀取或寫入的設定。
    * 給執行中的權限判斷用：設定頁移除允許的指令後，進行中的對話輪也立即適用。
    */
   cachedSettings(): Settings {
-    return this.settings ?? defaultSettings(this.home)
+    // 還沒成功讀過設定（或設定檔壞掉）時不知道使用者的允許清單：
+    // 其他欄位用預設值，但不自動允許任何指令（fail-safe，寧可多問一次）
+    return this.settings ?? { ...defaultSettings(this.home), alwaysAllowedCommands: [] }
   }
 
   listRepos() {
@@ -3690,6 +3702,45 @@ describe('createClaudeStatusCache', () => {
     expect(cache.current().path).toBe('/second')
   })
 
+  test('較早開始的呼叫會等到最新的偵測結束，不回傳過時的狀態', async () => {
+    const [first, second, third] = [deferred(), deferred(), deferred()]
+    const pending = [first, second, third]
+    const cache = createClaudeStatusCache(() => pending.shift()!.promise, status('/initial'))
+    const results: string[] = []
+    const track = (p: Promise<ClaudeStatus>, name: string) =>
+      p.then((s) => void results.push(`${name}:${s.path}`))
+    const flush = () => new Promise((r) => setTimeout(r, 0))
+    const a = track(cache.status(true), 'a')
+    const b = track(cache.status(true), 'b')
+    first.resolve(status('/first'))
+    await flush()
+    // a 的偵測結束了，但 b 的還沒：a 繼續等
+    expect(results).toEqual([])
+    // 等待期間又開始一次偵測：a、b 都要等到這一次
+    const c = track(cache.status(true), 'c')
+    second.resolve(status('/second'))
+    await flush()
+    expect(results).toEqual([])
+    third.resolve(status('/third'))
+    await Promise.all([a, b, c])
+    expect(results.sort()).toEqual(['a:/third', 'b:/third', 'c:/third'])
+    expect(cache.current().path).toBe('/third')
+  })
+
+  test('最新的偵測失敗時，它的呼叫收到錯誤，較早的呼叫回傳原本的快取', async () => {
+    const first = deferred()
+    let rejectSecond!: (e: Error) => void
+    const second = new Promise<ClaudeStatus>((_, reject) => (rejectSecond = reject))
+    const pending = [first.promise, second]
+    const cache = createClaudeStatusCache(() => pending.shift()!, status('/initial'))
+    const older = cache.status(true)
+    const newer = cache.status(true)
+    first.resolve(status('/first'))
+    rejectSecond(new Error('boom'))
+    await expect(newer).rejects.toThrow('boom')
+    expect(await older).toEqual(status('/initial'))
+  })
+
   test('偵測失敗時保留原本的快取', async () => {
     const cache = createClaudeStatusCache(async () => {
       throw new Error('boom')
@@ -3819,7 +3870,8 @@ export async function detectClaude(exec: Exec, explicitPath?: string): Promise<C
 
 /**
  * 快取的 Claude Code 狀態。`status(true)` 重新偵測；同時有多次偵測時只有最後開始的那次會更新快取
- * （較早開始、較晚結束的偵測不會蓋掉較新的結果），每次呼叫都回傳當下的快取。
+ * （較早開始、較晚結束的偵測不會蓋掉較新的結果）。較早開始的呼叫會等到最新的偵測結束再回傳，
+ * 不會拿到過時的狀態；最新的偵測失敗時只有它的呼叫收到錯誤，其他呼叫回傳原本的快取。
  */
 export function createClaudeStatusCache(
   detect: () => Promise<ClaudeStatus>,
@@ -3827,13 +3879,27 @@ export function createClaudeStatusCache(
 ) {
   let cached = initial
   let generation = 0
+  /** 最後開始的那次偵測（結束時已更新快取） */
+  let latest: Promise<void> = Promise.resolve()
   return {
     current: () => cached,
     async status(refresh = false): Promise<ClaudeStatus> {
-      if (refresh) {
-        const mine = ++generation
-        const next = await detect()
+      if (!refresh) return cached
+      const mine = ++generation
+      const run = detect().then((next) => {
         if (mine === generation) cached = next
+      })
+      latest = run
+      try {
+        await run
+      } catch (e) {
+        if (mine === generation) throw e
+      }
+      // 等待期間有更新的偵測開始：等到最新的那次結束（期間可能又有更新的）
+      let waited = run
+      while (latest !== waited) {
+        waited = latest
+        await waited.catch(() => undefined)
       }
       return cached
     }
@@ -8069,10 +8135,21 @@ describe('isValidBranchName', () => {
   test.each(['main', 'harness/20261008-ab12cd34', 'feat/a.b', 'v1.2', 'a-b_c'])('接受 %s', (n) =>
     expect(isValidBranchName(n)).toBe(true)
   )
-  test.each(['', 'a.', 'a/', 'a.lock', 'a/b.lock', '.a', 'a/.b', 'a b', 'a..b', 'a@{1}', '-a'])(
-    '拒絕 %j',
-    (n) => expect(isValidBranchName(n)).toBe(false)
-  )
+  test.each([
+    '',
+    'a.',
+    'a/',
+    'a.lock',
+    'a/b.lock',
+    '.a',
+    'a/.b',
+    'a b',
+    'a..b',
+    'a@{1}',
+    '-a',
+    '@',
+    'HEAD'
+  ])('拒絕 %j', (n) => expect(isValidBranchName(n)).toBe(false))
 })
 
 describe('assertString', () => {
@@ -8210,10 +8287,12 @@ const nonEmpty = (v: unknown, what: string) => {
 /**
  * git check-ref-format 的分支名稱規則（純 JS 版，不必執行 git）：不可有空白、控制字元與
  * ~^:?*[\，不可有 ..、@{、//，不可以 - 或 / 開頭、以 / 或 . 結尾，
- * 每一段不可以 . 開頭或以 .lock 結尾。
+ * 每一段不可以 . 開頭或以 .lock 結尾；保險起見也拒絕單獨的 `@` 與 `HEAD`。
+ * 檢查的是完整的分支名稱：設定的分支前綴以 `${前綴}x` 代表之後接上「日期-代號」的樣子。
  */
 export function isValidBranchName(name: string): boolean {
-  if (!name || /[\s~^:?*[\\]/.test(name)) return false
+  if (!name || name === '@' || name === 'HEAD') return false
+  if (/[\s~^:?*[\\]/.test(name)) return false
   // 控制字元（含 DEL）
   if ([...name].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f)) return false
   if (name.includes('..') || name.includes('@{') || name.includes('//')) return false
@@ -9038,9 +9117,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `src/renderer/src/api.ts`
 - Create: `src/renderer/src/store.ts`
 - Create: `src/renderer/src/lib/stage.ts`
+- Create: `src/renderer/src/lib/ime.ts`（輸入法選字中的 Enter／Esc：不送出、不儲存、不關閉）
 - Create: `src/renderer/src/components/ui.tsx`
 - Modify: `src/renderer/src/styles/app.css`（補 `line-strong`、`brand-halo`、`review-soft`、`danger-soft` 四個 token，取代 Tailwind 預設色）
-- Test: `tests/renderer/stage.test.ts`、`tests/renderer/store.test.ts`、`tests/renderer/api.test.ts`
+- Test: `tests/renderer/stage.test.ts`、`tests/renderer/store.test.ts`、`tests/renderer/api.test.ts`、`tests/renderer/ime.test.ts`
 
 **Step 1: 寫失敗測試**
 
@@ -9399,6 +9479,42 @@ describe('errorText', () => {
 })
 ```
 
+```ts
+// tests/renderer/ime.test.ts
+import { describe, expect, test, vi } from 'vitest'
+import { blockImeSubmit, isComposing, isImeEnter } from '@renderer/lib/ime'
+
+/** React 鍵盤事件裡用到的欄位 */
+const keyEvent = (key: string, native: { isComposing?: boolean; keyCode?: number } = {}) => ({
+  key,
+  nativeEvent: { isComposing: native.isComposing ?? false, keyCode: native.keyCode ?? 0 },
+  preventDefault: vi.fn()
+})
+
+describe('ime', () => {
+  test('輸入法組字中的按鍵：isComposing，或 compositionend 先到時只剩 keyCode 229', () => {
+    expect(isComposing(keyEvent('Enter', { isComposing: true }))).toBe(true)
+    expect(isComposing(keyEvent('Enter', { keyCode: 229 }))).toBe(true)
+    expect(isComposing(keyEvent('Enter', { keyCode: 13 }))).toBe(false)
+  })
+
+  test('isImeEnter 只認組字中的 Enter', () => {
+    expect(isImeEnter(keyEvent('Enter', { isComposing: true }))).toBe(true)
+    expect(isImeEnter(keyEvent('Escape', { isComposing: true }))).toBe(false)
+    expect(isImeEnter(keyEvent('Enter'))).toBe(false)
+  })
+
+  test('blockImeSubmit 只取消組字中 Enter 的預設動作（表單不會隱式送出）', () => {
+    const composing = keyEvent('Enter', { keyCode: 229 })
+    blockImeSubmit(composing)
+    expect(composing.preventDefault).toHaveBeenCalled()
+    const normal = keyEvent('Enter', { keyCode: 13 })
+    blockImeSubmit(normal)
+    expect(normal.preventDefault).not.toHaveBeenCalled()
+  })
+})
+```
+
 **Step 2: 確認失敗** — `npx vitest run tests/renderer` → FAIL
 
 **Step 3: api.ts**
@@ -9631,7 +9747,7 @@ export const useStore = create<State>((set, get) => ({
 
 `store.init()` 同步訂閱事件、回傳取消訂閱函式，資料在背景載入（App 的 `useEffect` 直接回傳它當 cleanup，StrictMode 重跑時不會重複訂閱）；載入失敗時仍設 `ready` 並顯示 toast。`open()` 讀時間軸失敗時走 `act` 顯示 toast。視窗重新取得焦點（`window` 的 `focus`）時，若 Claude Code 未就緒就以 `claude:status(true)` 重新偵測，最多每 5 秒一次（`recheckClaude`），使用者到終端機登入後回來不必手動按「重新檢查」；init 回傳的 cleanup 也會移除這個監聽。`open()` 讀取時間軸期間收到的即時事件先暫存，快照回來後接在後面（以 id 去重、保持順序）；同一任務讀取中不會重複讀取。初始快照與載入期間從事件收到的任務合併，同一任務保留 `updatedAt` 較新的。每份時間軸的事件 id 以 `WeakMap<陣列, Set>` 快取來去重。`toast` 是 `{ id, text }`，同樣的錯誤再出現也會重新計時。`resetStoreInternals()` 給測試清掉節流與讀取中狀態。
 
-**Step 5: lib/stage.ts**
+**Step 5: lib/stage.ts 與 lib/ime.ts**
 
 ```ts
 // src/renderer/src/lib/stage.ts
@@ -9703,6 +9819,37 @@ export function taskStatusLabel(t: Task): { text: string; tone: Tone } {
     case 'discarded':
       return { text: '已丟棄', tone: 'muted' }
   }
+}
+```
+
+使用者用注音等輸入法打中文：之後所有「按 Enter 送出」的輸入框（Composer、分岔、反問、修改意見、留言、設定頁）都用這裡的判斷，選字時的 Enter／Esc 不送出、不儲存、不關閉。
+
+```ts
+// src/renderer/src/lib/ime.ts
+// 使用者用注音、倉頡等輸入法打中文：選字時的按鍵屬於「組字」——Enter 是確認候選字、
+// Esc 是取消組字，不能拿來送出表單、儲存或關閉輸入框。
+import type { KeyboardEvent } from 'react'
+
+type KeyLike = Pick<KeyboardEvent, 'key'> & {
+  nativeEvent: Pick<globalThis.KeyboardEvent, 'isComposing' | 'keyCode'>
+}
+
+/**
+ * 這個按鍵是否屬於輸入法組字。組字中的 keydown 帶 isComposing；
+ * 有些情況（例如 compositionend 比 keydown 先到）isComposing 已是 false，但 keyCode 仍是 229。
+ */
+export const isComposing = (e: KeyLike) =>
+  e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229
+
+/** 輸入法確認候選字的 Enter */
+export const isImeEnter = (e: KeyLike) => e.key === 'Enter' && isComposing(e)
+
+/**
+ * 給「按 Enter 隱式送出」的表單輸入框用的 onKeyDown：
+ * 選字中的 Enter 取消預設動作，表單不會被送出。
+ */
+export function blockImeSubmit(e: KeyLike & Pick<KeyboardEvent, 'preventDefault'>) {
+  if (isImeEnter(e)) e.preventDefault()
 }
 ```
 
@@ -10996,7 +11143,7 @@ export function holdNextCall(mock: { mockImplementationOnce: (impl: never) => un
 
 ```tsx
 // tests/renderer/QuestionCard.test.tsx
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
@@ -11138,6 +11285,16 @@ describe('QuestionCard', () => {
     await userEvent.type(screen.getByRole('textbox', { name: '反問' }), '那 IP 呢？{Enter}')
     expect(call).toHaveBeenCalledWith('tasks:counter', 't1', 'q3', '那 IP 呢？')
     expect(screen.getByRole('textbox', { name: '反問' })).toHaveValue('')
+  })
+
+  test('反問：輸入法選字中的 Enter 不送出', async () => {
+    render(<QuestionCard task={task} question={q} />)
+    const input = screen.getByRole('textbox', { name: '反問' })
+    await userEvent.type(input, '那 IP 呢')
+    expect(fireEvent.keyDown(input, { key: 'Enter', isComposing: true })).toBe(false)
+    expect(fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 })).toBe(false)
+    expect(call).not.toHaveBeenCalledWith('tasks:counter', 't1', 'q3', '那 IP 呢')
+    expect(input).toHaveValue('那 IP 呢')
   })
 
   test('反問送出後等待回答時，在常駐的 live region 顯示處理中', () => {
@@ -11797,6 +11954,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
 import { type FormEvent, useId, useRef, useState } from 'react'
 import type { Question, Task } from '@shared/types'
 import { call } from '../api'
+import { blockImeSubmit } from '../lib/ime'
 import { awaitingCounterReply, isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
@@ -12012,6 +12170,7 @@ export function QuestionCard({
             <input
               value={counter}
               onChange={(e) => setCounter(e.target.value)}
+              onKeyDown={blockImeSubmit}
               disabled={busy}
               placeholder="還有疑問？在這裡反問…"
               className={cx(inputClass, 'flex-1')}
@@ -12355,7 +12514,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ```tsx
 // tests/renderer/BranchPanel.test.tsx
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
@@ -12425,6 +12584,16 @@ test('顯示結論預覽，確認後帶回主線', async () => {
   expect(call).toHaveBeenCalledWith('branch:confirm', 't1', 'b2', undefined)
   await userEvent.click(screen.getByRole('button', { name: '重新整理結論' }))
   expect(call).toHaveBeenCalledWith('branch:conclude', 't1', 'b2')
+})
+
+test('分岔訊息：輸入法選字中的 Enter 不送出', async () => {
+  render(<BranchPanel task={{ ...task, branches: [open] }} events={talk} />)
+  const input = screen.getByRole('textbox', { name: '分岔訊息' })
+  await userEvent.type(input, '再想想')
+  expect(fireEvent.keyDown(input, { key: 'Enter', isComposing: true })).toBe(false)
+  expect(fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 })).toBe(false)
+  expect(call).not.toHaveBeenCalledWith('tasks:send', 't1', 'branch:b2', '再想想')
+  expect(input).toHaveValue('再想想')
 })
 
 test('在分岔中送出訊息，Claude 回覆過後可以帶回主線', async () => {
@@ -12757,6 +12926,7 @@ export function useStickToBottom<T extends HTMLElement>(version: unknown, resetK
 ```tsx
 // src/renderer/src/components/Composer.tsx
 import { type FormEvent, type ReactNode, useState } from 'react'
+import { blockImeSubmit } from '../lib/ime'
 import { Icons } from './ui'
 
 /** 畫面底部的圓角輸入列（對照 `StyleB.dc.html` 底部的訊息框） */
@@ -12790,6 +12960,7 @@ export function Composer({
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onKeyDown={blockImeSubmit}
           placeholder={placeholder}
           disabled={disabled}
           className="h-8 flex-1 border-none bg-transparent text-ink outline-none placeholder:text-muted-2"
@@ -12819,6 +12990,7 @@ import { type FormEvent, useState } from 'react'
 import type { Branch, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
 import { userTextDisplay } from '../lib/timeline'
+import { blockImeSubmit } from '../lib/ime'
 import { usePending } from '../lib/usePending'
 import { useStickToBottom } from '../lib/useStickToBottom'
 import { useStore } from '../store'
@@ -12849,6 +13021,7 @@ function BranchInput({ disabled, onSend }: { disabled: boolean; onSend: (text: s
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onKeyDown={blockImeSubmit}
           disabled={disabled}
           placeholder="繼續在分岔裡討論…"
           className={cx(inputClass, 'flex-1')}
@@ -13208,7 +13381,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ```tsx
 // tests/renderer/SpecScreen.test.tsx
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
@@ -13356,6 +13529,16 @@ test('要求修改：沒有內容時停用；送出後清空，Enter 也能送�
   expect(call).toHaveBeenLastCalledWith('spec:requestChanges', 't1', '鎖定改 30 分鐘')
 })
 
+test('要求修改：輸入法選字中的 Enter 不送出', async () => {
+  renderSpec(specTask())
+  const input = screen.getByRole('textbox', { name: '修改意見' })
+  await userEvent.type(input, '上限改成十次')
+  expect(fireEvent.keyDown(input, { key: 'Enter', isComposing: true })).toBe(false)
+  expect(fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 })).toBe(false)
+  expect(call).not.toHaveBeenCalledWith('spec:requestChanges', 't1', '上限改成十次')
+  expect(input).toHaveValue('上限改成十次')
+})
+
 test('要求修改失敗時保留內容並顯示錯誤', async () => {
   vi.mocked(call).mockRejectedValueOnce(new Error('任務正在收尾，請稍候'))
   renderSpec(specTask())
@@ -13490,6 +13673,7 @@ import type { DecisionSource, Spec, Task } from '@shared/types'
 import { call } from '../api'
 import { InlineCode } from '../components/Markdown'
 import { Button, cx, inputClass, LiveStatus, Pill } from '../components/ui'
+import { blockImeSubmit } from '../lib/ime'
 import { currentStage, isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
@@ -13763,6 +13947,7 @@ export function SpecScreen({
                 <input
                   value={feedback}
                   onChange={(e) => setFeedback(e.target.value)}
+                  onKeyDown={blockImeSubmit}
                   placeholder="哪裡要改？例如：上限改成 10 次"
                   className={cx(inputClass, 'h-11 flex-1')}
                 />
@@ -13879,7 +14064,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ```tsx
 // tests/renderer/PermissionDialog.test.tsx
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useRef } from 'react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -13975,6 +14160,17 @@ test('拒絕並說明', async () => {
     allow: false,
     message: '先不要跑'
   })
+})
+
+test('拒絕原因：輸入法選字中按 Esc 不離開拒絕模式', async () => {
+  await renderDialog()
+  const u = user()
+  await u.click(screen.getByRole('button', { name: '拒絕並說明' }))
+  const reason = screen.getByRole('textbox', { name: '拒絕原因' })
+  await u.type(reason, '先不要')
+  fireEvent.keyDown(reason, { key: 'Escape', isComposing: true })
+  fireEvent.keyDown(reason, { key: 'Escape', keyCode: 229 })
+  expect(screen.getByRole('textbox', { name: '拒絕原因' })).toHaveValue('先不要')
 })
 
 test('不寫原因也能拒絕；返回或按 Esc 離開拒絕模式', async () => {
@@ -14759,6 +14955,7 @@ export function describeRequest(r: PermissionRequest, cwd: string, branch?: stri
 import { type KeyboardEvent, useEffect, useEffectEvent, useId, useRef, useState } from 'react'
 import type { PermissionRequest, Task } from '@shared/types'
 import { call } from '../api'
+import { isComposing } from '../lib/ime'
 import { APPROVAL_ARM_MS, describeRequest, PREVIEW_COLLAPSED, requesterOf } from '../lib/permission'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
@@ -14819,7 +15016,8 @@ export function PermissionDialog({
     setDenying(false)
   }
   const onKeyDown = (e: KeyboardEvent) => {
-    if (e.key === 'Escape' && denying) {
+    // 拒絕原因輸入中、輸入法選字時的 Esc 是取消組字，不離開拒絕模式
+    if (e.key === 'Escape' && denying && !isComposing(e)) {
       e.stopPropagation()
       leaveDeny()
     }
@@ -17084,6 +17282,7 @@ export const lineCount = (file: DiffFile) => file.hunks.reduce((n, h) => n + h.l
 // 報告上的留言：留言按鈕、輸入框，以及已經留下（還沒送出）的回饋
 import { type FormEvent, useState } from 'react'
 import { cx, Icons } from '../components/ui'
+import { blockImeSubmit, isComposing } from '../lib/ime'
 
 export function CommentButton({
   label,
@@ -17155,7 +17354,9 @@ export function CommentForm({
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Escape') close(onCancel)
+          // 輸入法選字中的 Enter／Esc 屬於組字：不加入、不取消
+          blockImeSubmit(e)
+          if (e.key === 'Escape' && !isComposing(e)) close(onCancel)
         }}
         placeholder={placeholder}
         className={cx(
@@ -18800,7 +19001,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `src/renderer/src/lib/allowedCommands.ts`
 - Create: `src/renderer/src/screens/SettingsScreen.tsx`
 - Modify: `src/renderer/src/App.tsx`（`view.kind === 'settings'` 時渲染，並隱藏 Sidebar）
-- Test: `tests/renderer/allowedCommands.test.ts`、`tests/renderer/SettingsScreen.test.tsx`
+- Modify: 輸入法保護（`lib/ime.ts` 在 Task 26 建立）：`Composer.tsx`、`BranchPanel.tsx`、`QuestionCard.tsx`、`SpecScreen.tsx`、`report/comments.tsx`、`PermissionDialog.tsx`（各 Task 的程式碼已更新），測試加在各自的測試檔
+- Test: `tests/renderer/allowedCommands.test.ts`、`tests/renderer/SettingsScreen.test.tsx`、`tests/renderer/imeInputs.test.tsx`
 
 **行為重點：**
 - 版面對照 `docs/design/B6-Settings.dc.html`：設定頁自帶左欄（返回＋四個分類），所以 App 在設定頁不顯示 Sidebar。「返回」回到打開設定前的畫面（store 的 `settingsReturn`；那個任務已不存在時回到新任務）。
@@ -18813,6 +19015,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - 權限區塊的前三列是固定規則（worktree 內讀寫自動允許、修改 `.git`／`.claude`／`.mcp.json` 需要核准、shell 指令需要核准），只顯示「固定」標籤，不是開關。移除允許的指令後，進行中的對話輪也立即適用（TaskManager 讀 `cachedSettings()`）。
 - 永遠允許的指令：新增前先正規化空白；空白輸入時「新增」標示停用；和清單中的樣式相同（忽略空白差異）或含 `` ; & | ` < > $ `` 的樣式不能加入（後者永遠不會生效），錯誤以 `role="alert"` 顯示並保留輸入；已知危險的樣式（`rm *`、`rm -rf *`、`git push *`、`git diff *`、`git log *`、`curl *`、`sudo …`）說明原因、只有一個字加上 ` *`（例如 `npm *`）或 `*` 不在結尾時只提醒，都仍可加入。清單下方說明比對規則。清單以指令字串為 key（主程序存檔時去掉重複）。
 - 分支前綴下方說明分支名稱的樣子（例如 `harness/20261008-1a2b3c4d`）。
+- 輸入法安全（使用者用注音等輸入法打中文）：選字時按的 Enter 是確認候選字、Esc 是取消組字。所有「按 Enter 送出」的輸入框（設定頁的文字欄位與新增指令、Composer、分岔訊息、反問、修改意見、報告留言）遇到組字中的 Enter（`isComposing` 或 keyCode 229）都不送出、不儲存：靠表單隱式送出的輸入框在 onKeyDown 用 `blockImeSubmit` 取消預設動作；自己處理按鍵的（設定頁文字欄位、留言的 Esc、核准對話框拒絕原因的 Esc）先檢查 `isComposing`。只用 textarea 的輸入（需求、自由回答、補充說明、整體回饋、拒絕原因）Enter 本來就是換行，不會送出。
 - 設計稿 worktree 位置旁的「選擇…」按鈕需要新的資料夾選擇 IPC，這個 Task 不做（直接輸入絕對路徑）。
 
 **Step 1: 寫失敗測試**
@@ -19253,6 +19456,29 @@ describe('SettingsScreen：Worktree 與分支', () => {
     expect(setCalls()).toHaveLength(1)
   })
 
+  test('輸入法選字中的 Enter 與 Esc 不儲存、不還原；新增指令也不送出', async () => {
+    render(<SettingsScreen />)
+    const field = screen.getByLabelText('分支名稱前綴')
+    await userEvent.clear(field)
+    await userEvent.type(field, '功能/')
+    fireEvent.keyDown(field, { key: 'Enter', isComposing: true })
+    fireEvent.keyDown(field, { key: 'Enter', keyCode: 229 })
+    fireEvent.keyDown(field, { key: 'Escape', isComposing: true })
+    // 儲存是排隊後才送出：先讓排隊的工作跑完再檢查
+    await act(async () => {})
+    expect(setCalls()).toHaveLength(0)
+    expect(field).toHaveValue('功能/')
+    // 一般的 Esc 才還原（之後失焦不會儲存）
+    fireEvent.keyDown(field, { key: 'Escape' })
+    expect(field).toHaveValue('harness/')
+
+    await userEvent.type(addInput(), '測試')
+    expect(fireEvent.keyDown(addInput(), { key: 'Enter', isComposing: true })).toBe(false)
+    expect(fireEvent.keyDown(addInput(), { key: 'Enter', keyCode: 229 })).toBe(false)
+    expect(setCalls()).toHaveLength(0)
+    expect(addInput()).toHaveValue('測試')
+  })
+
   test('Esc 還原成目前的設定值；沒有修改時失焦不儲存', async () => {
     render(<SettingsScreen />)
     const field = screen.getByLabelText('分支名稱前綴')
@@ -19430,11 +19656,58 @@ describe('SettingsScreen：版面與導覽', () => {
 })
 ```
 
+```tsx
+// tests/renderer/imeInputs.test.tsx
+// 使用者用注音等輸入法打中文：選字時按 Enter 是確認候選字，不能送出、儲存或關閉輸入框
+import { fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, test, vi } from 'vitest'
+import { Composer } from '@renderer/components/Composer'
+import { CommentForm } from '@renderer/report/comments'
+
+/** fireEvent 回傳 false 代表預設動作被取消（瀏覽器不會隱式送出表單） */
+const composingEnter = (el: Element) => fireEvent.keyDown(el, { key: 'Enter', isComposing: true })
+const enter229 = (el: Element) => fireEvent.keyDown(el, { key: 'Enter', keyCode: 229 })
+
+describe('輸入法選字中的 Enter', () => {
+  test('Composer：選字中的 Enter 不送出，選完再按 Enter 才送出', async () => {
+    const onSend = vi.fn()
+    render(<Composer placeholder="輸入訊息" onSend={onSend} />)
+    const input = screen.getByRole('textbox', { name: '訊息' })
+    await userEvent.type(input, '你好')
+    expect(composingEnter(input)).toBe(false)
+    expect(enter229(input)).toBe(false)
+    expect(onSend).not.toHaveBeenCalled()
+    expect(input).toHaveValue('你好')
+    // 一般的 Enter 不取消預設動作，表單照常送出
+    expect(fireEvent.keyDown(input, { key: 'Enter', keyCode: 13 })).toBe(true)
+    await userEvent.type(input, '{Enter}')
+    expect(onSend).toHaveBeenCalledWith('你好')
+  })
+
+  test('留言輸入框：選字中的 Enter 不加入、Esc 不取消', async () => {
+    const onSubmit = vi.fn()
+    const onCancel = vi.fn()
+    render(<CommentForm placeholder="寫下回饋" onSubmit={onSubmit} onCancel={onCancel} />)
+    const input = screen.getByRole('textbox', { name: '回饋' })
+    await userEvent.type(input, '這裡要改')
+    expect(composingEnter(input)).toBe(false)
+    expect(enter229(input)).toBe(false)
+    fireEvent.keyDown(input, { key: 'Escape', isComposing: true })
+    fireEvent.keyDown(input, { key: 'Escape', keyCode: 229 })
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(onCancel).not.toHaveBeenCalled()
+    await userEvent.type(input, '{Enter}')
+    expect(onSubmit).toHaveBeenCalledWith('這裡要改')
+  })
+})
+```
+
 主程序與 store 的測試見 Task 10／16／23／25／26 的測試區塊（`updateSettings`／`cachedSettings`、`createClaudeStatusCache`、執行中移除允許的指令、分支前綴與 worktree 路徑、`settingsReturn`）。
 
 **Step 2: 確認失敗**
 
-Run: `npx vitest run tests/renderer/allowedCommands.test.ts tests/renderer/SettingsScreen.test.tsx tests/renderer/store.test.ts tests/main/repository.test.ts tests/main/detect.test.ts tests/main/ipcGuards.test.ts tests/main/taskManager.test.ts` → FAIL
+Run: `npx vitest run tests/renderer/allowedCommands.test.ts tests/renderer/SettingsScreen.test.tsx tests/renderer/imeInputs.test.tsx tests/renderer/store.test.ts tests/main/repository.test.ts tests/main/detect.test.ts tests/main/ipcGuards.test.ts tests/main/taskManager.test.ts` → FAIL
 
 **Step 3: 共用的指令正規化與串接判斷**
 
@@ -19547,6 +19820,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { call, errorText } from '../api'
 import { Button, cx, Icons, inputClass, Pill } from '../components/ui'
 import { checkNewPattern } from '../lib/allowedCommands'
+import { blockImeSubmit, isComposing } from '../lib/ime'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
 
@@ -19711,6 +19985,8 @@ function TextSetting({
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => void commit()}
         onKeyDown={(e) => {
+          // 輸入法選字中的 Enter／Esc 屬於組字，不儲存、不還原
+          if (isComposing(e)) return
           if (e.key === 'Enter') {
             e.preventDefault()
             void commit()
@@ -19975,6 +20251,7 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
             setInput(e.target.value)
             setError(undefined)
           }}
+          onKeyDown={blockImeSubmit}
           placeholder="例如 npm test *"
           spellCheck={false}
           readOnly={saving}
@@ -20232,7 +20509,7 @@ export default function App() {
 
 **Step 8: 確認通過** — `npm test` 全部通過；`npm run typecheck`、`npm run lint` PASS
 
-**Step 9: 手動驗證** — 從任務頁進入設定：新增／移除允許的指令、切換模型與載入專案設定後重開 app 仍保留；worktree 位置輸入相對路徑時欄位下方顯示錯誤且保留輸入，改成絕對路徑後儲存；分支前綴輸入含空白的值時顯示錯誤；claude 路徑填不存在的路徑時帳號區顯示偵測錯誤，清空後回到自動偵測；用鍵盤操作時焦點不會在儲存後跳走；「返回」回到原本的任務。
+**Step 9: 手動驗證** — 從任務頁進入設定：新增／移除允許的指令、切換模型與載入專案設定後重開 app 仍保留；worktree 位置輸入相對路徑時欄位下方顯示錯誤且保留輸入，改成絕對路徑後儲存；分支前綴輸入含空白的值時顯示錯誤；claude 路徑填不存在的路徑時帳號區顯示偵測錯誤，清空後回到自動偵測；用鍵盤操作時焦點不會在儲存後跳走；「返回」回到原本的任務；用注音輸入法在各輸入框選字時按 Enter 只會確認候選字，不會送出。
 
 **Step 10: Commit**
 

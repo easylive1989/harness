@@ -2,6 +2,7 @@
 import { type KeyboardEvent, useEffect, useEffectEvent, useId, useRef, useState } from 'react'
 import type { PermissionRequest, Task } from '@shared/types'
 import { call } from '../api'
+import { isComposing } from '../lib/ime'
 import { APPROVAL_ARM_MS, describeRequest, PREVIEW_COLLAPSED, requesterOf } from '../lib/permission'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
@@ -62,7 +63,8 @@ export function PermissionDialog({
     setDenying(false)
   }
   const onKeyDown = (e: KeyboardEvent) => {
-    if (e.key === 'Escape' && denying) {
+    // 拒絕原因輸入中、輸入法選字時的 Esc 是取消組字，不離開拒絕模式
+    if (e.key === 'Escape' && denying && !isComposing(e)) {
       e.stopPropagation()
       leaveDeny()
     }

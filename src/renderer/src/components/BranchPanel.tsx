@@ -3,6 +3,7 @@ import { type FormEvent, useState } from 'react'
 import type { Branch, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
 import { userTextDisplay } from '../lib/timeline'
+import { blockImeSubmit } from '../lib/ime'
 import { usePending } from '../lib/usePending'
 import { useStickToBottom } from '../lib/useStickToBottom'
 import { useStore } from '../store'
@@ -33,6 +34,7 @@ function BranchInput({ disabled, onSend }: { disabled: boolean; onSend: (text: s
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onKeyDown={blockImeSubmit}
           disabled={disabled}
           placeholder="繼續在分岔裡討論…"
           className={cx(inputClass, 'flex-1')}

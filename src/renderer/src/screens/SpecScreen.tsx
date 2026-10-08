@@ -5,6 +5,7 @@ import { call } from '../api'
 import { InlineCode } from '../components/Markdown'
 import { PendingPermission } from '../components/PermissionDialog'
 import { Button, cx, inputClass, LiveStatus, Pill } from '../components/ui'
+import { blockImeSubmit } from '../lib/ime'
 import { currentStage, isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
@@ -286,6 +287,7 @@ export function SpecScreen({
                     ref={feedbackRef}
                     value={feedback}
                     onChange={(e) => setFeedback(e.target.value)}
+                    onKeyDown={blockImeSubmit}
                     placeholder="哪裡要改？例如：上限改成 10 次"
                     className={cx(inputClass, 'h-11 flex-1')}
                   />

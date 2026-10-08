@@ -376,6 +376,29 @@ describe('SettingsScreen：Worktree 與分支', () => {
     expect(setCalls()).toHaveLength(1)
   })
 
+  test('輸入法選字中的 Enter 與 Esc 不儲存、不還原；新增指令也不送出', async () => {
+    render(<SettingsScreen />)
+    const field = screen.getByLabelText('分支名稱前綴')
+    await userEvent.clear(field)
+    await userEvent.type(field, '功能/')
+    fireEvent.keyDown(field, { key: 'Enter', isComposing: true })
+    fireEvent.keyDown(field, { key: 'Enter', keyCode: 229 })
+    fireEvent.keyDown(field, { key: 'Escape', isComposing: true })
+    // 儲存是排隊後才送出：先讓排隊的工作跑完再檢查
+    await act(async () => {})
+    expect(setCalls()).toHaveLength(0)
+    expect(field).toHaveValue('功能/')
+    // 一般的 Esc 才還原（之後失焦不會儲存）
+    fireEvent.keyDown(field, { key: 'Escape' })
+    expect(field).toHaveValue('harness/')
+
+    await userEvent.type(addInput(), '測試')
+    expect(fireEvent.keyDown(addInput(), { key: 'Enter', isComposing: true })).toBe(false)
+    expect(fireEvent.keyDown(addInput(), { key: 'Enter', keyCode: 229 })).toBe(false)
+    expect(setCalls()).toHaveLength(0)
+    expect(addInput()).toHaveValue('測試')
+  })
+
   test('Esc 還原成目前的設定值；沒有修改時失焦不儲存', async () => {
     render(<SettingsScreen />)
     const field = screen.getByLabelText('分支名稱前綴')

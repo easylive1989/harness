@@ -1,5 +1,5 @@
 // tests/renderer/QuestionCard.test.tsx
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
@@ -141,6 +141,16 @@ describe('QuestionCard', () => {
     await userEvent.type(screen.getByRole('textbox', { name: '反問' }), '那 IP 呢？{Enter}')
     expect(call).toHaveBeenCalledWith('tasks:counter', 't1', 'q3', '那 IP 呢？')
     expect(screen.getByRole('textbox', { name: '反問' })).toHaveValue('')
+  })
+
+  test('反問：輸入法選字中的 Enter 不送出', async () => {
+    render(<QuestionCard task={task} question={q} />)
+    const input = screen.getByRole('textbox', { name: '反問' })
+    await userEvent.type(input, '那 IP 呢')
+    expect(fireEvent.keyDown(input, { key: 'Enter', isComposing: true })).toBe(false)
+    expect(fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 })).toBe(false)
+    expect(call).not.toHaveBeenCalledWith('tasks:counter', 't1', 'q3', '那 IP 呢')
+    expect(input).toHaveValue('那 IP 呢')
   })
 
   test('反問送出後等待回答時，在常駐的 live region 顯示處理中', () => {

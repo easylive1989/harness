@@ -1,5 +1,5 @@
 // tests/renderer/BranchPanel.test.tsx
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
@@ -69,6 +69,16 @@ test('顯示結論預覽，確認後帶回主線', async () => {
   expect(call).toHaveBeenCalledWith('branch:confirm', 't1', 'b2', undefined)
   await userEvent.click(screen.getByRole('button', { name: '重新整理結論' }))
   expect(call).toHaveBeenCalledWith('branch:conclude', 't1', 'b2')
+})
+
+test('分岔訊息：輸入法選字中的 Enter 不送出', async () => {
+  render(<BranchPanel task={{ ...task, branches: [open] }} events={talk} />)
+  const input = screen.getByRole('textbox', { name: '分岔訊息' })
+  await userEvent.type(input, '再想想')
+  expect(fireEvent.keyDown(input, { key: 'Enter', isComposing: true })).toBe(false)
+  expect(fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 })).toBe(false)
+  expect(call).not.toHaveBeenCalledWith('tasks:send', 't1', 'branch:b2', '再想想')
+  expect(input).toHaveValue('再想想')
 })
 
 test('在分岔中送出訊息，Claude 回覆過後可以帶回主線', async () => {

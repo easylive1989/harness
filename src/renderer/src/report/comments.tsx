@@ -2,6 +2,7 @@
 // 報告上的留言：留言按鈕、輸入框，以及已經留下（還沒送出）的回饋
 import { type FormEvent, useState } from 'react'
 import { cx, Icons } from '../components/ui'
+import { blockImeSubmit, isComposing } from '../lib/ime'
 
 export function CommentButton({
   label,
@@ -73,7 +74,9 @@ export function CommentForm({
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Escape') close(onCancel)
+          // 輸入法選字中的 Enter／Esc 屬於組字：不加入、不取消
+          blockImeSubmit(e)
+          if (e.key === 'Escape' && !isComposing(e)) close(onCancel)
         }}
         placeholder={placeholder}
         className={cx(

@@ -2,6 +2,7 @@
 import { type FormEvent, useId, useRef, useState } from 'react'
 import type { Question, Task } from '@shared/types'
 import { call } from '../api'
+import { blockImeSubmit } from '../lib/ime'
 import { awaitingCounterReply, isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
@@ -217,6 +218,7 @@ export function QuestionCard({
             <input
               value={counter}
               onChange={(e) => setCounter(e.target.value)}
+              onKeyDown={blockImeSubmit}
               disabled={busy}
               placeholder="還有疑問？在這裡反問…"
               className={cx(inputClass, 'flex-1')}

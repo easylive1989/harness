@@ -15,6 +15,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { call, errorText } from '../api'
 import { Button, cx, Icons, inputClass, Pill } from '../components/ui'
 import { checkNewPattern } from '../lib/allowedCommands'
+import { blockImeSubmit, isComposing } from '../lib/ime'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
 
@@ -179,6 +180,8 @@ function TextSetting({
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => void commit()}
         onKeyDown={(e) => {
+          // 輸入法選字中的 Enter／Esc 屬於組字，不儲存、不還原
+          if (isComposing(e)) return
           if (e.key === 'Enter') {
             e.preventDefault()
             void commit()
@@ -443,6 +446,7 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
             setInput(e.target.value)
             setError(undefined)
           }}
+          onKeyDown={blockImeSubmit}
           placeholder="例如 npm test *"
           spellCheck={false}
           readOnly={saving}

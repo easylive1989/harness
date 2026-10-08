@@ -1,5 +1,5 @@
 // tests/renderer/PermissionDialog.test.tsx
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useRef } from 'react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -95,6 +95,17 @@ test('拒絕並說明', async () => {
     allow: false,
     message: '先不要跑'
   })
+})
+
+test('拒絕原因：輸入法選字中按 Esc 不離開拒絕模式', async () => {
+  await renderDialog()
+  const u = user()
+  await u.click(screen.getByRole('button', { name: '拒絕並說明' }))
+  const reason = screen.getByRole('textbox', { name: '拒絕原因' })
+  await u.type(reason, '先不要')
+  fireEvent.keyDown(reason, { key: 'Escape', isComposing: true })
+  fireEvent.keyDown(reason, { key: 'Escape', keyCode: 229 })
+  expect(screen.getByRole('textbox', { name: '拒絕原因' })).toHaveValue('先不要')
 })
 
 test('不寫原因也能拒絕；返回或按 Esc 離開拒絕模式', async () => {
