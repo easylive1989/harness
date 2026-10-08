@@ -1,5 +1,10 @@
 import { describe, expect, test, vi } from 'vitest'
-import { createToolHandlers, type ToolSink } from '../../src/main/tools/harnessTools'
+import { z } from 'zod'
+import {
+  concludeBranchShape,
+  createToolHandlers,
+  type ToolSink
+} from '../../src/main/tools/harnessTools'
 import { sampleReport } from '../fixtures/report'
 
 function sink(over: Partial<ToolSink> = {}): ToolSink {
@@ -129,5 +134,18 @@ describe('harness tool handlers', () => {
       expect(r.isError).toBeFalsy()
       expect(s.askUser).toHaveBeenCalled()
     })
+  })
+})
+
+describe('conclude_branch 的參數', () => {
+  const schema = z.object(concludeBranchShape)
+  const base = { decision: '用 Redis', rationale: '多台機器' }
+
+  test('title（分岔的主題）選填；有給時去掉前後空白，1–30 字', () => {
+    expect(schema.parse(base).title).toBeUndefined()
+    expect(schema.parse({ ...base, title: ' 計數存放位置 ' }).title).toBe('計數存放位置')
+    expect(schema.safeParse({ ...base, title: '   ' }).success).toBe(false)
+    expect(schema.safeParse({ ...base, title: '字'.repeat(31) }).success).toBe(false)
+    expect(schema.safeParse({ ...base, title: '字'.repeat(30) }).success).toBe(true)
   })
 })

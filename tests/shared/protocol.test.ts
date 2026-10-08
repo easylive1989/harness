@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import {
+  BRANCH_RULES,
   IMPLEMENT_START_REF,
   legacyImplementStart,
   msg,
@@ -45,6 +46,13 @@ describe('protocol', () => {
       '整體不錯'
     )
     expect(s).toBe('[report_feedback] - (diff:a.ts:3) 改成常數\n整體：整體不錯')
+  })
+
+  test('分岔規則要求 conclude_branch 用 title 給分岔一個簡短的主題', () => {
+    const open = msg.branchOpen('鎖定期間要回什麼', '')
+    expect(open).toContain(BRANCH_RULES)
+    expect(BRANCH_RULES).toContain('title')
+    expect(BRANCH_RULES).toContain('10–20 字')
   })
 
   test('一般文字不是 tagged', () => {

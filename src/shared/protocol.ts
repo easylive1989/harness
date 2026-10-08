@@ -20,7 +20,9 @@ function tag(name: string, attrs: Record<string, string | undefined>, body = '')
 export const BRANCH_RULES = [
   '（Harness 規則）這是從主線分出來的分岔討論，用來深入討論一個主題。',
   '你可以閱讀程式碼，但不能修改檔案或執行指令；不要使用 ask_user、propose_spec，直接用文字討論。',
-  '使用者送出 [conclude] 時，呼叫 mcp__harness__conclude_branch 整理結論（decision 一句話、rationale 原因、deferred 延後事項），然後結束這一輪。'
+  '使用者送出 [conclude] 時，呼叫 mcp__harness__conclude_branch 整理結論（decision 一句話、rationale 原因、deferred 延後事項），然後結束這一輪。',
+  // 新增的規則放在最後一行：之前的行保持原樣，時間軸才認得舊紀錄裡的規則（stripRules）
+  '呼叫 conclude_branch 時，用 title 給這個分岔一個 10–20 字的主題（例如「鎖定期間的回應碼」），取代目前的暫定標題。'
 ].join('\n')
 
 export const msg = {

@@ -303,6 +303,39 @@ describe('TaskManager：分岔', () => {
     await expect(tm.confirmBranch(id, b.id)).rejects.toThrow('已經帶回主線')
   })
 
+  test('conclude_branch 帶 title 時換成 Claude 整理的主題；沒帶就保留原本的標題', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => [assistantText('可以')]
+    const b = await tm.openBranch(id, { title: '鎖定期間要回什麼', seed: '針對以下內容：…' })
+    await tm.whenIdle(id)
+
+    claude.script = async ({ sink }) => {
+      await sink.concludeBranch({ decision: '回 429', rationale: '慣例', deferred: [] })
+    }
+    await tm.concludeBranch(id, b.id)
+    await tm.whenIdle(id)
+    expect(tm.get(id).branches[0].title).toBe('鎖定期間要回什麼')
+
+    claude.script = async ({ sink }) => {
+      await sink.concludeBranch({
+        title: '鎖定期間的回應碼',
+        decision: '回 429',
+        rationale: '慣例',
+        deferred: []
+      })
+    }
+    await tm.concludeBranch(id, b.id)
+    await tm.whenIdle(id)
+    expect(tm.get(id).branches[0]).toMatchObject({
+      title: '鎖定期間的回應碼',
+      status: 'concluding',
+      conclusion: { decision: '回 429', rationale: '慣例', deferred: [] }
+    })
+    // 結論本身不帶標題
+    expect(tm.get(id).branches[0].conclusion).not.toHaveProperty('title')
+  })
+
   test('主線還沒有 session 時不能分岔', async () => {
     const { tm, repo } = await setup()
     const { makeTask } = await import('../fixtures/task')

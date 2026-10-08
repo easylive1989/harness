@@ -48,6 +48,14 @@ export const updatePlanShape = {
     .min(1)
 }
 export const concludeBranchShape = {
+  // 從 Claude 訊息開出的分岔，暫定標題是使用者的問題；結論時換成整理過的主題
+  title: z
+    .string()
+    .trim()
+    .min(1)
+    .max(30)
+    .optional()
+    .describe('這個分岔的主題，10–20 字（會取代目前的分岔標題）'),
   decision: z.string().min(1),
   rationale: z.string().min(1),
   deferred: z.array(z.string()).default([])
@@ -142,7 +150,8 @@ const DESCRIPTIONS: Record<HarnessToolName, string> = {
     '向使用者提出一個需要釐清的問題，以問題卡片呈現。一次只問一題，呼叫後立刻結束這一輪。用相同 question_id 再呼叫可更新卡片。',
   propose_spec: '當你對需求有足夠把握時，提出規格草稿給使用者核准。呼叫後結束這一輪。',
   update_plan: '實作階段回報步驟清單與每一步的狀態。',
-  conclude_branch: '在分岔討論中，使用者要求帶回主線時，整理結論。',
+  conclude_branch:
+    '在分岔討論中，使用者要求帶回主線時，整理結論，並用 title 給這個分岔一個 10–20 字的主題。',
   submit_report: '實作完成並驗證後，提交結構化的變更報告。'
 }
 
