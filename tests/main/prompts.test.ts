@@ -53,3 +53,10 @@ test('Claude 的文字：過場句也用繁體中文；提問、提出規格、�
     expect(MAIN_SYSTEM_APPEND).toContain(s)
   }
 })
+
+test('回答反問時可以引用選項：這不算重述（反問的回答寫進卡片裡）', () => {
+  const rule = MAIN_SYSTEM_APPEND.split('\n').find((l) =>
+    l.includes('[counter_question question_id=…]')
+  )
+  expect(rule).toContain('回答反問時可以引用選項，這不算重述')
+})
