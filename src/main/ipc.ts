@@ -49,8 +49,8 @@ export function registerIpc(d: IpcDeps) {
     'settings:get': () => d.repo.getSettings(),
     'settings:set': async (raw) => {
       const patch = validateSettingsPatch(raw)
-      const next = { ...(await d.repo.getSettings()), ...patch }
-      await d.repo.saveSettings(next)
+      // 依序合併寫入；重新偵測 Claude Code 在鎖外進行，不擋住其他設定的儲存
+      const next = await d.repo.updateSettings(patch)
       if ('claudePath' in patch) await d.claudeStatus(true)
       return next
     },

@@ -5,9 +5,13 @@ import { app, BrowserWindow, dialog, protocol, session, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { APP_EVENT_CHANNEL, type AppEvent } from '@shared/ipc'
-import type { ClaudeStatus } from '@shared/types'
 import type { QueryFn } from './agent/agentRun'
-import { applyLoginShellPath, detectClaude, execCapture } from './claude/detect'
+import {
+  applyLoginShellPath,
+  createClaudeStatusCache,
+  detectClaude,
+  execCapture
+} from './claude/detect'
 import { GitService } from './git/gitService'
 import { registerIpc } from './ipc'
 import { BLOCK_CSP, parseBlockUrl, wrapBlockHtml } from './report/blockHtml'
@@ -85,11 +89,10 @@ async function start() {
     app.getPath('home')
   )
   const git = new GitService()
-  let claude: ClaudeStatus = await detectClaude(execCapture, (await repo.getSettings()).claudePath)
-  const claudeStatus = async (refresh?: boolean) => {
-    if (refresh) claude = await detectClaude(execCapture, (await repo.getSettings()).claudePath)
-    return claude
-  }
+  const detect = async () => detectClaude(execCapture, (await repo.getSettings()).claudePath)
+  // 同時有多次重新偵測（重新檢查、改 claude 路徑、視窗取得焦點）時只採用最後開始的那次
+  const claude = createClaudeStatusCache(detect, await detect())
+  const claudeStatus = (refresh?: boolean) => claude.status(refresh)
   const emit = (e: AppEvent) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(APP_EVENT_CHANNEL, e)
   }
@@ -100,7 +103,7 @@ async function start() {
     emit,
     queryFn: query as unknown as QueryFn,
     createToolServer: createHarnessServer,
-    getClaudePath: () => claude.path,
+    getClaudePath: () => claude.current().path,
     verify: runVerification
   })
   await tm.init()

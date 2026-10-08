@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from 'vitest'
+import type { ClaudeStatus } from '@shared/types'
 import {
   applyLoginShellPath,
+  createClaudeStatusCache,
   detectClaude,
   execCapture,
   type Exec
@@ -159,5 +161,44 @@ describe('applyLoginShellPath', () => {
       throw new Error('boom')
     })
     expect(process.env.PATH).toBe('/keep')
+  })
+})
+
+describe('createClaudeStatusCache', () => {
+  const status = (path: string): ClaudeStatus => ({ found: true, loggedIn: true, path })
+  const deferred = () => {
+    let resolve!: (s: ClaudeStatus) => void
+    const promise = new Promise<ClaudeStatus>((r) => (resolve = r))
+    return { promise, resolve }
+  }
+
+  test('不重新偵測時回傳快取；重新偵測後更新快取', async () => {
+    const cache = createClaudeStatusCache(async () => status('/new'), status('/old'))
+    expect(await cache.status()).toEqual(status('/old'))
+    expect(await cache.status(true)).toEqual(status('/new'))
+    expect(cache.current().path).toBe('/new')
+  })
+
+  test('較早開始、較晚結束的偵測不會蓋掉較新的結果', async () => {
+    const first = deferred()
+    const second = deferred()
+    const pending = [first, second]
+    const cache = createClaudeStatusCache(() => pending.shift()!.promise, status('/initial'))
+    const older = cache.status(true)
+    const newer = cache.status(true)
+    second.resolve(status('/second'))
+    expect(await newer).toEqual(status('/second'))
+    first.resolve(status('/first'))
+    // 較舊的呼叫拿到的是目前的快取（較新的結果）
+    expect(await older).toEqual(status('/second'))
+    expect(cache.current().path).toBe('/second')
+  })
+
+  test('偵測失敗時保留原本的快取', async () => {
+    const cache = createClaudeStatusCache(async () => {
+      throw new Error('boom')
+    }, status('/old'))
+    await expect(cache.status(true)).rejects.toThrow('boom')
+    expect(cache.current().path).toBe('/old')
   })
 })

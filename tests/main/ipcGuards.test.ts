@@ -10,6 +10,7 @@ import {
   ensureClaudeReady,
   isPathInside,
   isSafeId,
+  isValidBranchName,
   validateSettingsPatch
 } from '../../src/main/ipcGuards'
 
@@ -63,6 +64,47 @@ describe('validateSettingsPatch', () => {
     })
   })
 
+  test('worktree 位置去掉前後空白並正規化；分支前綴去掉前後空白；允許清單去掉重複', () => {
+    expect(validateSettingsPatch({ worktreeRoot: '  /tmp/a/../wt/ ' })).toEqual({
+      worktreeRoot: '/tmp/wt'
+    })
+    expect(validateSettingsPatch({ branchPrefix: ' feat/ ' })).toEqual({ branchPrefix: 'feat/' })
+    expect(
+      validateSettingsPatch({ alwaysAllowedCommands: ['ls', ' ls ', 'npm test', 'ls'] })
+    ).toEqual({ alwaysAllowedCommands: ['ls', 'npm test'] })
+  })
+
+  test.each(['harness/', 'feat-', 'me/wip/', 'a.b/', 'x', 'x.', 'user@host/'])(
+    '接受分支前綴 %s',
+    (prefix) =>
+      expect(validateSettingsPatch({ branchPrefix: prefix })).toEqual({ branchPrefix: prefix })
+  )
+
+  test.each([
+    'has space/',
+    'tab\t/',
+    'ctrl\u0001',
+    'a~b',
+    'a^b',
+    'a:b',
+    'a?b',
+    'a*b',
+    'a[b',
+    'a\\b',
+    'a..b',
+    'a@{b',
+    'a//',
+    '-x',
+    '/x',
+    '.hidden/',
+    'x/.y',
+    'x.lock/'
+  ])('拒絕不符合 git 分支名稱規則的前綴 %j', (prefix) => {
+    expect(() => validateSettingsPatch({ branchPrefix: prefix })).toThrow(
+      '分支前綴不符合 git 分支名稱規則'
+    )
+  })
+
   test('claudePath 空字串或 undefined 代表自動偵測', () => {
     expect(validateSettingsPatch({ claudePath: '  ' })).toEqual({ claudePath: undefined })
     expect(validateSettingsPatch({ claudePath: undefined })).toEqual({ claudePath: undefined })
@@ -83,6 +125,16 @@ describe('validateSettingsPatch', () => {
   ])('拒絕 %j', (patch, msg) => {
     expect(() => validateSettingsPatch(patch)).toThrow(msg)
   })
+})
+
+describe('isValidBranchName', () => {
+  test.each(['main', 'harness/20261008-ab12cd34', 'feat/a.b', 'v1.2', 'a-b_c'])('接受 %s', (n) =>
+    expect(isValidBranchName(n)).toBe(true)
+  )
+  test.each(['', 'a.', 'a/', 'a.lock', 'a/b.lock', '.a', 'a/.b', 'a b', 'a..b', 'a@{1}', '-a'])(
+    '拒絕 %j',
+    (n) => expect(isValidBranchName(n)).toBe(false)
+  )
 })
 
 describe('assertString', () => {

@@ -13,19 +13,56 @@ export const defaultSettings = (home: string): Settings => ({
 })
 
 export class Repository {
+  /** 設定的讀寫依序進行：「讀取 → 合併 → 寫入」之間不會插進另一個寫入 */
+  private settingsLock: Promise<unknown> = Promise.resolve()
+  /** 最近一次讀取或寫入的設定 */
+  private settings?: Settings
+
   constructor(
     private store: Store,
     private home: string
   ) {}
 
-  async getSettings(): Promise<Settings> {
-    return {
+  private withSettingsLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.settingsLock.then(fn)
+    this.settingsLock = run.catch(() => undefined)
+    return run
+  }
+
+  private async readSettings(): Promise<Settings> {
+    const s = {
       ...defaultSettings(this.home),
       ...(await this.store.readJson<Partial<Settings>>('settings.json', {}))
     }
+    this.settings = s
+    return s
+  }
+
+  private async writeSettings(s: Settings) {
+    await this.store.writeJson('settings.json', s)
+    this.settings = s
+  }
+
+  getSettings(): Promise<Settings> {
+    return this.withSettingsLock(() => this.readSettings())
   }
   saveSettings(s: Settings) {
-    return this.store.writeJson('settings.json', s)
+    return this.withSettingsLock(() => this.writeSettings(s))
+  }
+  /** 讀出目前的設定、合併 patch 後寫回；同時呼叫也不會互相蓋掉欄位 */
+  updateSettings(patch: Partial<Settings>): Promise<Settings> {
+    return this.withSettingsLock(async () => {
+      const next = { ...(await this.readSettings()), ...patch }
+      await this.writeSettings(next)
+      return next
+    })
+  }
+  /**
+   * 同步取得最近一次讀取或寫入的設定（尚未讀取時是預設值）。
+   * 給執行中的權限判斷用：設定頁移除允許的指令後，進行中的對話輪也立即適用。
+   */
+  cachedSettings(): Settings {
+    return this.settings ?? defaultSettings(this.home)
   }
 
   listRepos() {

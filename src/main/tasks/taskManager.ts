@@ -426,8 +426,9 @@ export class TaskManager {
     const gateCtx: GateContext = {
       getPhase: () => (branch ? 'branch' : phaseOf(this.task(taskId).status)),
       worktreePath: t.worktreePath,
+      // 每次判斷都讀目前的設定：設定頁移除允許的指令後，進行中的這一輪也立即適用
       getAllowedPatterns: () => [
-        ...settings.alwaysAllowedCommands,
+        ...this.d.repo.cachedSettings().alwaysAllowedCommands,
         ...this.task(taskId).allowedCommands
       ],
       requestApproval: (req, signal) =>

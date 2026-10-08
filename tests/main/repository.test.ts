@@ -25,6 +25,50 @@ describe('Repository', () => {
     expect((await repo.getSettings()).branchPrefix).toBe('x/')
   })
 
+  test('updateSettings 依序合併：同時更新不同欄位都會保留', async () => {
+    const [a, b] = await Promise.all([
+      repo.updateSettings({ branchPrefix: 'a/' }),
+      repo.updateSettings({ loadProjectSettings: false })
+    ])
+    expect(a.branchPrefix).toBe('a/')
+    expect(b).toMatchObject({ branchPrefix: 'a/', loadProjectSettings: false })
+    expect(await repo.getSettings()).toMatchObject({
+      branchPrefix: 'a/',
+      loadProjectSettings: false
+    })
+  })
+
+  test('讀取排在進行中的更新之後，不會讀到舊值', async () => {
+    const [, read] = await Promise.all([
+      repo.updateSettings({ branchPrefix: 'a/' }),
+      repo.getSettings()
+    ])
+    expect(read.branchPrefix).toBe('a/')
+  })
+
+  test('cachedSettings：尚未讀取時是預設值，之後是最近一次讀取或寫入的設定', async () => {
+    expect(repo.cachedSettings().branchPrefix).toBe('harness/')
+    await writeFile(join(root, 'settings.json'), JSON.stringify({ branchPrefix: 'disk/' }))
+    await repo.getSettings()
+    expect(repo.cachedSettings().branchPrefix).toBe('disk/')
+    await repo.updateSettings({ alwaysAllowedCommands: ['npm test'] })
+    expect(repo.cachedSettings()).toMatchObject({
+      branchPrefix: 'disk/',
+      alwaysAllowedCommands: ['npm test']
+    })
+  })
+
+  test('寫入失敗時快取維持原值，之後的更新照常進行', async () => {
+    const store = new Store(root)
+    const failing = new Repository(store, '/Users/me')
+    await failing.getSettings()
+    const write = vi.spyOn(store, 'writeJson').mockRejectedValueOnce(new Error('disk full'))
+    await expect(failing.updateSettings({ branchPrefix: 'x/' })).rejects.toThrow('disk full')
+    expect(failing.cachedSettings().branchPrefix).toBe('harness/')
+    write.mockRestore()
+    expect((await failing.updateSettings({ branchPrefix: 'y/' })).branchPrefix).toBe('y/')
+  })
+
   test('任務依建立時間新到舊排序', async () => {
     await repo.saveTask(makeTask({ id: 'a', createdAt: '2026-10-01T00:00:00Z' }))
     await repo.saveTask(makeTask({ id: 'b', createdAt: '2026-10-05T00:00:00Z' }))

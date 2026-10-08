@@ -385,6 +385,33 @@ describe('TaskManager：規格與實作', () => {
     await expect(tm.resolvePermission(id, req.id, { allow: true })).rejects.toThrow('失效')
   })
 
+  test('永遠允許的指令以目前的設定判斷：執行中移除樣式後，下一個指令就要核准', async () => {
+    const { tm, claude, repo, create } = await setup()
+    await repo.updateSettings({ alwaysAllowedCommands: ['npm test'] })
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    const results: (PermissionResult | null)[] = []
+    let proceed!: () => void
+    const removed = new Promise<void>((r) => (proceed = r))
+    claude.script = async ({ options }) => {
+      results.push(await options.canUseTool!('Bash', { command: 'npm test' }, signalOf()))
+      await removed
+      results.push(await options.canUseTool!('Bash', { command: 'npm test' }, signalOf()))
+    }
+    await tm.approveSpec(id)
+    await until(() => results.length === 1)
+    expect(results[0]?.behavior).toBe('allow')
+    expect(tm.get(id).pendingPermission).toBeUndefined()
+    await repo.updateSettings({ alwaysAllowedCommands: [] })
+    proceed()
+    await until(() => !!tm.get(id).pendingPermission)
+    await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: false })
+    await tm.whenIdle(id)
+    expect(results.map((r) => r?.behavior)).toEqual(['allow', 'deny'])
+  })
+
   test('同時有多個核准請求時依序顯示', async () => {
     const { tm, claude, create } = await setup()
     claude.script = async ({ call, sink }) => {

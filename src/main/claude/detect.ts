@@ -110,6 +110,29 @@ export async function detectClaude(exec: Exec, explicitPath?: string): Promise<C
   }
 }
 
+/**
+ * 快取的 Claude Code 狀態。`status(true)` 重新偵測；同時有多次偵測時只有最後開始的那次會更新快取
+ * （較早開始、較晚結束的偵測不會蓋掉較新的結果），每次呼叫都回傳當下的快取。
+ */
+export function createClaudeStatusCache(
+  detect: () => Promise<ClaudeStatus>,
+  initial: ClaudeStatus
+) {
+  let cached = initial
+  let generation = 0
+  return {
+    current: () => cached,
+    async status(refresh = false): Promise<ClaudeStatus> {
+      if (refresh) {
+        const mine = ++generation
+        const next = await detect()
+        if (mine === generation) cached = next
+      }
+      return cached
+    }
+  }
+}
+
 const PATH_MARKER = '__HARNESS_PATH__'
 
 /**

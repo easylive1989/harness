@@ -47,7 +47,21 @@ export function assertModel(value: unknown): ModelId {
 
 const nonEmpty = (v: unknown, what: string) => {
   if (typeof v !== 'string' || !v.trim()) throw new Error(`${what}必須是非空白的文字`)
-  return v
+  return v.trim()
+}
+
+/**
+ * git check-ref-format 的分支名稱規則（純 JS 版，不必執行 git）：不可有空白、控制字元與
+ * ~^:?*[\，不可有 ..、@{、//，不可以 - 或 / 開頭、以 / 或 . 結尾，
+ * 每一段不可以 . 開頭或以 .lock 結尾。
+ */
+export function isValidBranchName(name: string): boolean {
+  if (!name || /[\s~^:?*[\\]/.test(name)) return false
+  // 控制字元（含 DEL）
+  if ([...name].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f)) return false
+  if (name.includes('..') || name.includes('@{') || name.includes('//')) return false
+  if (/^[-/]/.test(name) || /[/.]$/.test(name)) return false
+  return name.split('/').every((part) => !part.startsWith('.') && !part.endsWith('.lock'))
 }
 
 /** 每個已知設定欄位的檢查與整理；未知欄位不寫進 settings.json */
@@ -59,13 +73,19 @@ const SETTINGS_VALIDATORS: { [K in keyof Settings]-?: (v: unknown) => Settings[K
   worktreeRoot: (v) => {
     const p = nonEmpty(v, 'worktree 位置')
     if (!isAbsolute(p)) throw new Error('worktree 位置必須是絕對路徑')
-    return p
+    // 去掉 ..、多餘的 / 與結尾的 /
+    return resolve(p)
   },
-  branchPrefix: (v) => nonEmpty(v, '分支前綴'),
+  branchPrefix: (v) => {
+    const prefix = nonEmpty(v, '分支前綴')
+    // 前綴後面會接「日期-代號」，所以檢查接上一個字元之後的名稱
+    if (!isValidBranchName(`${prefix}x`)) throw new Error('分支前綴不符合 git 分支名稱規則')
+    return prefix
+  },
   alwaysAllowedCommands: (v) => {
     if (!Array.isArray(v) || v.some((c) => typeof c !== 'string' || !c.trim()))
       throw new Error('允許清單必須是非空白指令的清單')
-    return v.map((c: string) => c.trim())
+    return [...new Set(v.map((c: string) => c.trim()))]
   },
   loadProjectSettings: (v) => {
     if (typeof v !== 'boolean') throw new Error('載入專案設定必須是開或關')
