@@ -194,13 +194,19 @@ export function BranchPanel({
     task.branches.find((x) => x.status !== 'concluded') ??
     task.branches.at(-1)
   const branchId = b?.id
+  const drafting = !readOnly && draft
   const list = branchId ? events.filter((e) => e.channel === `branch:${branchId}`) : []
   const replied = list.some((e) => e.kind === 'assistant_text')
   const {
     ref: scrollRef,
     onScroll,
     stick
-  } = useStickToBottom<HTMLDivElement>(`${list.length}:${task.updatedAt}`, branchId, list.length)
+  } = useStickToBottom<HTMLDivElement>(
+    `${list.length}:${task.updatedAt}`,
+    // 新分岔的輸入框取代了訊息列表；收起後列表重新畫出，要再捲到底
+    drafting ? 'draft' : branchId,
+    list.length
+  )
   const fromIndex = b?.fromQuestionId
     ? task.questions.findIndex((q) => q.id === b.fromQuestionId) + 1
     : 0
@@ -214,7 +220,6 @@ export function BranchPanel({
     void runAction(() => act(() => call('branch:conclude', task.id, id)))
   const confirm = (id: string) =>
     void runAction(() => act(() => call('branch:confirm', task.id, id, undefined)))
-  const drafting = !readOnly && draft
 
   return (
     <aside

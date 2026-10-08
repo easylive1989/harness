@@ -215,3 +215,26 @@ test('唯讀時不顯示新分岔的輸入框', () => {
   )
   expect(screen.queryByRole('form', { name: '新分岔' })).not.toBeInTheDocument()
 })
+
+test('取消新分岔、回到原本的分岔時捲到最底（重新畫出的訊息列表）', () => {
+  // jsdom 沒有版面：讓每個元素都有內容高度
+  const desc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight')
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+    configurable: true,
+    get: () => 500
+  })
+  try {
+    const draft = { excerpt: 'x', pending: false, onSubmit: vi.fn(), onCancel: vi.fn() }
+    const view = (d?: typeof draft) => (
+      <BranchPanel task={{ ...task, branches: [open] }} events={talk} draft={d} />
+    )
+    const { rerender } = render(view())
+    rerender(view(draft))
+    rerender(view())
+    const list = screen.getByText('會有騷擾的風險。').closest('.overflow-y-auto')!
+    expect(list.scrollTop).toBe(500)
+  } finally {
+    if (desc) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', desc)
+    else delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight
+  }
+})
