@@ -102,13 +102,14 @@ test('丟棄失敗時在選單裡顯示原因，留在任務上', async () => {
   await userEvent.click(menuButton())
   await userEvent.click(within(menu()).getByRole('button', { name: '丟棄任務' }))
   await userEvent.click(within(menu()).getByRole('button', { name: '確定丟棄' }))
-  expect(await within(menu()).findByRole('alert')).toHaveTextContent(
-    '丟棄失敗：另一個收尾操作正在進行，請稍候'
-  )
+  const alert = await within(menu()).findByRole('alert')
+  expect(alert).toHaveTextContent('丟棄失敗：另一個收尾操作正在進行，請稍候')
+  // 焦點移到失敗原因，螢幕閱讀器與鍵盤使用者都在這裡繼續
+  expect(alert).toHaveFocus()
   expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 't1' })
 })
 
-test('丟棄進行中停用確定鈕，連點只送一次；選單不會被關掉', async () => {
+test('丟棄進行中確定鈕標成停用但焦點留著，連點只送一次；選單不會被關掉', async () => {
   show()
   await userEvent.click(menuButton())
   await userEvent.click(within(menu()).getByRole('button', { name: '丟棄任務' }))
@@ -116,7 +117,14 @@ test('丟棄進行中停用確定鈕，連點只送一次；選單不會被關�
   const ok = within(menu()).getByRole('button', { name: '確定丟棄' })
   await userEvent.dblClick(ok)
   expect(call).toHaveBeenCalledTimes(1)
-  expect(ok).toBeDisabled()
+  // aria-disabled 而不是 disabled：按鈕停用時焦點不會掉到 body
+  expect(ok).toHaveAttribute('aria-disabled', 'true')
+  expect(ok).toHaveFocus()
+  expect(within(menu()).getByRole('button', { name: '取消' })).toHaveAttribute(
+    'aria-disabled',
+    'true'
+  )
+  await userEvent.click(within(menu()).getByRole('button', { name: '取消' }))
   await userEvent.keyboard('{Escape}')
   await userEvent.click(document.body)
   expect(menu()).toBeInTheDocument()
@@ -148,7 +156,35 @@ test('已完成：只有清除 worktree；清除後提示，不再顯示選單�
   expect(call).toHaveBeenCalledWith('finish:discard', 't1')
   await waitFor(() => expect(useStore.getState().toast?.text).toBe('已清除 worktree'))
   expect(screen.queryByRole('button', { name: '任務動作' })).not.toBeInTheDocument()
+  // 選單消失後焦點移到階段切換（正在看的階段）
+  const nav = screen.getByRole('navigation', { name: '任務階段' })
+  expect(within(nav).getByRole('button', { name: /報告/ })).toHaveFocus()
   expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 't1' })
+})
+
+test('Claude 要求核准時關掉選單（核准對話框蓋住畫面）', async () => {
+  show({ status: 'implementing', runState: 'running' })
+  await userEvent.click(menuButton())
+  expect(menu()).toBeInTheDocument()
+  act(() =>
+    useStore.setState({
+      tasks: {
+        t1: makeTask({
+          status: 'implementing',
+          runState: 'waiting_permission',
+          pendingPermission: {
+            id: 'p1',
+            taskId: 't1',
+            channel: 'main',
+            toolName: 'Bash',
+            input: { command: 'npm test' },
+            createdAt: ''
+          }
+        })
+      }
+    })
+  )
+  expect(screen.queryByRole('group', { name: '任務動作' })).not.toBeInTheDocument()
 })
 
 test('已丟棄的任務沒有選單', () => {

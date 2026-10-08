@@ -3,6 +3,7 @@
 // 已完成（開過 PR／合併）的任務只能清除 worktree；已丟棄的任務沒有選單。
 // 這是每個畫面唯一的丟棄入口（報告頁的收尾面板只留開 PR 與合併）。
 import { type KeyboardEvent, useEffect, useId, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import type { Task } from '@shared/types'
 import { call, errorText } from '../api'
 import { isComposing } from '../lib/ime'
@@ -30,6 +31,7 @@ export function TaskMenu({
   const triggerRef = useRef<HTMLButtonElement>(null)
   const itemRef = useRef<HTMLButtonElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
+  const alertRef = useRef<HTMLDivElement>(null)
   const panelId = useId()
   const done = task.status === 'done'
 
@@ -60,6 +62,22 @@ export function TaskMenu({
     const target = confirming ? cancelRef.current : itemRef.current
     target?.focus()
   }, [open, confirming])
+  // 失敗時焦點移到原因（role="alert"、tabIndex=-1），鍵盤與螢幕閱讀器的使用者從這裡繼續
+  useEffect(() => {
+    if (failure) alertRef.current?.focus()
+  }, [failure])
+  // 出現新的核准請求時關掉選單：核准對話框會蓋住畫面（丟棄進行中除外，結果要留在這裡）。
+  // React 文件建議的「render 期間依前一個值調整 state」，不用 effect
+  const permissionId = task.pendingPermission?.id
+  const [seenPermission, setSeenPermission] = useState(permissionId)
+  if (seenPermission !== permissionId) {
+    setSeenPermission(permissionId)
+    if (permissionId && open && !pending) {
+      setOpen(false)
+      setConfirming(false)
+      setFailure(undefined)
+    }
+  }
 
   if (task.status === 'discarded' || (done && cleared)) return null
 
@@ -82,7 +100,12 @@ export function TaskMenu({
       setOpen(false)
       setConfirming(false)
       if (done) {
-        onCleared?.()
+        // 清除後選單消失：焦點移到旁邊的階段切換（正在看的階段），不掉到 body
+        const stage = rootRef.current?.parentElement?.querySelector<HTMLElement>(
+          'nav [aria-pressed="true"]'
+        )
+        flushSync(() => onCleared?.())
+        stage?.focus()
         showToast('已清除 worktree')
         return
       }
@@ -121,7 +144,8 @@ export function TaskMenu({
           id={panelId}
           role="group"
           aria-label="任務動作"
-          className="absolute top-full right-0 z-30 mt-2 flex w-[280px] flex-col gap-2 rounded-xl bg-surface p-2 text-[13px] shadow-dialog"
+          // z-[5]：蓋住時間軸與報告內容，但在核准對話框的遮罩（z-10）之下
+          className="absolute top-full right-0 z-[5] mt-2 flex w-[280px] flex-col gap-2 rounded-xl bg-surface p-2 text-[13px] shadow-dialog"
         >
           {confirming ? (
             <div className="flex flex-col gap-2.5 rounded-lg bg-danger-soft p-3">
@@ -132,10 +156,11 @@ export function TaskMenu({
                 {!done && running && ' Claude 正在執行，會先停止。'}
               </span>
               <div className="flex gap-2">
+                {/* 進行中用 aria-disabled 而不是 disabled：停用的按鈕會讓焦點掉到 body */}
                 <Button
                   size="sm"
                   className="bg-danger font-medium text-white hover:bg-danger/90"
-                  disabled={pending}
+                  aria-disabled={pending || undefined}
                   onClick={() => void discard()}
                 >
                   {done ? '確定清除' : '確定丟棄'}
@@ -144,7 +169,7 @@ export function TaskMenu({
                   ref={cancelRef}
                   size="sm"
                   variant="ghost"
-                  disabled={pending}
+                  aria-disabled={pending || undefined}
                   onClick={() => close(true)}
                 >
                   取消
@@ -169,8 +194,10 @@ export function TaskMenu({
           )}
           {failure && (
             <div
+              ref={alertRef}
               role="alert"
-              className="rounded-lg bg-danger-soft px-3 py-2.5 text-xs break-words whitespace-pre-wrap text-danger"
+              tabIndex={-1}
+              className="rounded-lg bg-danger-soft px-3 py-2.5 text-xs break-words whitespace-pre-wrap text-danger outline-none"
             >
               {failure}
             </div>
