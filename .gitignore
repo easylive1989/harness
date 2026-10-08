@@ -4,3 +4,5 @@ dist/
 .DS_Store
 *.log
 .eslintcache
+test-results/
+playwright-report/

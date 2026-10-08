@@ -15,7 +15,8 @@
     "build": "npm run typecheck && electron-vite build",
     "app:install": "scripts/install-app.sh",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "electron-vite build && playwright test"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.292",
@@ -32,6 +33,7 @@
     "@electron-toolkit/eslint-config-prettier": "^3.0.0",
     "@electron-toolkit/eslint-config-ts": "^3.1.0",
     "@electron-toolkit/tsconfig": "^2.0.0",
+    "@playwright/test": "^1.64.0",
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",

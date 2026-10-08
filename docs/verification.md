@@ -134,3 +134,24 @@ node scripts/e2e/run.mjs --dir <暫存資料夾> --quit
 
 - 真實 Claude 執行時間約 5 分鐘（任務 1 約 3 分 15 秒：釐清 28 秒、分岔 15 秒、帶回 12 秒、重新提問 18 秒、規格 21 秒、實作到核准 22 秒、實作到報告 80 秒；任務 2 約 40 秒；任務 3 約 1 分 20 秒）。
 - 實際經過時間約 40 分鐘（含查 CLI 原始碼、修正與重新建置）。
+
+## 自動化端對端測試（假 Claude）
+
+日期：2026-10-09
+方式：`npm run test:e2e`（`@playwright/test` 1.64.0 的 Electron 支援、`HARNESS_E2E_FAKE_CLAUDE=1` 的假 Claude，說明見 README「自動化端對端測試」）。上面手動驗證的檢查項目改寫成可重跑的測試；真 Claude 的行為（提示詞效果、實際產生的參數）不在這裡驗證。
+
+| 手動驗證的項目 | 自動化測試 |
+|---|---|
+| 2、3、6、7、9、12 加入 repo → 釐清 → 規格 → 實作 → 報告 → 合併 | `main-flow.spec.ts` |
+| 4 反問 | `counter-question.spec.ts` |
+| 5、C 從訊息分岔、帶回主線、主題 | `branch.spec.ts` |
+| 6 規格要求修改、v2、回看舊版 | `spec-changes.spec.ts` |
+| 7 允許一次、本任務內都允許、拒絕並說明 | `permissions.spec.ts` |
+| 8 實作中插話 | `interject.spec.ts` |
+| 10、11 報告回饋、版本切換、匯出 HTML | `report-feedback.spec.ts` |
+| 13 關閉 app 後續接 | `resume.spec.ts` |
+| 14、E 從「⋯」丟棄（含執行中） | `discard.spec.ts` |
+| 15 釐清階段阻擋 Edit／Bash（專案設定允許也一樣） | `clarify-guard.spec.ts` |
+| G 執行錯誤與「繼續」 | `run-error.spec.ts` |
+
+結果：12 個測試全部通過（約 22 秒，含建置約 25 秒）；`--repeat-each=2` 連續 24 次通過。沒有涵蓋：設定頁、開 PR（需要 `gh` 與遠端）、自訂視覺化區塊、寫入受保護路徑的核准、auto 權限模式。
