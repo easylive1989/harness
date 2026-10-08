@@ -1,6 +1,11 @@
 // tests/shared/report.test.ts
 import { describe, expect, test } from 'vitest'
-import { DecisionSourceSchema, ReportInputSchema } from '@shared/report'
+import {
+  DecisionSourceSchema,
+  PlannedTestSchema,
+  plannedTestsProblem,
+  ReportInputSchema
+} from '@shared/report'
 import { sampleReport } from '../fixtures/report'
 
 describe('ReportInputSchema', () => {
@@ -16,6 +21,7 @@ describe('ReportInputSchema', () => {
     // 舊格式（沒有 tests）也能解析
     expect(r.tests).toEqual([])
     expect(r.tests_note).toBeUndefined()
+    expect(r.planned_skipped).toEqual([])
   })
 
   test('測試的類型預設單元、狀態預設新增；行號與修改原因選填', () => {
@@ -119,5 +125,84 @@ describe('ReportInputSchema', () => {
     const r = ReportInputSchema.safeParse(bad)
     expect(r.success).toBe(false)
     expect(r.error?.issues.some((i) => i.path.join('.') === 'custom_blocks.1.id')).toBe(true)
+  })
+})
+
+describe('規格的預計測試', () => {
+  const planned = [
+    PlannedTestSchema.parse({ id: 'p1', name: '鎖定帳號', scenario: '輸錯 5 次 → 登入 → 423' }),
+    PlannedTestSchema.parse({
+      id: 'p2',
+      name: '解鎖',
+      kind: 'integration',
+      scenario: '鎖定 15 分鐘後 → 登入 → 成功',
+      file: 'src/auth/lockout.test.ts'
+    })
+  ]
+  const withTests = (tests: object[], skipped: object[] = []) =>
+    ReportInputSchema.parse({ ...sampleReport, tests, planned_skipped: skipped })
+  const t = (id: string, planned?: string) => ({
+    id,
+    file: 'a.test.ts',
+    name: id,
+    scenario: '情境',
+    ...(planned ? { planned } : {})
+  })
+
+  test('預計測試的類型預設單元、狀態預設新增，檔案選填', () => {
+    expect(planned[0]).toEqual({
+      id: 'p1',
+      name: '鎖定帳號',
+      kind: 'unit',
+      change: 'added',
+      scenario: '輸錯 5 次 → 登入 → 423'
+    })
+  })
+
+  test('每個預計測試都有對應的測試或列在 planned_skipped 時沒有問題；規格外多加的測試不用對應', () => {
+    expect(plannedTestsProblem(planned, withTests([t('t1', 'p1'), t('t2', 'p2'), t('t3')]))).toBe(
+      undefined
+    )
+    expect(
+      plannedTestsProblem(
+        planned,
+        withTests([t('t1', 'p1')], [{ id: 'p2', reason: '改成手動驗證' }])
+      )
+    ).toBe(undefined)
+  })
+
+  test('預計測試沒有對應、也沒說明原因：列出是哪幾個', () => {
+    expect(plannedTestsProblem(planned, withTests([t('t1', 'p1')]))).toBe(
+      '這些預計測試沒有對應的測試，也沒有在 planned_skipped 說明原因：p2（解鎖）'
+    )
+  })
+
+  test('對應到規格裡沒有的預計測試、或同一個預計測試又有測試又列在 planned_skipped', () => {
+    const r = withTests(
+      [t('t1', 'p1'), t('t2', 'p9'), t('t3', 'p2')],
+      [
+        { id: 'p2', reason: '不做' },
+        { id: 'p7', reason: '不做' }
+      ]
+    )
+    expect(plannedTestsProblem(planned, r)).toBe(
+      [
+        '規格裡沒有這些預計測試：p9、p7',
+        '這些預計測試已經有對應的測試，不要再列在 planned_skipped：p2'
+      ].join('\n')
+    )
+  })
+
+  test('舊規格沒有預計測試（undefined）時不檢查；規格說明不新增測試（空陣列）時不能對應', () => {
+    expect(plannedTestsProblem(undefined, withTests([t('t1', 'p1')]))).toBe(undefined)
+    expect(plannedTestsProblem([], withTests([t('t1')]))).toBe(undefined)
+    expect(plannedTestsProblem([], withTests([t('t1', 'p1')]))).toBe('規格裡沒有這些預計測試：p1')
+  })
+
+  test('planned_skipped 一定要有原因', () => {
+    expect(
+      ReportInputSchema.safeParse({ ...sampleReport, planned_skipped: [{ id: 'p1', reason: '' }] })
+        .success
+    ).toBe(false)
   })
 })

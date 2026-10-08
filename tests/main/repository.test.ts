@@ -154,9 +154,10 @@ describe('Repository', () => {
     await expect(repo.getReport('a', 2)).rejects.toThrow('v2')
   })
 
-  test('舊版報告（沒有 tests 欄位）讀出來時補上空的測試清單', async () => {
+  test('舊版報告（沒有 tests、planned_skipped 欄位）讀出來時補上空陣列', async () => {
     const input: Partial<typeof sampleReport> = { ...sampleReport }
     delete input.tests
+    delete input.planned_skipped
     await mkdir(join(root, 'tasks/a/reports'), { recursive: true })
     await writeFile(
       join(root, 'tasks/a/reports/v1.json'),
@@ -172,6 +173,7 @@ describe('Repository', () => {
     )
     const r = await repo.getReport('a', 1)
     expect(r.input.tests).toEqual([])
+    expect(r.input.planned_skipped).toEqual([])
     expect(r.input.decisions).toEqual(sampleReport.decisions)
   })
 })

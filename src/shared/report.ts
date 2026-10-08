@@ -27,19 +27,36 @@ export const DecisionSourceSchema = z.object({
   ref: z.string()
 })
 
+const TestKindSchema = z.enum(['unit', 'integration', 'e2e', 'other']).default('unit')
+const TestChangeSchema = z.enum(['added', 'modified']).default('added')
+
+/** 規格裡預計新增或修改的一個測試（id 用 p1、p2…）；報告的測試以 planned 對應回來 */
+export const PlannedTestSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  kind: TestKindSchema,
+  change: TestChangeSchema,
+  scenario: z.string().min(1),
+  /** 預計的測試檔（相對於 repo 根目錄），規格階段不一定知道 */
+  file: z.string().optional()
+})
+export type PlannedTest = z.infer<typeof PlannedTestSchema>
+
 /** 本次新增或修改的一個測試：情境用白話說明（在什麼情況下 → 做什麼 → 預期什麼） */
 export const TestNoteSchema = z.object({
   id: z.string().min(1),
   /** 相對於 repo 根目錄的路徑 */
   file: z.string().min(1),
   name: z.string().min(1),
-  kind: z.enum(['unit', 'integration', 'e2e', 'other']).default('unit'),
-  change: z.enum(['added', 'modified']).default('added'),
+  kind: TestKindSchema,
+  change: TestChangeSchema,
   scenario: z.string().min(1),
   /** 修改既有測試的原因 */
   why: z.string().optional(),
   /** 測試在新版檔案的行號 */
-  line: z.number().int().positive().optional()
+  line: z.number().int().positive().optional(),
+  /** 對應的規格預計測試 id（規格外多加的測試沒有） */
+  planned: z.string().optional()
 })
 
 /** submit_report 工具使用的 raw shape（tests 放在前面：報告最優先呈現新增的測試） */
@@ -48,6 +65,10 @@ export const ReportInputShape = {
   tests: z.array(TestNoteSchema).default([]),
   /** 沒有新增測試時的原因 */
   tests_note: z.string().optional(),
+  /** 規格預計、但這次沒有加入的測試與原因 */
+  planned_skipped: z
+    .array(z.object({ id: z.string().min(1), reason: z.string().min(1) }))
+    .default([]),
   architecture: z.object({ before: GraphSchema, after: GraphSchema }),
   decisions: z.array(
     z.object({
@@ -138,3 +159,45 @@ export const ReportInputSchema = z.object(ReportInputShape).superRefine((r, ctx)
 
 export type ReportInput = z.infer<typeof ReportInputSchema>
 export type TestNote = ReportInput['tests'][number]
+
+/** 規格的預計測試在報告裡的狀況：有對應測試的（已加入）與沒有的（附 planned_skipped 的原因） */
+export function plannedCoverage(
+  planned: PlannedTest[],
+  r: Pick<ReportInput, 'tests' | 'planned_skipped'>
+) {
+  const linked = new Set(r.tests.map((t) => t.planned))
+  return {
+    added: planned.filter((p) => linked.has(p.id)),
+    skipped: planned
+      .filter((p) => !linked.has(p.id))
+      .map((p) => ({ test: p, reason: r.planned_skipped.find((s) => s.id === p.id)?.reason }))
+  }
+}
+
+/**
+ * 報告和規格的預計測試對不上的地方（每個預計測試都要有對應的測試或列在 planned_skipped，
+ * 不能對應到規格裡沒有的預計測試）；沒有問題時回傳 undefined。
+ * planned 是規格的預計測試：舊規格沒有這個欄位（undefined）時不檢查
+ */
+export function plannedTestsProblem(
+  planned: PlannedTest[] | undefined,
+  r: ReportInput
+): string | undefined {
+  if (!planned) return undefined
+  const ids = new Set(planned.map((p) => p.id))
+  const linked = r.tests.flatMap((t) => (t.planned ? [t.planned] : []))
+  const skipped = r.planned_skipped.map((s) => s.id)
+  const problems: string[] = []
+  const unknown = [...new Set([...linked, ...skipped].filter((id) => !ids.has(id)))]
+  if (unknown.length) problems.push(`規格裡沒有這些預計測試：${unknown.join('、')}`)
+  const covered = new Set([...linked, ...skipped])
+  const missing = planned.filter((p) => !covered.has(p.id))
+  if (missing.length)
+    problems.push(
+      `這些預計測試沒有對應的測試，也沒有在 planned_skipped 說明原因：${missing.map((p) => `${p.id}（${p.name}）`).join('、')}`
+    )
+  const both = skipped.filter((id) => ids.has(id) && linked.includes(id))
+  if (both.length)
+    problems.push(`這些預計測試已經有對應的測試，不要再列在 planned_skipped：${both.join('、')}`)
+  return problems.length ? problems.join('\n') : undefined
+}

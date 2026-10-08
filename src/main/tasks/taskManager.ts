@@ -5,7 +5,7 @@ import type { Options } from '@anthropic-ai/claude-agent-sdk'
 import type { ImageInput, ImageRef } from '@shared/images'
 import type { AppEvent, CreateTaskInput } from '@shared/ipc'
 import { IMPLEMENT_START_REF, msg, msgDisplay } from '@shared/protocol'
-import type { ReportInput } from '@shared/report'
+import { plannedTestsProblem, type ReportInput } from '@shared/report'
 import type {
   Branch,
   BranchConclusion,
@@ -34,7 +34,12 @@ import {
   hooksDirInside
 } from '../permissions/gate'
 import type { Repository } from '../store/repository'
-import { type HarnessToolName, type ToolSink, TURN_ENDING_TOOLS } from '../tools/harnessTools'
+import {
+  type HarnessToolName,
+  ToolInputError,
+  type ToolSink,
+  TURN_ENDING_TOOLS
+} from '../tools/harnessTools'
 import { prBody } from './prBody'
 import { phaseOf, type TaskEventType, transition } from './stateMachine'
 
@@ -765,6 +770,8 @@ export class TaskManager {
               inScope: a.in_scope,
               outOfScope: a.out_of_scope,
               decisions: a.decisions,
+              tests: a.tests,
+              testsNote: a.tests_note?.trim() || undefined,
               steps: a.steps,
               acceptance: a.acceptance,
               createdAt: this.now()
@@ -799,6 +806,12 @@ export class TaskManager {
           if (this.task(taskId).status !== 'implementing')
             throw new Error('只有實作階段可以提交報告')
           if (this.finalizing.has(taskId)) throw new Error('報告已提交，正在整理中')
+          // 每個預計測試都要有對應的測試或說明原因：對不上就退回給 Claude 補齊
+          const problem = plannedTestsProblem(this.task(taskId).specs.at(-1)?.tests, input)
+          if (problem)
+            throw new ToolInputError(
+              `報告和規格的預計測試對不上，請修正後重新呼叫 submit_report：\n${problem}`
+            )
           await this.startFinalizing(taskId, { input }, this.runs.get(runKey(taskId, 'main')))
         })
     }
@@ -1206,10 +1219,12 @@ export class TaskManager {
       )
       // 驗證被中止的結果不完整：不存報告，下次啟動可「繼續」重新整理
       assertNotAborted()
+      const planned = this.task(taskId).specs.at(-1)?.tests
       const report: Report = {
         version,
         taskId,
         input,
+        ...(planned ? { plannedTests: planned } : {}),
         diff,
         stats,
         verification,

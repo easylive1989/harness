@@ -294,3 +294,52 @@ test('只能看時沒有留言按鈕，但仍可以跳到 diff', async () => {
   await userEvent.click(within(section()).getByRole('button', { name: '錯誤密碼回 401' }))
   expect(pressed()).toMatch(/^src\/auth\/login\.test\.ts/)
 })
+
+test('規格有預計測試：最上面寫已加入幾個，列出沒加入的與原因；每個測試標規格編號或「規格外」', async () => {
+  const planned = (id: string, name: string) => ({
+    id,
+    name,
+    kind: 'unit' as const,
+    change: 'added' as const,
+    scenario: '情境'
+  })
+  const base = makeReport()
+  report = makeReport({
+    plannedTests: [planned('p1', '鎖定帳號'), planned('p2', '鎖定 15 分鐘後解鎖')],
+    input: {
+      ...base.input,
+      tests: [{ ...base.input.tests[0], planned: 'p1' }, base.input.tests[1]],
+      planned_skipped: [{ id: 'p2', reason: '改成 `TTL` 由 Redis 處理，手動驗證' }]
+    }
+  })
+  renderReport()
+  await loaded()
+  const summary = within(section()).getByRole('group', { name: '規格的預計測試' })
+  expect(summary).toHaveTextContent('規格預計 2 個測試：已加入 1 個，1 個沒有加入')
+  expect(summary).toHaveTextContent(
+    'P2鎖定 15 分鐘後解鎖沒有加入：改成 TTL 由 Redis 處理，手動驗證'
+  )
+  expect(within(summary).getByText('TTL').tagName).toBe('CODE')
+  expect(within(item('連續失敗 5 次後鎖定帳號')).getByText('規格 P1')).toBeInTheDocument()
+  expect(within(item('錯誤密碼回 401')).getByText('規格外')).toBeInTheDocument()
+})
+
+test('預計測試都加入時摘要說都已加入；舊報告沒有預計測試時不顯示摘要與規格標籤', async () => {
+  const base = makeReport()
+  report = makeReport({
+    plannedTests: [{ id: 'p1', name: '鎖定帳號', kind: 'unit', change: 'added', scenario: '情境' }],
+    input: { ...base.input, tests: [{ ...base.input.tests[0], planned: 'p1' }] }
+  })
+  const { unmount } = renderReport()
+  await loaded()
+  expect(within(section()).getByRole('group', { name: '規格的預計測試' })).toHaveTextContent(
+    '規格預計 1 個測試：都已加入'
+  )
+  unmount()
+  resetStoreInternals()
+  report = makeReport()
+  renderReport()
+  await loaded()
+  expect(within(section()).queryByRole('group', { name: '規格的預計測試' })).not.toBeInTheDocument()
+  expect(within(section()).queryByText(/^規格/)).not.toBeInTheDocument()
+})

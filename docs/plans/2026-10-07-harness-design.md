@@ -80,7 +80,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 | 工具 | 階段 | 作用 |
 |---|---|---|
 | `ask_user({question_id, question, options[{id,label,description}], recommended_option_id, allow_free_text, context})` | 釐清、實作 | 顯示／更新問題卡片（同一 `question_id` 再呼叫＝更新卡片；除了回答反問之外，時間軸會在最新的位置再放一筆，畫面只畫最後一張，使用者在底部就看得到；回答反問卻沒寫文字時，把有變的 `context` 或「已依你的反問更新上面的問題與選項。」補成卡片裡的回覆，反問底下不會是空的） |
-| `propose_spec({title, summary, in_scope[], out_of_scope[], decisions[{id,text,source}], steps[], acceptance[]})` | 釐清 | 產生／更新規格草稿，任務轉為 `spec_review` |
+| `propose_spec({title, summary, in_scope[], out_of_scope[], decisions[{id,text,source}], tests[{id,name,kind,change,scenario,file?}], tests_note?, steps[], acceptance[]})` | 釐清 | 產生／更新規格草稿，任務轉為 `spec_review`。`tests` 是預計新增或修改的測試（id 用 p1、p2…），沒有時必須以 `tests_note` 說明原因，否則退回；id 重複也退回（2026-10-08 使用中加上） |
 | `update_plan({steps[{id,title,status}]})` | 實作 | 更新步驟進度 |
 | `conclude_branch({title?, decision, rationale, deferred[]})` | 分岔 | 產生分岔結論；`title`（要求 10–20 字；只是顯示用，超過 30 字截斷、空白就保留原標題，不會因此拒絕結論）取代分岔的暫定標題 |
 | `submit_report(ReportInput)` | 實作 | 提交報告結構化資料，任務轉為 `reviewing` |
@@ -121,7 +121,9 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 `ReportInput`（zod 驗證）：
 - `overview: { headline, summary }`
-- `tests[{ id, file, name, kind:'unit'|'integration'|'e2e'|'other', change:'added'|'modified', scenario, why?, line? }]`、`tests_note?`：本次新增或修改的每個測試與情境（白話：在什麼情況下 → 做什麼 → 預期什麼），修改既有測試時 `why` 說明原因；只有在沒有新增也沒有修改任何測試時 `tests` 才留空，沒有新增測試時以 `tests_note` 說明原因（修改的測試仍要列出）。報告最優先呈現這一段（2026-10-08 使用者要求）。沒有這些欄位的舊報告照樣解析，讀取時補 `tests: []`。
+- `tests[{ id, file, name, kind:'unit'|'integration'|'e2e'|'other', change:'added'|'modified', scenario, why?, line?, planned? }]`、`tests_note?`：本次新增或修改的每個測試與情境（白話：在什麼情況下 → 做什麼 → 預期什麼），修改既有測試時 `why` 說明原因；只有在沒有新增也沒有修改任何測試時 `tests` 才留空，沒有新增測試時以 `tests_note` 說明原因（修改的測試仍要列出）。報告最優先呈現這一段（2026-10-08 使用者要求）。沒有這些欄位的舊報告照樣解析，讀取時補 `tests: []`、`planned_skipped: []`。
+- 規格的預計測試對照（2026-10-08 使用中加上）：`tests[].planned` 是對應的規格預計測試 id（規格外多加的測試不填），`planned_skipped[{ id, reason }]` 是規格預計、但這次沒有加入的測試與原因。提交時 TaskManager 用規格（最新一版）的 `tests` 檢查（`plannedTestsProblem`）：每個預計測試都要有對應的測試或列在 `planned_skipped`，不能對應到規格裡沒有的 id，同一個預計測試不能既有測試又列在 `planned_skipped`；不符合就以 `ToolInputError` 退回，原因原樣交給 Claude 修正。規格沒有 `tests` 欄位（這個功能之前的規格）時不檢查。整理報告時把規格的預計測試存進報告（`Report.plannedTests`），舊版本與匯出的 HTML 都能自己對照。
+- 測試的 `kind` 在規格與報告用同一套判斷標準（寫在系統提示）：unit＝只測一個函式或模組、外部依賴都換成假的；integration＝多個模組一起或碰到真的檔案系統、資料庫、網路、子程序；e2e＝透過真實介面或完整的 app；other＝以上都不是。
 - `architecture: { before: Graph, after: Graph }`，`Graph = { nodes[{id,label,status:'added'|'modified'|'unchanged',files[]}], edges[{from,to,label?}] }`
 - `decisions[{ id, title, chosen, rejected[], rationale, source: {type:'question'|'branch'|'implementation'|'user', ref} }]`（`user`：使用者在規格回饋、插話或報告回饋中直接給的指示，`ref` 是摘錄）
 - `limitations[{ title, detail, severity }]`、`followups[{ title, detail }]`
@@ -137,7 +139,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 呈現：
 - Renderer 用 React 元件渲染固定骨架，順序：概觀（變更檔案、行數、新增測試、驗證、決策五格數據）→ 新增的測試 → 架構前後對照 → 決策 → 自訂區塊 → 限制與後續 → 程式碼變更 → 測試結果；架構圖自動分層排版，前後兩欄並排放得下縮到 0.6 倍的圖時並排，放不下就上下排列（只用 CSS，匯出檔也一樣）。決策與規格的「問題 N」點了切到釐清畫面並捲到那個問題、短暫標示（2 秒，減少動態時不做動畫）。
-- 「新增的測試」：每個測試列出名稱（標題）、檔案、類型、新增／修改、情境、修改原因與驗證結果。驗證結果不捏造逐個測試的結果：輸出以路徑或空白為邊界提到該測試檔的指令顯示該指令的結果；沒有的話顯示看起來是跑測試的指令（test、vitest、jest、pytest、go test、cargo test、rspec、playwright、cypress、mocha）的結果；都沒有時只給整體的「x / y 通過」（中性樣式）並連到測試結果。點測試跳到 diff 中的測試檔（有行號時到那一行），焦點也移過去。沒有新增測試時以警示樣式顯示「這次沒有新增測試」與原因（diff 裡其實有新的測試檔時改說「Claude 沒有說明新增的測試」）；未說明的測試檔列在區塊最後，概觀的「新增測試」旁也標出「未說明 N」。
+- 「新增的測試」：報告帶著規格的預計測試時，最上面先寫「規格預計 N 個測試：已加入 X 個，Y 個沒有加入」（都做到時「都已加入」），列出沒加入的測試與原因（警示樣式），每個測試標「規格 P1」或「規格外」；PR 內文的測試段落也先寫這一行並列出沒加入的。規格頁在「包含／不包含」之後列出「預計新增的測試」（編號、名稱、新增／修改、類型、情境、預計的測試檔；沒有時顯示「這次不新增測試：原因」）。每個測試列出名稱（標題）、檔案、類型、新增／修改、情境、修改原因與驗證結果。驗證結果不捏造逐個測試的結果：輸出以路徑或空白為邊界提到該測試檔的指令顯示該指令的結果；沒有的話顯示看起來是跑測試的指令（test、vitest、jest、pytest、go test、cargo test、rspec、playwright、cypress、mocha）的結果；都沒有時只給整體的「x / y 通過」（中性樣式）並連到測試結果。點測試跳到 diff 中的測試檔（有行號時到那一行），焦點也移過去。沒有新增測試時以警示樣式顯示「這次沒有新增測試」與原因（diff 裡其實有新的測試檔時改說「Claude 沒有說明新增的測試」）；未說明的測試檔列在區塊最後，概觀的「新增測試」旁也標出「未說明 N」。
 - `custom_blocks` 以 `<iframe sandbox="allow-scripts" srcdoc>` 呈現，附 CSP（禁止網路），不給 same-origin。
 - 回饋錨點：區塊（`section:<id>`，新增的測試為 `section:tests`）、測試（`test:<id>`）、決策（`decision:<id>`）、自訂區塊（`block:<id>`）、整個檔案（`file:<path>`）、diff 行（`diff:<path>:<line>`）。送出回饋 → 任務回到 `implementing`，完成後產生 v2；舊版本保留可切換。
 - 匯出 HTML：產生單一自含 HTML 檔（含靜態的「新增的測試」）。

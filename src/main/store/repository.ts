@@ -127,7 +127,14 @@ export class Repository {
       null
     )
     if (!r) throw new Error(`找不到報告 v${version}`)
-    // 開發期間資料的相容：較早的報告沒有 tests（之後才加的欄位），補上預設值，畫面與 PR 內文都不必再判斷
-    return { ...r, input: { ...r.input, tests: r.input.tests ?? [] } }
+    // 開發期間資料的相容：較早的報告沒有 tests、planned_skipped（之後才加的欄位），補上預設值，畫面與 PR 內文都不必再判斷
+    return {
+      ...r,
+      input: {
+        ...r.input,
+        tests: r.input.tests ?? [],
+        planned_skipped: r.input.planned_skipped ?? []
+      }
+    }
   }
 }

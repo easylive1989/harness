@@ -98,3 +98,30 @@ test('Claude 給的文字壓成一行；code span 裡的反引號會跳脫', () 
   expect(body).toContain('（原因：多台 機器共享）')
   expect(body).toContain('- ✅ `` echo `x` ``')
 })
+
+test('規格有預計測試時：先寫已加入幾個，再列出沒有加入的測試與原因', () => {
+  const p = (id: string, name: string) => ({
+    id,
+    name,
+    kind: 'unit' as const,
+    change: 'added' as const,
+    scenario: '情境'
+  })
+  const input = {
+    ...sampleReport,
+    tests: [{ ...sampleReport.tests[0], planned: 'p1' }, sampleReport.tests[1]],
+    planned_skipped: [{ id: 'p2', reason: '改成手動\n驗證' }]
+  }
+  const body = prBody({ ...report(input), plannedTests: [p('p1', '鎖定'), p('p2', '解鎖')] })
+  expect(body).toContain(
+    '## 新增的測試\n規格預計 2 個測試：已加入 1 個，1 個沒有加入。\n- 沒有加入：**解鎖**（P2）：改成手動 驗證\n- **連續失敗 5 次後鎖定帳號**'
+  )
+  const all = prBody({
+    ...report({ ...input, planned_skipped: [] }),
+    plannedTests: [p('p1', '鎖定')]
+  })
+  expect(all).toContain('## 新增的測試\n規格預計 1 個測試：都已加入。\n- **連續失敗')
+  // 舊規格沒有預計測試、或規格說明不新增測試：不寫這一行
+  expect(prBody(report())).not.toContain('規格預計')
+  expect(prBody({ ...report(), plannedTests: [] })).not.toContain('規格預計')
+})

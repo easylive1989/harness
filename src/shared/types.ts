@@ -1,5 +1,5 @@
 import type { ImageRef } from './images'
-import type { ReportInput } from './report'
+import type { PlannedTest, ReportInput } from './report'
 
 export type ModelId = 'claude-opus-5-5' | 'claude-sonnet-5-5'
 export const MODELS: { id: ModelId; label: string; hint: string }[] = [
@@ -64,6 +64,10 @@ export interface Spec {
   inScope: string[]
   outOfScope: string[]
   decisions: { id: string; text: string; source: DecisionSource }[]
+  /** 預計新增或修改的測試；這個欄位加上之前的規格沒有（undefined），報告也就不對照 */
+  tests?: PlannedTest[]
+  /** 不新增測試的原因（tests 是空陣列時） */
+  testsNote?: string
   steps: string[]
   acceptance: string[]
   createdAt: string
@@ -222,6 +226,8 @@ export interface Report {
   version: number
   taskId: string
   input: ReportInput
+  /** 整理報告時規格的預計測試（報告自己帶著，舊版本與匯出的 HTML 都能對照）；舊規格沒有 */
+  plannedTests?: PlannedTest[]
   diff: string
   stats: DiffStats
   verification: VerificationResult[]

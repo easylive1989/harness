@@ -4,6 +4,7 @@ import type { Report } from '@shared/types'
 
 export const sampleReport: ReportInput = {
   overview: { headline: '登入流程多了一道鎖定關卡', summary: '在 IP 限流之後加入 lockoutGuard。' },
+  planned_skipped: [],
   tests: [
     {
       id: 't1',

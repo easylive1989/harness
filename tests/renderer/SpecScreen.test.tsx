@@ -357,3 +357,57 @@ test('送出修改意見期間又改了內容就保留', async () => {
   await release()
   expect(input).toHaveValue('上限改 10 次，還有鎖 30 分鐘')
 })
+
+test('預計新增的測試：在範圍之後列出編號、名稱、新增或修改、類型、情境與預計的測試檔', () => {
+  renderSpec(
+    specTask({
+      specs: [
+        spec(1, {
+          tests: [
+            {
+              id: 'p1',
+              name: '連續失敗 5 次後鎖定',
+              kind: 'unit',
+              change: 'added',
+              scenario: '輸錯 5 次 → 第 6 次登入 → 回 `429`',
+              file: 'src/auth/lockout.test.ts'
+            },
+            {
+              id: 'p2',
+              name: '錯誤密碼回 401',
+              kind: 'integration',
+              change: 'modified',
+              scenario: '沒被鎖定時輸錯 → 登入 → 401'
+            }
+          ]
+        })
+      ]
+    })
+  )
+  const list = screen.getByRole('list', { name: '預計新增的測試' })
+  const rows = within(list).getAllByRole('listitem')
+  expect(rows).toHaveLength(2)
+  expect(rows[0]).toHaveTextContent('P1')
+  expect(rows[0]).toHaveTextContent('連續失敗 5 次後鎖定')
+  expect(rows[0]).toHaveTextContent('新增')
+  expect(rows[0]).toHaveTextContent('單元')
+  expect(rows[0]).toHaveTextContent('情境輸錯 5 次 → 第 6 次登入 → 回 429')
+  expect(within(rows[0]).getByText('429').tagName).toBe('CODE')
+  expect(rows[0]).toHaveTextContent('src/auth/lockout.test.ts')
+  expect(rows[1]).toHaveTextContent('修改')
+  expect(rows[1]).toHaveTextContent('整合')
+  // 放在包含／不包含之後、決策之前
+  const headings = screen.getAllByText(/^(包含|預計新增的測試|決策)$/).map((e) => e.textContent)
+  expect(headings).toEqual(['包含', '預計新增的測試', '決策'])
+})
+
+test('規格說明不新增測試時顯示原因；舊規格沒有這個欄位時不顯示這一段', () => {
+  const { unmount } = renderSpec(
+    specTask({ specs: [spec(1, { tests: [], testsNote: '只改 README' })] })
+  )
+  expect(screen.getByText('預計新增的測試')).toBeInTheDocument()
+  expect(screen.getByText('這次不新增測試：只改 README')).toBeInTheDocument()
+  unmount()
+  renderSpec(specTask())
+  expect(screen.queryByText('預計新增的測試')).not.toBeInTheDocument()
+})

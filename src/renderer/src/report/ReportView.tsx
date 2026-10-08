@@ -374,6 +374,8 @@ export function ReportView({
         <TestsSection
           tests={r.tests}
           note={r.tests_note}
+          planned={report.plannedTests}
+          plannedSkipped={r.planned_skipped}
           files={diffFiles}
           undocumented={undocumented}
           root={task.worktreePath}

@@ -1,4 +1,5 @@
 // src/main/tasks/prBody.ts
+import { plannedCoverage } from '@shared/report'
 import { addedTestFiles, resolveTestPath } from '@shared/testFiles'
 import type { Report } from '@shared/types'
 
@@ -24,6 +25,20 @@ function testLines(r: Report): string[] {
   const undocumented = files.filter((f) => !described.has(f))
   const list = (paths: string[]) => paths.map(code).join('、')
   const lines = ['## 新增的測試']
+  // 規格的預計測試：先說做到幾個，再列出沒做到的與原因
+  if (r.plannedTests?.length) {
+    const c = plannedCoverage(r.plannedTests, i)
+    const n = r.plannedTests.length
+    lines.push(
+      c.skipped.length
+        ? `規格預計 ${n} 個測試：已加入 ${c.added.length} 個，${c.skipped.length} 個沒有加入。`
+        : `規格預計 ${n} 個測試：都已加入。`,
+      ...c.skipped.map(
+        (s) =>
+          `- 沒有加入：**${oneLine(s.test.name)}**（${s.test.id.toUpperCase()}）：${s.reason ? oneLine(s.reason) : '沒有說明原因'}`
+      )
+    )
+  }
   if (!added.length) {
     if (undocumented.length) {
       lines.push(`Claude 沒有說明新增的測試：${list(undocumented)}`)

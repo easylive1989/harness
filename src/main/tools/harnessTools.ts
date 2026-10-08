@@ -3,6 +3,7 @@ import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 import {
   DecisionSourceSchema,
+  PlannedTestSchema,
   type ReportInput,
   ReportInputSchema,
   ReportInputShape
@@ -33,6 +34,8 @@ export const proposeSpecShape = {
   in_scope: z.array(z.string()),
   out_of_scope: z.array(z.string()).default([]),
   decisions: z.array(z.object({ id: z.string(), text: z.string(), source: DecisionSourceSchema })),
+  tests: z.array(PlannedTestSchema).default([]).describe('預計新增或修改的測試（id 用 p1、p2…）'),
+  tests_note: z.string().optional().describe('不需要新增或修改測試時的原因（tests 留空時必填）'),
   steps: z.array(z.string()).min(1),
   acceptance: z.array(z.string()).min(1)
 }
@@ -91,10 +94,14 @@ type Result = { content: { type: 'text'; text: string }[]; isError?: boolean }
 const ok = (text: string): Result => ({ content: [{ type: 'text', text }] })
 const fail = (text: string): Result => ({ content: [{ type: 'text', text }], isError: true })
 
+/** sink 拒絕工具參數時丟出：訊息原樣交給 Claude 修正（不是 Harness 自己出錯） */
+export class ToolInputError extends Error {}
+
 async function guard(fn: () => Promise<Result>): Promise<Result> {
   try {
     return await fn()
   } catch (e) {
+    if (e instanceof ToolInputError) return fail(e.message)
     console.error('[harness tools] handler failed', e)
     return fail(`Harness 無法處理：${e instanceof Error ? e.message : String(e)}`)
   }
@@ -114,6 +121,15 @@ function askUserProblem(a: AskUserArgs): string | undefined {
   return undefined
 }
 
+function proposeSpecProblem(a: ProposeSpecArgs): string | undefined {
+  const ids = a.tests.map((t) => t.id)
+  const dup = ids.find((x, i) => ids.indexOf(x) !== i)
+  if (dup) return `預計測試 id 重複：${dup}`
+  if (!a.tests.length && !a.tests_note?.trim())
+    return '列出預計新增或修改的測試（tests）；不需要測試時 tests 留空，並在 tests_note 說明原因'
+  return undefined
+}
+
 export function createToolHandlers(sink: ToolSink) {
   return {
     ask_user: (a: AskUserArgs) =>
@@ -127,6 +143,8 @@ export function createToolHandlers(sink: ToolSink) {
       }),
     propose_spec: (a: ProposeSpecArgs) =>
       guard(async () => {
+        const problem = proposeSpecProblem(a)
+        if (problem) return fail(`規格格式有誤，請修正後重新呼叫 propose_spec：${problem}`)
         await sink.proposeSpec(a)
         return ok(
           '規格草稿已交給使用者審閱，介面會顯示完整內容。請結束這一輪，不要在文字中重述規格，等待 [spec_approved] 或 [spec_feedback …]。'

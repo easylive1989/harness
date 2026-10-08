@@ -63,3 +63,24 @@ test('回答反問時可以引用選項：這不算重述（反問的回答寫�
   expect(rule).toContain('一定要先輸出文字回答')
   expect(rule).toContain('不要只把回答寫進 ask_user 的 context')
 })
+
+test('規格列出預計測試（沒有時說明原因），報告的測試對應回規格，沒做到的說明原因', () => {
+  const lines = MAIN_SYSTEM_APPEND.split('\n')
+  const spec = lines.find((l) => l.includes('propose_spec 的 tests'))
+  expect(spec).toContain('id 用 p1、p2…')
+  expect(spec).toContain('tests 留空，並在 tests_note 說明原因')
+  const report = lines.find((l) => l.includes('planned_skipped'))
+  expect(report).toContain('planned 填這個測試對應的規格預計測試 id')
+  expect(report).toContain('每個預計測試都要有對應的測試，或列在 planned_skipped')
+})
+
+test('測試的分類（kind）有判斷標準，規格與報告共用', () => {
+  for (const s of [
+    '### 測試的分類（kind）',
+    '- unit：只測一個函式或模組',
+    '- integration：',
+    '- e2e：',
+    '- other：'
+  ])
+    expect(MAIN_SYSTEM_APPEND).toContain(s)
+})

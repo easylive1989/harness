@@ -3,6 +3,7 @@ import { z } from 'zod'
 import {
   concludeBranchShape,
   createToolHandlers,
+  ToolInputError,
   type ToolSink
 } from '../../src/main/tools/harnessTools'
 import { sampleReport } from '../fixtures/report'
@@ -18,6 +19,24 @@ function sink(over: Partial<ToolSink> = {}): ToolSink {
   }
 }
 const textOf = (r: { content: { text: string }[] }) => r.content.map((c) => c.text).join('')
+const specArgs = {
+  title: 't',
+  summary: 's',
+  in_scope: [],
+  out_of_scope: [],
+  decisions: [],
+  tests: [
+    {
+      id: 'p1',
+      name: '鎖定帳號',
+      kind: 'unit' as const,
+      change: 'added' as const,
+      scenario: '輸錯 5 次 → 登入 → 423'
+    }
+  ],
+  steps: ['a'],
+  acceptance: ['b']
+}
 
 describe('harness tool handlers', () => {
   test('ask_user 呼叫 sink 並要求結束這一輪', async () => {
@@ -49,17 +68,20 @@ describe('harness tool handlers', () => {
   })
 
   test('propose_spec 成功時要求結束這一輪、不在文字中重述規格', async () => {
-    const r = await createToolHandlers(sink()).propose_spec({
-      title: 't',
-      summary: 's',
-      in_scope: [],
-      out_of_scope: [],
-      decisions: [],
-      steps: ['a'],
-      acceptance: ['b']
-    })
+    const r = await createToolHandlers(sink()).propose_spec(specArgs)
     expect(textOf(r)).toContain('結束這一輪')
     expect(textOf(r)).toContain('不要在文字中重述規格')
+  })
+
+  test('sink 以 ToolInputError 拒絕時，原因原樣交給 Claude 修正', async () => {
+    const s = sink({
+      submitReport: vi.fn(async () => {
+        throw new ToolInputError('報告和規格的預計測試對不上：p2')
+      })
+    })
+    const r = await createToolHandlers(s).submit_report(sampleReport)
+    expect(r.isError).toBe(true)
+    expect(textOf(r)).toBe('報告和規格的預計測試對不上：p2')
   })
 
   test('conclude_branch 成功時要求結束這一輪、不在文字中重述結論', async () => {
@@ -79,15 +101,7 @@ describe('harness tool handlers', () => {
         throw new Error('無法在 implementing 狀態執行 SPEC_PROPOSED')
       })
     })
-    const r = await createToolHandlers(s).propose_spec({
-      title: 't',
-      summary: 's',
-      in_scope: [],
-      out_of_scope: [],
-      decisions: [],
-      steps: ['a'],
-      acceptance: ['b']
-    })
+    const r = await createToolHandlers(s).propose_spec(specArgs)
     expect(r.isError).toBe(true)
     expect(textOf(r)).toContain('implementing')
     expect(log).toHaveBeenCalled()
@@ -107,6 +121,46 @@ describe('harness tool handlers', () => {
     expect(r.isError).toBe(true)
     expect(textOf(r)).toContain('字串錯誤')
     log.mockRestore()
+  })
+
+  describe('propose_spec 驗證', () => {
+    test('沒有預計測試也沒有說明原因時拒絕，不呼叫 sink', async () => {
+      const s = sink()
+      const r = await createToolHandlers(s).propose_spec({ ...specArgs, tests: [] })
+      expect(r.isError).toBe(true)
+      expect(textOf(r)).toContain('請修正後重新呼叫 propose_spec')
+      expect(textOf(r)).toContain('tests_note')
+      expect(s.proposeSpec).not.toHaveBeenCalled()
+    })
+
+    test('只有空白的 tests_note 不算說明', async () => {
+      const r = await createToolHandlers(sink()).propose_spec({
+        ...specArgs,
+        tests: [],
+        tests_note: '  '
+      })
+      expect(r.isError).toBe(true)
+    })
+
+    test('沒有預計測試、但說明了原因時可以通過', async () => {
+      const s = sink()
+      const r = await createToolHandlers(s).propose_spec({
+        ...specArgs,
+        tests: [],
+        tests_note: '只改 README'
+      })
+      expect(r.isError).toBeFalsy()
+      expect(s.proposeSpec).toHaveBeenCalled()
+    })
+
+    test('預計測試 id 重複時拒絕', async () => {
+      const r = await createToolHandlers(sink()).propose_spec({
+        ...specArgs,
+        tests: [specArgs.tests[0], { ...specArgs.tests[0], name: '另一個' }]
+      })
+      expect(r.isError).toBe(true)
+      expect(textOf(r)).toContain('預計測試 id 重複：p1')
+    })
   })
 
   describe('ask_user 驗證', () => {

@@ -4,20 +4,15 @@
 // 以及 Harness 從 diff 偵測到、Claude 沒說明的測試檔。外框（標題、留言）由 ReportView 的 Section 提供。
 import { type ReactNode, useId } from 'react'
 import type { DiffFile } from '@shared/diff'
-import type { TestNote } from '@shared/report'
+import { type PlannedTest, plannedCoverage, type ReportInput, type TestNote } from '@shared/report'
 import { resolveTestPath } from '@shared/testFiles'
 import type { VerificationResult } from '@shared/types'
 import { InlineCode } from '../components/Markdown'
 import { cx, Icons, Pill } from '../components/ui'
+import { TEST_CHANGE_LABEL, TEST_KIND_LABEL } from '../lib/testLabels'
 import { testAnchor } from './anchors'
 import { type RunState, runState, testVerdict } from './testItems'
 
-const KIND_LABEL: Record<TestNote['kind'], string> = {
-  unit: '單元',
-  integration: '整合',
-  e2e: '端對端',
-  other: '其他'
-}
 const FILE_STATUS: Record<DiffFile['status'], string> = {
   added: '新增',
   modified: '修改',
@@ -106,9 +101,53 @@ function TestVerification({
   )
 }
 
+/** 規格的預計測試做到幾個；沒加入的列出來，附 Claude 說明的原因 */
+function PlannedSummary({
+  planned,
+  coverage
+}: {
+  planned: PlannedTest[]
+  coverage: ReturnType<typeof plannedCoverage>
+}) {
+  const { added, skipped } = coverage
+  return (
+    <div
+      role="group"
+      aria-label="規格的預計測試"
+      className={cx(
+        'flex flex-col gap-2 rounded-xl px-3.5 py-3 text-[13px]',
+        skipped.length ? 'bg-warn-soft' : 'bg-fill-2'
+      )}
+    >
+      <span className={cx('font-medium', skipped.length ? 'text-warn' : 'text-ink-2')}>
+        {skipped.length
+          ? `規格預計 ${planned.length} 個測試：已加入 ${added.length} 個，${skipped.length} 個沒有加入`
+          : `規格預計 ${planned.length} 個測試：都已加入`}
+      </span>
+      {skipped.length > 0 && (
+        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+          {skipped.map(({ test: p, reason }) => (
+            <li key={p.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <span className="font-mono text-xs text-muted">{p.id.toUpperCase()}</span>
+              <span className="font-medium">
+                <InlineCode text={p.name} />
+              </span>
+              <span className="text-ink-2">
+                沒有加入：
+                <InlineCode text={reason ?? 'Claude 沒有說明原因'} />
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 /** Claude 說明的一個測試：名稱（標題，可以點：跳到 diff 裡的測試檔與行）、檔案、標籤、情境、修改原因、驗證 */
 function TestItem({
   test: t,
+  plannedLabel,
   path,
   inDiff,
   runs,
@@ -120,6 +159,8 @@ function TestItem({
   onShowResults
 }: {
   test: TestNote
+  /** 「規格 P1」或「規格外」；規格沒有預計測試時不標 */
+  plannedLabel?: string
   path: string
   inDiff: boolean
   runs: VerificationResult[]
@@ -162,10 +203,11 @@ function TestItem({
           </span>
         </div>
         <span className="flex flex-none items-center gap-1">
+          {plannedLabel && <Pill tone={t.planned ? 'decision' : 'neutral'}>{plannedLabel}</Pill>}
           <Pill tone={t.change === 'added' ? 'brand' : 'review'}>
-            {t.change === 'added' ? '新增' : '修改'}
+            {TEST_CHANGE_LABEL[t.change]}
           </Pill>
-          <Pill tone="muted">{KIND_LABEL[t.kind]}</Pill>
+          <Pill tone="muted">{TEST_KIND_LABEL[t.kind]}</Pill>
           {button(anchor, t.name, `對測試「${t.name}」留言`)}
         </span>
       </div>
@@ -188,6 +230,8 @@ function TestItem({
 export function TestsSection({
   tests,
   note,
+  planned,
+  plannedSkipped,
   files,
   undocumented,
   root,
@@ -202,6 +246,9 @@ export function TestsSection({
   tests: TestNote[]
   /** 沒有新增測試的原因（Claude 說明） */
   note?: string
+  /** 整理報告時規格的預計測試（舊報告沒有）與 Claude 說明沒加入的原因 */
+  planned?: PlannedTest[]
+  plannedSkipped: ReportInput['planned_skipped']
   /** diff 裡的檔案與其中 Claude 沒說明的測試檔（ReportView 算好，概觀的數據也用） */
   files: DiffFile[]
   undocumented: DiffFile[]
@@ -224,9 +271,19 @@ export function TestsSection({
   ]
   const hasAdded = ordered.some((t) => t.change === 'added')
   const undocumentedAdded = undocumented.some((f) => f.status === 'added')
+  // 規格說明不新增測試（空陣列）或舊報告：不顯示對照
+  const hasPlanned = !!planned?.length
+  const label = (t: TestNote) =>
+    !hasPlanned ? undefined : t.planned ? `規格 ${t.planned.toUpperCase()}` : '規格外'
 
   return (
     <div className="flex flex-col gap-3">
+      {hasPlanned && (
+        <PlannedSummary
+          planned={planned}
+          coverage={plannedCoverage(planned, { tests, planned_skipped: plannedSkipped })}
+        />
+      )}
       {!hasAdded && (
         <div className="flex gap-2.5 rounded-xl bg-warn-soft px-3.5 py-3 text-[13px]">
           <Icons.Info className="mt-[3px] flex-none text-warn" />
@@ -252,6 +309,7 @@ export function TestsSection({
           <TestItem
             key={t.id}
             test={t}
+            plannedLabel={label(t)}
             path={path}
             inDiff={paths.includes(path)}
             runs={runs}

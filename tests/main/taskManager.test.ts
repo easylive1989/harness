@@ -10,6 +10,7 @@ import { BUILTIN_TOOLS } from '../../src/main/permissions/gate'
 import { Repository } from '../../src/main/store/repository'
 import { Store } from '../../src/main/store/store'
 import { TaskManager, type TaskManagerDeps } from '../../src/main/tasks/taskManager'
+import { ToolInputError } from '../../src/main/tools/harnessTools'
 import { sampleReport } from '../fixtures/report'
 import { assistantText, FakeClaude, fakeGit, until } from './fakeClaude'
 
@@ -470,6 +471,8 @@ const spec = {
   in_scope: ['a'],
   out_of_scope: [],
   decisions: [],
+  tests: [],
+  tests_note: '示範用的規格，不新增測試',
   steps: ['實作'],
   acceptance: ['測試通過']
 }
@@ -1955,5 +1958,96 @@ describe('TaskManager：移除 repo', () => {
     removing.resolve()
     await done
     await expect(tm.removeRepo('r1')).rejects.toThrow('找不到 repo')
+  })
+})
+
+describe('TaskManager：規格的預計測試', () => {
+  const p1 = {
+    id: 'p1',
+    name: '連續失敗 5 次後鎖定',
+    kind: 'unit' as const,
+    change: 'added' as const,
+    scenario: '輸錯 5 次 → 第 6 次登入 → 423'
+  }
+  const p2 = { ...p1, id: 'p2', name: '鎖定 15 分鐘後解鎖', scenario: '15 分鐘後 → 登入 → 成功' }
+  const linked = { ...sampleReport, tests: [{ ...sampleReport.tests[0], planned: 'p1' }] }
+
+  test('規格記下預計測試；報告缺少對應時拒絕並把原因交給 Claude，補齊後整理報告、存下預計測試', async () => {
+    const { tm, claude, repo, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec({ ...spec, tests: [p1, p2], tests_note: '  ' })
+    }
+    const id = await create()
+    expect(tm.get(id).specs[0]).toMatchObject({ tests: [p1, p2] })
+    expect(tm.get(id).specs[0].testsNote).toBeUndefined()
+    claude.script = async () => []
+    await tm.approveSpec(id)
+    await tm.whenIdle(id)
+
+    let rejected: unknown
+    claude.script = async ({ sink }) => {
+      try {
+        await sink.submitReport(linked)
+      } catch (e) {
+        rejected = e
+      }
+      await sink.submitReport({
+        ...linked,
+        planned_skipped: [{ id: 'p2', reason: '改成手動驗證' }]
+      })
+    }
+    await tm.send(id, 'main', '完成了嗎？')
+    await tm.whenIdle(id)
+    expect(rejected).toBeInstanceOf(ToolInputError)
+    expect((rejected as Error).message).toBe(
+      '報告和規格的預計測試對不上，請修正後重新呼叫 submit_report：\n' +
+        '這些預計測試沒有對應的測試，也沒有在 planned_skipped 說明原因：p2（鎖定 15 分鐘後解鎖）'
+    )
+    expect(tm.get(id)).toMatchObject({ status: 'reviewing', reportVersions: [1] })
+    const r = await repo.getReport(id, 1)
+    expect(r.plannedTests).toEqual([p1, p2])
+    expect(r.input.planned_skipped).toEqual([{ id: 'p2', reason: '改成手動驗證' }])
+  })
+
+  test('規格說明不新增測試時記下原因', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec({ ...spec, tests: [], tests_note: ' 只改 README ' })
+    }
+    const id = await create()
+    expect(tm.get(id).specs[0]).toMatchObject({ tests: [], testsNote: '只改 README' })
+  })
+
+  test('舊規格沒有預計測試：報告不檢查對應，也不存預計測試', async () => {
+    const { tm, claude, repo } = await setup()
+    const { makeTask } = await import('../fixtures/task')
+    await repo.saveTask(
+      makeTask({
+        id: 'old',
+        status: 'implementing',
+        mainSessionId: 'sess-old',
+        specs: [
+          {
+            version: 1,
+            title: '帳號鎖定',
+            summary: 's',
+            inScope: [],
+            outOfScope: [],
+            decisions: [],
+            steps: ['實作'],
+            acceptance: ['測試通過'],
+            createdAt: 'x'
+          }
+        ]
+      })
+    )
+    await tm.init()
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(linked)
+    }
+    await tm.send('old', 'main', '完成')
+    await tm.whenIdle('old')
+    expect(tm.get('old')).toMatchObject({ status: 'reviewing', reportVersions: [1] })
+    expect((await repo.getReport('old', 1)).plannedTests).toBeUndefined()
   })
 })
