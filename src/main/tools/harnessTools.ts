@@ -165,5 +165,11 @@ export function createHarnessServer(sink: ToolSink, names: HarnessToolName[]) {
       h.submit_report
     )
   }
-  return createSdkMcpServer({ name: 'harness', version: '1.0.0', tools: names.map((n) => all[n]) })
+  // alwaysLoad：Claude Code 預設把 MCP 工具藏在 tool search 後面，Claude 沒先載入 schema 就會猜錯參數
+  return createSdkMcpServer({
+    name: 'harness',
+    version: '1.0.0',
+    alwaysLoad: true,
+    tools: names.map((n) => all[n])
+  })
 }
