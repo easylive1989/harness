@@ -1,0 +1,19 @@
+# 打包成 macOS 的 Harness.app（scripts/install-app.sh 使用）
+appId: com.easylive1989.harness
+productName: Harness
+directories:
+  output: dist
+files:
+  - out/**
+  - package.json
+# Claude Agent SDK 會啟動套件裡的檔案（例如 ripgrep），不能放在 asar 裡
+asarUnpack:
+  - node_modules/@anthropic-ai/claude-agent-sdk/**
+mac:
+  target: dir
+  category: public.app-category.developer-tools
+  # 沒有開發者憑證：ad-hoc 簽章，Apple Silicon 才能執行
+  identity: '-'
+  # 自用不需公證；ad-hoc 簽章搭配 hardened runtime 會因 library validation 無法啟動
+  notarize: false
+  hardenedRuntime: false
