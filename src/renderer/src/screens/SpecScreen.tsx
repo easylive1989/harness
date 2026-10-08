@@ -11,12 +11,23 @@ import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
 
 function SourcePill({ task, source }: { task: Task; source: DecisionSource }) {
-  if (source.type === 'branch') return <Pill tone="decision">分岔</Pill>
-  if (source.type === 'question') {
-    const i = task.questions.findIndex((q) => q.id === source.ref)
-    return <Pill>{i >= 0 ? `問題 ${i + 1}` : '問題'}</Pill>
+  switch (source.type) {
+    case 'branch':
+      return <Pill tone="decision">分岔</Pill>
+    case 'user':
+      // 規格回饋或訊息中直接給的指示；ref 是 Claude 摘錄的指示
+      return (
+        <Pill tone="brand" title={source.ref || undefined}>
+          你的指示
+        </Pill>
+      )
+    case 'implementation':
+      return <Pill tone="muted">實作</Pill>
+    case 'question': {
+      const i = task.questions.findIndex((q) => q.id === source.ref)
+      return <Pill>{i >= 0 ? `問題 ${i + 1}` : '問題'}</Pill>
+    }
   }
-  return <Pill tone="muted">實作</Pill>
 }
 
 /** 右側的釐清紀錄：已回答的問題與分岔（分岔指向規格裡引用它的決策） */

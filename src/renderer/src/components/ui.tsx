@@ -73,14 +73,18 @@ export const TONE_TEXT: Record<Tone, string> = {
 export function Pill({
   tone = 'neutral',
   className,
+  title,
   children
 }: {
   tone?: Tone
   className?: string
+  /** 滑過時的說明（例如使用者指示的摘錄） */
+  title?: string
   children: ReactNode
 }) {
   return (
     <span
+      title={title}
       className={cx(
         'inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs',
         TONES[tone],

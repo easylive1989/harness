@@ -128,6 +128,13 @@ function DecisionSource({
 }) {
   if (source.type === 'branch') return <Pill tone="decision">來自分岔</Pill>
   if (source.type === 'implementation') return <Pill tone="muted">實作中決定</Pill>
+  // 規格回饋、實作中插話或報告回饋中直接給的指示；ref 是 Claude 摘錄的指示
+  if (source.type === 'user')
+    return (
+      <Pill tone="brand" title={source.ref || undefined}>
+        你的指示
+      </Pill>
+    )
   const i = task.questions.findIndex((q) => q.id === source.ref)
   const label = i >= 0 ? `問題 ${i + 1}` : '問題'
   // 點了打開釐清階段（回看當時的問答）

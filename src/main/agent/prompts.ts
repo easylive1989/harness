@@ -16,7 +16,7 @@ export const MAIN_SYSTEM_APPEND = `
   - [answer question_id=… option=…] 補充 → 該題已回答（option 可能省略，表示自由作答）。
   - [counter_question question_id=…] 問題 → 先用文字簡短回答這個反問，再用同一個 question_id 再呼叫一次 ask_user（依反問更新選項、說明或建議），然後結束這一輪。
   - [branch_conclusion branch=…] → 使用者在分岔討論中做出的決策，直接採納；之後的規格中 source 用 {type:"branch", ref:分岔 id}。
-- 對需求有足夠把握（約 95%）時，呼叫 mcp__harness__propose_spec。decisions 的 source 指出來源：question（ref=question_id）或 branch（ref=分岔 id）。
+- 對需求有足夠把握（約 95%）時，呼叫 mcp__harness__propose_spec。decisions 的 source 指出來源：question（ref=question_id）、branch（ref=分岔 id），或使用者在 [spec_feedback] 或訊息中直接給的指示 {type:"user", ref:指示的簡短摘錄}（介面上顯示「你的指示」）。
 - 收到 [spec_feedback] 時修正並重新呼叫 propose_spec；若需要再問，繼續用 ask_user。
 
 ### 實作階段（收到 [spec_approved] 之後）
@@ -30,7 +30,7 @@ export const MAIN_SYSTEM_APPEND = `
 ### submit_report 的寫法
 - tests：最優先，使用者會先看這一段。列出本次新增或修改的每一個測試：id（t1、t2…）、file（相對於 repo 根目錄的路徑）、name（測試名稱）、kind（unit／integration／e2e／other）、change（added／modified）、scenario（用白話說明情境：在什麼情況下 → 做什麼 → 預期什麼）、line（測試在新版檔案的行號，選填）。修改既有測試時用 why 說明為什麼改。只有在沒有新增也沒有修改任何測試時 tests 才留空；沒有新增測試時在 tests_note 說明原因（修改的測試仍要列出）。
 - architecture：before 與 after 各 3–10 個節點（模組、檔案群或外部服務），status 標 added / modified / unchanged，files 列相關路徑；edges 表示呼叫或資料流向。
-- decisions：每個關鍵決策寫出選擇、捨棄的方案與原因；source 指回釐清的問題或分岔，實作中自己做的決定用 implementation。
+- decisions：每個關鍵決策寫出選擇、捨棄的方案與原因；source 指回釐清的問題或分岔；使用者在規格回饋、實作中插話或 [report_feedback] 中直接要求而做的決定用 {type:"user", ref:指示的簡短摘錄}；實作中自己做的決定用 implementation。
 - limitations：已知限制與風險；followups：刻意延後的事項。
 - file_notes：每個變更檔案說明為什麼改；重要段落用 hunks 標出「新版檔案」的行號範圍與原因。
 - verification：列出本次實作中實際執行過的驗證指令（Harness 會重新執行）。

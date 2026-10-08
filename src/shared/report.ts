@@ -18,8 +18,12 @@ export const GraphSchema = z.object({
   nodes: z.array(NodeSchema).min(1),
   edges: z.array(EdgeSchema).default([])
 })
+/**
+ * 決策的來源：釐清的問題（ref＝question_id）、分岔（ref＝分岔 id）、實作中自己做的決定，
+ * 或使用者直接給的指示（規格回饋、實作中插話、報告回饋；ref＝指示的簡短摘錄，可留空）
+ */
 export const DecisionSourceSchema = z.object({
-  type: z.enum(['question', 'branch', 'implementation']),
+  type: z.enum(['question', 'branch', 'implementation', 'user']),
   ref: z.string()
 })
 

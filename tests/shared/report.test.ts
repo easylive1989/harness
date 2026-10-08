@@ -1,6 +1,6 @@
 // tests/shared/report.test.ts
 import { describe, expect, test } from 'vitest'
-import { ReportInputSchema } from '@shared/report'
+import { DecisionSourceSchema, ReportInputSchema } from '@shared/report'
 import { sampleReport } from '../fixtures/report'
 
 describe('ReportInputSchema', () => {
@@ -48,6 +48,19 @@ describe('ReportInputSchema', () => {
     expect(ReportInputSchema.safeParse(badLine).success).toBe(false)
     const badKind = { ...sampleReport, tests: [{ ...sampleReport.tests[0], kind: 'smoke' }] }
     expect(ReportInputSchema.safeParse(badKind).success).toBe(false)
+  })
+
+  test('決策來源：問題、分岔、實作中決定，或使用者的指示（規格回饋、插話、報告回饋）', () => {
+    for (const type of ['question', 'branch', 'implementation', 'user'])
+      expect(DecisionSourceSchema.safeParse({ type, ref: '' }).success, type).toBe(true)
+    expect(DecisionSourceSchema.safeParse({ type: 'spec_feedback', ref: '' }).success).toBe(false)
+    const r = ReportInputSchema.parse({
+      ...sampleReport,
+      decisions: [
+        { ...sampleReport.decisions[0], source: { type: 'user', ref: '錯誤訊息用繁體中文' } }
+      ]
+    })
+    expect(r.decisions[0].source).toEqual({ type: 'user', ref: '錯誤訊息用繁體中文' })
   })
 
   test('測試 id 重複時失敗', () => {

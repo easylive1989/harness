@@ -319,6 +319,22 @@ test('點決策的問題來源打開釐清階段；點架構節點切換到對�
   )
 })
 
+test('決策來源：使用者的指示顯示「你的指示」，實作中自己做的決定顯示「實作中決定」', async () => {
+  const report = makeReport()
+  const d = report.input.decisions[0]
+  report.input.decisions = [
+    { ...d, id: 'd5', title: '錯誤訊息用中文', source: { type: 'user', ref: '插話：用繁體中文' } },
+    { ...d, id: 'd6', title: '抽出常數', source: { type: 'implementation', ref: '' } }
+  ]
+  replies['report:get'] = () => report
+  renderReport(reviewTask())
+  await loaded()
+  const decisions = screen.getByRole('region', { name: '決策與原因' })
+  expect(within(decisions).getByText('你的指示')).toHaveAttribute('title', '插話：用繁體中文')
+  expect(within(decisions).getByText('實作中決定')).toBeInTheDocument()
+  expect(within(decisions).queryByText(/^問題/)).not.toBeInTheDocument()
+})
+
 test('點回饋清單裡的程式碼回饋會切換到那個檔案', async () => {
   renderReport(reviewTask())
   await loaded()

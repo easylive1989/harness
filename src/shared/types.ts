@@ -43,8 +43,9 @@ export interface Question {
   askedAt: string
 }
 
+/** 見 DecisionSourceSchema（user：使用者在規格回饋、插話或報告回饋中直接給的指示） */
 export interface DecisionSource {
-  type: 'question' | 'branch' | 'implementation'
+  type: 'question' | 'branch' | 'implementation' | 'user'
   ref: string
 }
 export interface Decision {
