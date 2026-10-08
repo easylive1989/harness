@@ -29,5 +29,10 @@ export default defineConfig(
       '@typescript-eslint/explicit-function-return-type': 'off'
     }
   },
+  {
+    // 手動 E2E 驅動程式是純 JS（不屬於 app），不需要宣告回傳型別
+    files: ['scripts/**/*.mjs'],
+    rules: { '@typescript-eslint/explicit-function-return-type': 'off' }
+  },
   eslintConfigPrettier
 )
