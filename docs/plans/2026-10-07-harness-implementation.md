@@ -5136,7 +5136,7 @@ export const MAIN_SYSTEM_APPEND = `
 - 選項要具體、互斥，附簡短說明與取捨；有建議就設定 recommended_option_id。
 - 使用者回覆格式：
   - [answer question_id=… option=…] 補充 → 該題已回答（option 可能省略，表示自由作答）。
-  - [counter_question question_id=…] 問題 → 先用文字簡短回答這個反問（回答反問時可以引用選項，這不算重述；回答會顯示在問題卡片裡），再用同一個 question_id 再呼叫一次 ask_user（依反問更新選項、說明或建議），然後結束這一輪。
+  - [counter_question question_id=…] 問題 → 一定要先輸出文字回答這個反問（簡短即可；回答反問時可以引用選項，這不算重述；只有文字回答會顯示在使用者的反問下面，不要只把回答寫進 ask_user 的 context），再用同一個 question_id 再呼叫一次 ask_user（依反問更新選項、說明或建議），然後結束這一輪。
   - [branch_conclusion branch=…] → 使用者在分岔討論中做出的決策，直接採納；之後的規格中 source 用 {type:"branch", ref:分岔 id}。
 - 對需求有足夠把握（約 95%）時，呼叫 mcp__harness__propose_spec。decisions 的 source 指出來源：question（ref=question_id）、branch（ref=分岔 id），或使用者在 [spec_feedback] 或訊息中直接給的指示 {type:"user", ref:指示的簡短摘錄}（介面上顯示「你的指示」）。
 - 收到 [spec_feedback] 時修正並重新呼叫 propose_spec；若需要再問，繼續用 ask_user。
@@ -6527,6 +6527,10 @@ function nextId(prefix: string, ids: string[]): string {
   }, 0)
   return `${prefix}${max + 1}`
 }
+/** 使用者停止這一輪後記在時間軸：畫面不會停在 Claude 最後一句話，看起來像沒反應 */
+const STOPPED_NOTICE = '已停止。輸入訊息就能繼續。'
+/** Claude 回答反問時沒寫文字、說明也沒變：卡片裡仍給反問一則回覆 */
+const COUNTER_UPDATED_NOTE = '已依你的反問更新上面的問題與選項。'
 const logError = (what: string) => (e: unknown) => console.error(`[TaskManager] ${what}`, e)
 
 /** p 在 ms 內結束（成功或失敗）回傳 true，逾時回傳 false */
@@ -6567,6 +6571,8 @@ export class TaskManager {
   private blockedToolUses = new Map<string, { run?: AgentRun; reason: string }>()
   /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
+  /** 使用者按停止的執行：結束時在時間軸記一筆 */
+  private stoppedRuns = new WeakSet<AgentRun>()
   /** 報告整理中（邏輯狀態）：進入 reviewing 的同一步就清除 */
   private finalizing = new Set<string>()
   /** 報告整理的 promise，整個流程（含之後的時間軸寫入）結束才移除；whenIdle 用 */
@@ -6965,6 +6971,9 @@ export class TaskManager {
       this.forgetDenied(run)
       const branchId = branchIdOf(channel)
       if (current && !branchId) this.pendingCounter.delete(taskId)
+      // 排在這段執行的所有事件之後
+      if (this.stoppedRuns.delete(run))
+        await this.addTimeline(taskId, { channel, kind: 'system', text: STOPPED_NOTICE })
       await this.update(taskId, (t) => {
         if (current) {
           if (branchId) {
@@ -7097,6 +7106,14 @@ export class TaskManager {
             }
             const q = t.questions.find((x) => x.id === a.question_id)
             if (q) {
+              // 回答反問卻沒寫文字（例如只把回答放進 context）：補一則回覆，反問底下才不會是空的
+              if (counterReply && q.followups.at(-1)?.role === 'user') {
+                const context = a.context?.trim()
+                q.followups.push({
+                  role: 'assistant',
+                  text: context && context !== q.context?.trim() ? context : COUNTER_UPDATED_NOTE
+                })
+              }
               Object.assign(q, fields, { status: 'open' as const, answer: undefined })
             } else {
               added = true
@@ -7893,7 +7910,10 @@ describe('TaskManager：規格與實作', () => {
       if (w.taskId === taskId && w.channel === channel)
         w.resolve({ allow: false, message: '使用者停止了執行' })
     }
-    await this.runs.get(runKey(taskId, channel))?.interrupt()
+    const run = this.runs.get(runKey(taskId, channel))
+    // 這一輪還在進行才算停止（輸入已關閉的執行只是還沒結束）
+    if (run?.active) this.stoppedRuns.add(run)
+    await run?.interrupt()
   }
 
   async resume(taskId: string) {
@@ -25635,6 +25655,124 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 # docs: add a README
 git add docs
 git commit -m "docs: record the final review fixes in the plan (Task 39)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 40：使用中發現的停止與反問問題
+
+實際使用時遇到兩個「Claude 沒反應」的情況，依 TDD 修正（程式與設計文件一個 commit，本計畫的紀錄另一個 docs commit）：
+- **停止沒有留下痕跡**：主線執行中按了「停止」，`interrupt()` 讓這一輪以 `interrupted` 結束、回到 `idle`，不算錯誤，時間軸也不寫任何東西：畫面停在 Claude 最後一句話（例如「Now the pendingCounter consumption.」），看起來像卡住。
+- **反問沒有回覆**：收到 `[counter_question …]` 時，Claude 沒先輸出文字，直接以同一個 `question_id` 再呼叫 `ask_user`，把回答寫進 `context`。只有文字會接在使用者的反問下面，所以卡片裡的反問底下是空的；回答變成標題下方的灰字，取代了原本的說明。
+
+**Files:**
+- Modify（程式碼區塊已更新為最終版本）：Task 21–23 的 `src/main/tasks/taskManager.ts`（`STOPPED_NOTICE`、`COUNTER_UPDATED_NOTE`、`stoppedRuns`；`onRunDone`、`askUser`、`stop`）、Task 19 的 `src/main/agent/prompts.ts`（反問的規則）
+- Modify: `tests/main/taskManager.test.ts`、`tests/main/prompts.test.ts`、`docs/plans/2026-10-07-harness-design.md`（§3.3 的 `ask_user` 與階段指示、§5 的停止）
+
+**行為重點：**
+- `stop()` 在這一輪還在進行（`run.active`）時把它記進 `stoppedRuns`（輸入已關閉的執行只是還沒結束，不算停止）；`onRunDone` 在這段執行的所有事件之後，於被停止的 channel（主線或分岔）寫入 `system` 事件「已停止。輸入訊息就能繼續。」。interrupt 逾時改用 abort 時一樣會寫（`done` 仍會結束）。
+- `askUser` 是在回答反問（`counterReply`）而卡片最後一則仍是使用者的反問時，先補一則 Claude 的回覆再更新卡片：新的 `context` 有內容且和原本不同就用它，否則用「已依你的反問更新上面的問題與選項。」。Claude 有先寫文字時照舊（文字已經是最後一則）。
+- 提示：反問的規則改成「一定要先輸出文字回答這個反問（…只有文字回答會顯示在使用者的反問下面，不要只把回答寫進 ask_user 的 context）」。
+
+**Step 1: 寫失敗測試**
+
+`tests/main/taskManager.test.ts`：
+- 「回答反問時沒寫文字、只把回答放進說明：卡片裡以新的說明當作回覆」
+- 「回答反問時沒寫文字、說明也沒變：卡片裡提示問題已更新，不讓反問沒有回覆」
+- 「停止後時間軸留下「已停止」，畫面不會看起來像 Claude 沒反應」（沒有執行中的一輪時再按停止，不多記一筆）
+- 「停止分岔不影響主線」加上：「已停止」記在分岔自己的時間軸
+
+```ts
+  test('回答反問時沒寫文字、只把回答放進說明：卡片裡以新的說明當作回覆', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser({ ...askQ1, context: '連續失敗 5 次就鎖定。' })
+    }
+    const id = await create()
+    // 第二輪：沒有輸出文字，直接以同一 question_id 更新卡片，回答寫在 context
+    claude.script = async ({ call, sink }) => {
+      if (call === 1) await sink.askUser({ ...askQ1, context: 'IP＝登入請求的來源位址。' })
+    }
+    await tm.counterQuestion(id, 'q1', 'IP 是指什麼？')
+    await tm.whenIdle(id)
+    const q = tm.get(id).questions[0]
+    expect(q.followups).toEqual([
+      { role: 'user', text: 'IP 是指什麼？' },
+      { role: 'assistant', text: 'IP＝登入請求的來源位址。' }
+    ])
+    expect(q.context).toBe('IP＝登入請求的來源位址。')
+  })
+
+  test('回答反問時沒寫文字、說明也沒變：卡片裡提示問題已更新，不讓反問沒有回覆', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser(askQ1)
+    }
+    const id = await create()
+    claude.script = async ({ call, sink }) => {
+      if (call === 1) await sink.askUser({ ...askQ1, recommended_option_id: 'acct_ip' })
+    }
+    await tm.counterQuestion(id, 'q1', '哪個比較好？')
+    await tm.whenIdle(id)
+    expect(tm.get(id).questions[0].followups).toEqual([
+      { role: 'user', text: '哪個比較好？' },
+      { role: 'assistant', text: '已依你的反問更新上面的問題與選項。' }
+    ])
+  })
+
+  test('停止後時間軸留下「已停止」，畫面不會看起來像 Claude 沒反應', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => {
+      await new Promise(() => undefined) // 卡住，直到被停止
+    }
+    await tm.send(id, 'main', '再看一下 /login')
+    await tm.stop(id, 'main')
+    await tm.whenIdle(id)
+    expect((await tm.timeline(id)).at(-1)).toMatchObject({
+      channel: 'main',
+      kind: 'system',
+      text: '已停止。輸入訊息就能繼續。'
+    })
+    // 沒有執行中的這一輪時按停止：不再多記一筆
+    await tm.stop(id, 'main')
+    await tm.whenIdle(id)
+    expect((await tm.timeline(id)).filter((e) => e.kind === 'system')).toHaveLength(1)
+  })
+```
+
+「停止分岔不影響主線」最後加上：
+
+```ts
+    // 「已停止」記在分岔自己的時間軸
+    const stopped = (await tm.timeline(id)).filter((e) => e.kind === 'system')
+    expect(stopped.map((e) => e.channel)).toEqual([`branch:${b.id}`])
+```
+
+`tests/main/prompts.test.ts` 的「回答反問時可以引用選項：這不算重述」加上：
+
+```ts
+  // 只有文字回覆會顯示在使用者的反問下面：回答只放在 context 時，使用者看起來像沒有得到回覆
+  expect(rule).toContain('一定要先輸出文字回答')
+  expect(rule).toContain('不要只把回答寫進 ask_user 的 context')
+```
+
+**Step 2: 確認失敗** — `npx vitest run tests/main/taskManager.test.ts tests/main/prompts.test.ts` → 5 failed（卡片裡沒有回覆、時間軸最後一筆是 `user_text`、分岔沒有 `system` 事件、提示沒有新的字句）
+
+**Step 3: 實作** — 見上面列出的 Task 區塊。
+
+**Step 4: 確認通過** — `npm test`（51 個檔案、747 個測試）、`npm run typecheck`、`npm run lint` 通過。
+
+**Commit**
+
+```bash
+git commit -m "fix(main): mark a stopped turn in the timeline; never leave a counter-question unanswered
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git add docs/plans/2026-10-07-harness-implementation.md
+git commit -m "docs: record the stop and counter-question fixes in the plan (Task 40)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
