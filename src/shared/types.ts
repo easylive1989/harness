@@ -186,6 +186,8 @@ export interface ClaudeStatus {
   subscriptionType?: string
   email?: string
   error?: string
+  /** 啟動時環境裡有、但 Harness 不傳給 Claude Code 的變數（API key、其他驗證方式或端點） */
+  ignoredEnv?: string[]
 }
 
 export interface VerificationResult {

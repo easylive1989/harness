@@ -69,7 +69,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 - `mcpServers: { harness: HarnessTools }`（`alwaysLoad: true`：Claude Code 預設把 MCP 工具藏在 tool search 後面，沒先載入 schema 時 Claude 會猜錯參數）
 - `canUseTool: PermissionGate`
 - `pathToClaudeCodeExecutable`: 偵測到的本機 `claude`（沿用其訂閱登入）
-- `env`: `process.env` 加上 `ENABLE_CLAUDEAI_MCP_SERVERS=false`（不載入 claude.ai 帳號上的連接器；PermissionGate 本來就會拒絕它們）與 `CLAUDE_CODE_TERMINAL_MCP_TOOLS=mcp__harness__ask_user,…`（要求結束這一輪的四個工具：`ask_user`、`propose_spec`、`conclude_branch`、`submit_report`。Claude 照指示只思考、不寫字就結束這一輪時，Claude Code 預設會補一句「[Your previous response had no visible output…]」催它寫一段話，Claude 只好重述問題；列在這裡的工具之後不催）
+- `env`: `process.env` 去掉 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`CLAUDE_CODE_USE_BEDROCK`、`CLAUDE_CODE_USE_VERTEX`、`CLAUDE_CODE_USE_FOUNDRY`（`claudeEnv`：一律使用訂閱登入，不讓 API key、其他雲端供應商或代理端點接手；偵測登入狀態的 `claude --version`／`claude auth status` 也一樣；啟動時環境裡有這些變數的話，設定頁顯示「已忽略環境變數 X，Harness 一律使用 Claude Code 的訂閱登入」），再加上 `ENABLE_CLAUDEAI_MCP_SERVERS=false`（不載入 claude.ai 帳號上的連接器；PermissionGate 本來就會拒絕它們）與 `CLAUDE_CODE_TERMINAL_MCP_TOOLS=mcp__harness__ask_user,…`（要求結束這一輪的四個工具：`ask_user`、`propose_spec`、`conclude_branch`、`submit_report`。Claude 照指示只思考、不寫字就結束這一輪時，Claude Code 預設會補一句「[Your previous response had no visible output…]」催它寫一段話，Claude 只好重述問題；列在這裡的工具之後不催）
 - `prompt`: AsyncIterable 佇列（串流輸入模式），以支援插話；停止用 `interrupt()`／`AbortController`
 - 續接：`resume: sessionId`；分岔：`resume: mainSessionId, forkSession: true`
 

@@ -294,6 +294,11 @@ function AccountSection({
           </>
         )}
       </dl>
+      {!!claude?.ignoredEnv?.length && (
+        <p className="m-0 rounded-[10px] bg-decision px-3 py-2 text-xs text-decision-ink">
+          已忽略環境變數 {claude.ignoredEnv.join('、')}，Harness 一律使用 Claude Code 的訂閱登入
+        </p>
+      )}
       <span className="text-xs text-muted">
         尚未登入時，會請你在終端機執行 <code>claude</code> 完成登入。
       </span>

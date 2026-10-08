@@ -2,10 +2,12 @@ import { afterEach, describe, expect, test } from 'vitest'
 import type { ClaudeStatus } from '@shared/types'
 import {
   applyLoginShellPath,
+  claudeEnv,
   createClaudeStatusCache,
   detectClaude,
   execCapture,
-  type Exec
+  type Exec,
+  type ExecOptions
 } from '../../src/main/claude/detect'
 
 function fakeExec(map: Record<string, string | Error>): Exec {
@@ -29,7 +31,9 @@ describe('detectClaude', () => {
           subscriptionType: 'max',
           email: 'a@b'
         })
-      })
+      }),
+      undefined,
+      { PATH: '/usr/bin' }
     )
     expect(s).toEqual({
       found: true,
@@ -38,8 +42,47 @@ describe('detectClaude', () => {
       loggedIn: true,
       subscriptionType: 'max',
       email: 'a@b',
-      error: undefined
+      error: undefined,
+      ignoredEnv: []
     })
+  })
+
+  test('API key、其他驗證方式與端點的環境變數不傳給 claude，並回報忽略了哪些', async () => {
+    const env = {
+      PATH: '/usr/bin',
+      ANTHROPIC_API_KEY: 'sk-ant-x',
+      ANTHROPIC_AUTH_TOKEN: 't',
+      ANTHROPIC_BASE_URL: 'https://proxy.example',
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      CLAUDE_CODE_USE_VERTEX: '1',
+      CLAUDE_CODE_USE_FOUNDRY: '1',
+      CLAUDE_CODE_OAUTH_TOKEN: 'oauth'
+    }
+    const seen: (ExecOptions | undefined)[] = []
+    const exec: Exec = async (cmd, args, opts) => {
+      if (cmd === '/c') seen.push(opts)
+      return args.includes('auth') ? '{"loggedIn":true}' : '1'
+    }
+    const s = await detectClaude(exec, '/c', env)
+    expect(s.ignoredEnv).toEqual([
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'ANTHROPIC_BASE_URL',
+      'CLAUDE_CODE_USE_BEDROCK',
+      'CLAUDE_CODE_USE_VERTEX',
+      'CLAUDE_CODE_USE_FOUNDRY'
+    ])
+    expect(seen).toHaveLength(2)
+    for (const opts of seen)
+      expect(opts?.env).toEqual({ PATH: '/usr/bin', CLAUDE_CODE_OAUTH_TOKEN: 'oauth' })
+    // 空字串不算設定
+    expect((await detectClaude(exec, '/c', { ANTHROPIC_API_KEY: '' })).ignoredEnv).toEqual([])
+  })
+
+  test('claudeEnv 是複本：不改動原本的環境變數', () => {
+    const env = { PATH: '/bin', ANTHROPIC_API_KEY: 'k' }
+    expect(claudeEnv(env)).toEqual({ PATH: '/bin' })
+    expect(env.ANTHROPIC_API_KEY).toBe('k')
   })
 
   test('使用設定指定的路徑', async () => {

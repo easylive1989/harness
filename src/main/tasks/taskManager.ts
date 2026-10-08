@@ -20,6 +20,7 @@ import type {
 } from '@shared/types'
 import { AgentRun, type QueryFn, type RunnerEvent } from '../agent/agentRun'
 import { MAIN_SYSTEM_APPEND } from '../agent/prompts'
+import { claudeEnv } from '../claude/detect'
 import type { GitLike } from '../git/gitService'
 import { hasShellOperators, matchesPattern } from '../permissions/commandPattern'
 import {
@@ -472,11 +473,12 @@ export class TaskManager {
       // 專案設定的 allow 規則會在 canUseTool 之前生效；硬性規則放在 PreToolUse hook 才不會被繞過
       hooks: { PreToolUse: [{ hooks: [createPreToolUseHook(gateCtx)] }] },
       pathToClaudeCodeExecutable: this.d.getClaudePath(),
+      // API key、其他驗證方式與端點的變數不傳（claudeEnv）：一律使用 Claude Code 的訂閱登入。
       // claude.ai 帳號上的連接器（Gmail、Notion…）不載入：PermissionGate 一律拒絕，只會佔用 context，
       // Claude 還會在回覆裡提到它們。
       // 呼叫提問、規格、結論、報告工具後安靜結束這一輪是對的：Claude Code 不要再催 Claude 寫一段話
       env: {
-        ...process.env,
+        ...claudeEnv(),
         ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
         CLAUDE_CODE_TERMINAL_MCP_TOOLS: TURN_ENDING_TOOLS.join(',')
       }

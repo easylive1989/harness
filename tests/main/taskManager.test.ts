@@ -2,7 +2,7 @@
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, onTestFinished, test, vi } from 'vitest'
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AppEvent } from '@shared/ipc'
 import { IMPLEMENT_START_REF, msgDisplay, startsImplementation } from '@shared/protocol'
@@ -97,6 +97,29 @@ describe('TaskManager：建立任務與釐清', () => {
     ])
     expect(t).toMatchObject({ status: 'clarifying', runState: 'idle', mainSessionId: 'sess-0' })
     expect(events.some((e) => e.type === 'task' && e.task.runState === 'running')).toBe(true)
+  })
+
+  test('不把 API key 與其他驗證方式、端點的環境變數傳給 Claude Code（一律用訂閱登入）', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-x')
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://proxy.example')
+    vi.stubEnv('CLAUDE_CODE_USE_BEDROCK', '1')
+    onTestFinished(() => {
+      vi.unstubAllEnvs()
+    })
+    const { claude, create } = await setup()
+    await create()
+    const env = claude.calls[0].options.env!
+    for (const k of [
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'ANTHROPIC_BASE_URL',
+      'CLAUDE_CODE_USE_BEDROCK',
+      'CLAUDE_CODE_USE_VERTEX',
+      'CLAUDE_CODE_USE_FOUNDRY'
+    ])
+      expect(env, k).not.toHaveProperty(k)
+    expect(env.PATH).toBe(process.env.PATH)
+    expect(process.env.ANTHROPIC_API_KEY).toBe('sk-ant-x')
   })
 
   test('ask_user 建立問題卡片；回答後以 resume 送出 [answer]', async () => {

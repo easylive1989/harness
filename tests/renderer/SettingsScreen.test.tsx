@@ -111,6 +111,26 @@ describe('SettingsScreen：Claude 帳號', () => {
     expect(error).toHaveClass('text-danger')
   })
 
+  test('啟動時環境裡有 API key 等變數：說明已忽略，一律使用訂閱登入', () => {
+    const { rerender } = render(<SettingsScreen />)
+    expect(screen.queryByText(/已忽略環境變數/)).not.toBeInTheDocument()
+    act(() =>
+      useStore.setState({
+        claude: {
+          ...useStore.getState().claude!,
+          ignoredEnv: ['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL']
+        }
+      })
+    )
+    rerender(<SettingsScreen />)
+    const account = region('Claude 帳號')
+    expect(
+      within(account).getByText(
+        '已忽略環境變數 ANTHROPIC_API_KEY、ANTHROPIC_BASE_URL，Harness 一律使用 Claude Code 的訂閱登入'
+      )
+    ).toBeInTheDocument()
+  })
+
   test('重新檢查進行中：按鈕保留焦點、標示停用並忽略再次點擊', async () => {
     const gate = deferred()
     replies['claude:status'] = async () => {

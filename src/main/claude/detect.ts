@@ -5,6 +5,33 @@ import type { ClaudeStatus } from '@shared/types'
 export interface ExecOptions {
   /** 逾時毫秒數，逾時會終止整個 process group 並拒絕 */
   timeoutMs?: number
+  /** 子程序的環境變數（預設 process.env） */
+  env?: NodeJS.ProcessEnv
+}
+
+/**
+ * 會讓 Claude Code 改用 API key、其他驗證方式或其他端點的環境變數。Harness 一律使用本機
+ * Claude Code 的訂閱登入：啟動 claude（偵測狀態與每一輪對話）時都拿掉這些變數。
+ */
+export const IGNORED_CLAUDE_ENV = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY'
+] as const
+
+/** 傳給 claude 的環境變數：env 的複本，拿掉 IGNORED_CLAUDE_ENV */
+export function claudeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out = { ...env }
+  for (const k of IGNORED_CLAUDE_ENV) delete out[k]
+  return out
+}
+
+/** env 裡有設定（非空）、會被忽略的變數，設定頁用來說明 */
+export function ignoredClaudeEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return IGNORED_CLAUDE_ENV.filter((k) => !!env[k])
 }
 
 export type Exec = (cmd: string, args: string[], opts?: ExecOptions) => Promise<string>
@@ -13,10 +40,14 @@ export type Exec = (cmd: string, args: string[], opts?: ExecOptions) => Promise<
  * 執行指令並回傳 stdout；非 0 結束時若有 stdout 也回傳（`claude auth status` 未登入時會這樣）。
  * stdin 為空，避免互動式 shell 或指令等待輸入而卡住啟動流程。
  */
-export const execCapture: Exec = (cmd, args, { timeoutMs = 15_000 } = {}) =>
+export const execCapture: Exec = (cmd, args, { timeoutMs = 15_000, env } = {}) =>
   new Promise((resolve, reject) => {
     // detached：自成 process group，逾時可連同孫程序一起終止
-    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+    const child = spawn(cmd, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+      env: env ?? process.env
+    })
     let stdout = ''
     let stderr = ''
     let settled = false
@@ -53,8 +84,22 @@ const shell = () => process.env.SHELL || '/bin/zsh'
 /**
  * 偵測 claude 的路徑、版本與登入狀態。
  * 啟動時必須先執行 applyLoginShellPath 再呼叫這裡：`-lc` 不讀 .zshrc，要靠繼承來的 PATH 才找得到 claude。
+ * 執行 claude 時拿掉 IGNORED_CLAUDE_ENV（與對話時相同），回報的登入狀態才是訂閱登入的狀態。
  */
-export async function detectClaude(exec: Exec, explicitPath?: string): Promise<ClaudeStatus> {
+export async function detectClaude(
+  exec: Exec,
+  explicitPath?: string,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<ClaudeStatus> {
+  const status = await detectWith(exec, explicitPath, claudeEnv(env))
+  return { ...status, ignoredEnv: ignoredClaudeEnv(env) }
+}
+
+async function detectWith(
+  exec: Exec,
+  explicitPath: string | undefined,
+  env: NodeJS.ProcessEnv
+): Promise<ClaudeStatus> {
   let path = explicitPath
   if (!path) {
     try {
@@ -75,8 +120,8 @@ export async function detectClaude(exec: Exec, explicitPath?: string): Promise<C
   let version: string
   let authOut: string
   try {
-    version = (await exec(path, ['--version'])).trim()
-    authOut = await exec(path, ['auth', 'status'])
+    version = (await exec(path, ['--version'], { env })).trim()
+    authOut = await exec(path, ['auth', 'status'], { env })
   } catch (e) {
     return {
       found: true,
