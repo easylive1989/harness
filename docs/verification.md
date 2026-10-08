@@ -63,14 +63,16 @@
 
 ## 未解決／觀察
 
-- **只有報告頁能丟棄任務**（需要設計決定）：狀態機與 `TaskManager.discard` 都支援任何狀態丟棄，但介面上的「丟棄 worktree」只在報告頁（設計稿也只畫在 B5）。釐清、規格或實作中想放棄的任務只能留在側欄。建議在任務標題列（StageNav 旁）加一個「丟棄」動作，沿用報告頁的二次確認。
-- 決策卡片的「問題 N」會打開釐清畫面，但停在時間軸最底部，不會捲到該問題（符合計畫的寫法，可再改進）。
-- 主線重新提問一張還開著的卡片時（例如帶回分岔結論後），卡片留在原本的位置；Claude 說「重新送出第一題」但畫面底部看不到卡片，需要往上捲。
-- 架構圖在預設視窗寬度（1440px）下，3 個並排的節點會超出欄寬，最右邊的節點被裁掉一點（可水平捲動，但 macOS 預設隱藏捲軸）；節點文字縮到約 8px。
-- 分岔從 Claude 訊息開出時，標題取訊息前 24 字（例如「我已經更新第一題，現在等你在介面上選擇：建議改成」），不太像主題。
-- harness 工具的 schema 驗證錯誤（Claude 會自行修正）以紅色「工具錯誤」顯示在時間軸；`propose_spec` 的決策來源沒有「規格回饋／插話」類型，Claude 第一次用了不存在的 type，之後改用 `implementation`。
-- Claude 偶爾用英文寫過場句（「Now update tests to use the new shapes.」），雖然系統提示要求繁體中文。
-- 重新啟動 app 後第一次打開任務時，有一次時間軸停在最上面而不是最底部；之後連續 3 次重現都正常，原因不明。
+Task 37（端對端驗證後的體驗修正）處理了大部分項目；修正以預先寫入的資料啟動建置好的 app 驗證（不呼叫真的 Claude，截圖不進版控）。提示的調整（語言、不重述問題）與 `conclude_branch` 的主題要在下一次真實 Claude 驗證時確認效果。
+
+- ~~只有報告頁能丟棄任務~~ → 已修正：任務標題列（階段切換旁）的「⋯」選單在每個階段都能丟棄（兩段式確認、執行中先停止 Claude、整理報告中不能丟棄，丟棄後回到新任務頁）；已完成的任務只能清除 worktree；報告頁的收尾面板只留開 PR 與合併。`3137f4c` feat(ui): discard a task from any stage、`9813143`（丟棄完成前換了畫面就不拉回新任務頁）
+- ~~決策卡片的「問題 N」停在時間軸最底部~~ → 已修正：報告與規格的「問題 N」（含規格右側的釐清紀錄）切到釐清畫面、捲到那個問題並短暫標示 2 秒（減少動態時不做動畫）。`2c38840` feat(ui): jump to the question from the spec and the report
+- ~~重新提問還開著的卡片留在原本的位置~~ → 已修正：除了回答反問，`ask_user` 一律在時間軸最新的位置放一筆，畫面只畫最後一張。`6dcaaa4` fix(main): move a re-asked question card to the latest position；卡片以問題 id 為 key，搬到新位置時還沒送出的輸入留著：`3d07ce2` fix(ui): keep a re-asked question card's unsent input
+- ~~架構圖在 1440px 下最右邊的節點被裁掉、文字縮到約 8px~~ → 已修正：前後兩欄放不下縮到 0.6 倍的圖時上下排列（1440px：原尺寸；1100px：約 0.68 倍，都不需要水平捲動）。`a5fbe09` fix(ui): stack the architecture diagrams when the column is too narrow；同時修正 1100px 時決策卡片標題被擠成一字一行：`fa21a12` fix(ui): let decision card headers wrap at narrow widths
+- ~~從 Claude 訊息分岔時標題取訊息前 24 字~~ → 已修正：先在分岔面板問「想針對這段討論什麼？」（引用那則訊息），送出才建立分岔，標題是使用者的問題；`conclude_branch` 可以用 `title` 換成 10–20 字的主題。`cb1a4eb` feat(ui): ask what to discuss before branching from a message、`5460fb9` feat: let conclude_branch retitle the branch；手動驗證時另外修正 `b8081cf`（表單裡任何地方按 Esc 都取消）、`1d8c324`（取消後分岔訊息捲回最底）；審閱後修正 `f26e6d6`（從問題卡片換分岔時放棄草稿、建立中不能取消、焦點、換訊息重新開始）、`b7fd28a`（標題太長或空白時截斷／保留原標題，不拒絕整個結論）
+- harness 工具的 schema 驗證錯誤（Claude 會自行修正）仍以紅色「工具錯誤」顯示在時間軸（未處理）。~~`propose_spec` 的決策來源沒有「規格回饋／插話」類型~~ → 已修正：決策來源新增 `user`，介面顯示「你的指示」。`9defffe` feat: add the user decision source、`52a6e60`（摘錄也給螢幕閱讀器）
+- Claude 偶爾用英文寫過場句、在文字裡重述問題（「我已經在介面上送出第一個問題…」）→ 提示已調整（全程繁體中文含過渡語句；問題、選項、規格與報告只放在工具參數裡，不重述、不說已送出），待真實 Claude 驗證。`bc739e7` feat(main): keep narration in Traditional Chinese and stop restating cards
+- 重新啟動 app 後第一次打開任務時，有一次時間軸停在最上面 → 原因仍不明；`useStickToBottom` 改成時間軸從空變成有內容時一定捲到底（不受讀取期間的捲動事件影響）。手動驗證重開 app 時在最底。`8915478` fix(ui): scroll a timeline to the bottom when it first loads
 - 第 16 項（寫入受保護路徑時核准）沒有自然發生，未驗證。
 
 ## 耗時

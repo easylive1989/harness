@@ -56,6 +56,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 - 建立任務時即建立 worktree（`<worktreeRoot>/<repo>/<slug>`，分支 `<prefix><slug>`，從使用者選的 base branch）。原因：Claude Code session 綁定工作目錄，全程使用同一 cwd 才能安全地 resume 與 fork。釐清階段仍為唯讀。
 - 每個任務有一個主線 session（`mainSessionId`）與零到多個分岔 session。
+- 丟棄：任務標題列（階段切換旁）的「⋯」選單在釐清、規格、實作、報告每個階段都能丟棄，兩段式確認；Claude 執行中會先停止（`TaskManager.discard` 中止所有執行），整理報告中不能丟棄；丟棄後回到新任務頁並提示。已完成（開過 PR／合併）的任務只能清除 worktree；已丟棄的任務沒有選單。這是每個畫面唯一的丟棄入口（2026-10-08 端對端驗證後的決定）。
 
 ### 3.2 Agent SDK 使用方式
 
@@ -78,10 +79,10 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 | 工具 | 階段 | 作用 |
 |---|---|---|
-| `ask_user({question_id, question, options[{id,label,description}], recommended_option_id, allow_free_text, context})` | 釐清、實作 | 顯示／更新問題卡片（同一 `question_id` 再呼叫＝更新卡片） |
+| `ask_user({question_id, question, options[{id,label,description}], recommended_option_id, allow_free_text, context})` | 釐清、實作 | 顯示／更新問題卡片（同一 `question_id` 再呼叫＝更新卡片；除了回答反問之外，時間軸會在最新的位置再放一筆，畫面只畫最後一張，使用者在底部就看得到） |
 | `propose_spec({title, summary, in_scope[], out_of_scope[], decisions[{id,text,source}], steps[], acceptance[]})` | 釐清 | 產生／更新規格草稿，任務轉為 `spec_review` |
 | `update_plan({steps[{id,title,status}]})` | 實作 | 更新步驟進度 |
-| `conclude_branch({decision, rationale, deferred[]})` | 分岔 | 產生分岔結論 |
+| `conclude_branch({title?, decision, rationale, deferred[]})` | 分岔 | 產生分岔結論；`title`（要求 10–20 字；只是顯示用，超過 30 字截斷、空白就保留原標題，不會因此拒絕結論）取代分岔的暫定標題 |
 | `submit_report(ReportInput)` | 實作 | 提交報告結構化資料，任務轉為 `reviewing` |
 
 使用者回應以結構化的 user message 送回主線，例如：
@@ -92,6 +93,8 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 - `[report_feedback anchor=diff:src/auth/lockout.ts:13] …`
 
 階段指示（append 到 system prompt）定義這些格式與行為規則：釐清時一次只問一題、一定用 `ask_user`、收到反問要回答後用同一 `question_id` 重新呼叫 `ask_user`；有把握時呼叫 `propose_spec`；實作時依步驟呼叫 `update_plan`；完成時呼叫 `submit_report`。
+
+回覆的寫法（2026-10-08 端對端驗證後加上）：全程繁體中文，包含簡短說明與過渡語句，只有程式碼、識別字、指令、檔案路徑與錯誤訊息保留原文；問題、選項、規格與報告的內容只放在工具參數裡（介面會顯示），不在文字中重述，也不說「我已在介面上送出問題」，需要脈絡時只寫與問題不重複的 1–2 句。決策來源除了 `question`、`branch`、`implementation`，使用者在規格回饋、實作中插話或報告回饋中直接要求而做的決定用 `{type:"user", ref:指示的簡短摘錄}`（介面顯示「你的指示」）。
 
 ### 3.4 權限（PermissionGate）
 
@@ -107,9 +110,9 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 ### 3.5 分岔
 
-1. 使用者在主線任一 Claude 訊息或問題卡片點「分岔」（或卡片「升級成分岔」，會把卡片內的反問一併帶入開場訊息）。
+1. 使用者在主線任一 Claude 訊息或問題卡片點「分岔」（或卡片「升級成分岔」，會把卡片內的反問一併帶入開場訊息，標題是問題文字）。從 Claude 訊息分岔時先在分岔面板問「想針對這段討論什麼？」（上方引用那則訊息，最多 3 行可展開）：使用者送出問題才建立分岔，標題＝問題（去 Markdown，最多 30 字），開場＝「針對以下內容：<引用 600 字>\n\n我的問題：<問題>」；取消就什麼都不建立；輸入框開著時改看別的分岔（例如問題卡片的「查看分岔」）也會放棄。
 2. `query({ resume: mainSessionId, forkSession: true, prompt: <分岔開場> })`，得到分岔 session id。分岔唯讀。
-3. 「帶回主線」：對分岔送 `[conclude]`，Claude 呼叫 `conclude_branch`；使用者在預覽中確認後，app 將 `[branch_conclusion …]` 送入主線，並在主線顯示「◆ 決策」訊息。
+3. 「帶回主線」：對分岔送 `[conclude]`，Claude 呼叫 `conclude_branch`（附 10–20 字的主題 `title`，取代暫定標題）；使用者在預覽中確認後，app 將 `[branch_conclusion …]` 送入主線，並在主線顯示「◆ 決策」訊息。
 4. 分岔進行時主線可繼續；分岔只開一層。
 
 ### 3.6 報告
@@ -118,7 +121,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 - `overview: { headline, summary }`
 - `tests[{ id, file, name, kind:'unit'|'integration'|'e2e'|'other', change:'added'|'modified', scenario, why?, line? }]`、`tests_note?`：本次新增或修改的每個測試與情境（白話：在什麼情況下 → 做什麼 → 預期什麼），修改既有測試時 `why` 說明原因；只有在沒有新增也沒有修改任何測試時 `tests` 才留空，沒有新增測試時以 `tests_note` 說明原因（修改的測試仍要列出）。報告最優先呈現這一段（2026-10-08 使用者要求）。沒有這些欄位的舊報告照樣解析，讀取時補 `tests: []`。
 - `architecture: { before: Graph, after: Graph }`，`Graph = { nodes[{id,label,status:'added'|'modified'|'unchanged',files[]}], edges[{from,to,label?}] }`
-- `decisions[{ id, title, chosen, rejected[], rationale, source: {type:'question'|'branch'|'implementation', ref} }]`
+- `decisions[{ id, title, chosen, rejected[], rationale, source: {type:'question'|'branch'|'implementation'|'user', ref} }]`（`user`：使用者在規格回饋、插話或報告回饋中直接給的指示，`ref` 是摘錄）
 - `limitations[{ title, detail, severity }]`、`followups[{ title, detail }]`
 - `file_notes[{ path, hunks?: [{ line_start, line_end, why }], why }]`
 - `verification[{ command }]`
@@ -131,7 +134,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 - 測試檔偵測（`src/shared/testFiles.ts`，報告與 PR 內文共用）：原始碼檔案（ts/tsx/js/jsx/mjs/cjs/py/rb/go/rs/java/kt/swift/php/cs），檔名是 `*.test.*`、`*.spec.*`、`*.cy.*`、`*_test.*`、`test_*.py`、`*_spec.rb`、`*Test(s).java|kt`，或在 `tests/`、`test/`、`__tests__/`、`spec/`、`Tests/` 底下；排除 `fixtures?/`、`__snapshots__/`、`__mocks__/`、`testdata/`、`.snap` 與測試資料夾裡的輔助檔（helper、setup、util、conftest）。Claude 給的路徑去掉 worktree 前綴後對不到時以結尾比對（絕對路徑、`/var` 與 `/private/var`）。Claude 沒在 `tests` 說明的標「未說明」
 
 呈現：
-- Renderer 用 React 元件渲染固定骨架，順序：概觀（變更檔案、行數、新增測試、驗證、決策五格數據）→ 新增的測試 → 架構前後對照 → 決策 → 自訂區塊 → 限制與後續 → 程式碼變更 → 測試結果；架構圖以前後兩欄自動分層排版。
+- Renderer 用 React 元件渲染固定骨架，順序：概觀（變更檔案、行數、新增測試、驗證、決策五格數據）→ 新增的測試 → 架構前後對照 → 決策 → 自訂區塊 → 限制與後續 → 程式碼變更 → 測試結果；架構圖自動分層排版，前後兩欄並排放得下縮到 0.6 倍的圖時並排，放不下就上下排列（只用 CSS，匯出檔也一樣）。決策與規格的「問題 N」點了切到釐清畫面並捲到那個問題、短暫標示（2 秒，減少動態時不做動畫）。
 - 「新增的測試」：每個測試列出名稱（標題）、檔案、類型、新增／修改、情境、修改原因與驗證結果。驗證結果不捏造逐個測試的結果：輸出以路徑或空白為邊界提到該測試檔的指令顯示該指令的結果；沒有的話顯示看起來是跑測試的指令（test、vitest、jest、pytest、go test、cargo test、rspec、playwright、cypress、mocha）的結果；都沒有時只給整體的「x / y 通過」（中性樣式）並連到測試結果。點測試跳到 diff 中的測試檔（有行號時到那一行），焦點也移過去。沒有新增測試時以警示樣式顯示「這次沒有新增測試」與原因（diff 裡其實有新的測試檔時改說「Claude 沒有說明新增的測試」）；未說明的測試檔列在區塊最後，概觀的「新增測試」旁也標出「未說明 N」。
 - `custom_blocks` 以 `<iframe sandbox="allow-scripts" srcdoc>` 呈現，附 CSP（禁止網路），不給 same-origin。
 - 回饋錨點：區塊（`section:<id>`，新增的測試為 `section:tests`）、測試（`test:<id>`）、決策（`decision:<id>`）、自訂區塊（`block:<id>`）、整個檔案（`file:<path>`）、diff 行（`diff:<path>:<line>`）。送出回饋 → 任務回到 `implementing`，完成後產生 v2；舊版本保留可切換。
@@ -141,7 +144,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 - 開 PR：`git push -u origin <branch>` 後 `gh pr create`（標題＝規格標題，內文＝報告摘要、新增的測試與情境、決策、限制、後續工作與驗證結果；沒有說明新增的測試但 diff 裡有新增的測試檔時寫「Claude 沒有說明新增的測試：…」，不說沒有新增；Claude 給的文字壓成一行、code span 跳脫反引號）。
 - 合併：在原 repo 檢查工作目錄乾淨且位於 base branch，`git merge --no-ff <branch>`；失敗（衝突／不乾淨）顯示原因並中止。
-- 丟棄：`git worktree remove --force` ＋刪除分支（需確認）。
+- 丟棄：`git worktree remove --force` ＋刪除分支（需確認；任何階段都可以，入口是標題列的「⋯」選單，見 §3.1）。
 
 ### 3.8 儲存
 
@@ -160,7 +163,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 2. 釐清對話：主線訊息、已答問題摘要列、決策訊息、問題卡片（選項、反問串、升級分岔、確認答案）、右側分岔面板
 3. 規格核准：規格草稿、決策來源標籤、要求修改／核准；右側釐清紀錄
 4. 實作進度：進度條、步驟清單、工具呼叫明細、插話與停止、指令核准對話框；右側變更檔案、允許清單、worktree
-5. 變更報告：概觀數據、架構前後、決策卡、自訂視覺化區塊、限制與後續、diff＋為什麼、測試結果；右側回饋彙整與收尾按鈕
+5. 變更報告：概觀數據、架構前後、決策卡、自訂視覺化區塊、限制與後續、diff＋為什麼、測試結果；右側回饋彙整與收尾按鈕（開 PR／合併；丟棄在標題列的「⋯」選單，每個畫面都有）
 6. 設定：Claude Code 偵測與登入狀態、預設模型、權限與允許清單、worktree 位置與分支前綴、載入專案設定
 
 ## 5. 錯誤處理
