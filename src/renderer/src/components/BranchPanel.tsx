@@ -95,15 +95,15 @@ function NewBranchForm({ draft, blocked }: { draft: BranchDraft; blocked: boolea
     if (!q || blocked || draft.pending) return
     draft.onSubmit(q)
   }
-  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    blockImeSubmit(e)
-    // 選字中的 Esc 是取消組字，不是取消開分岔
+  // 表單裡任何地方（輸入框、展開全文）按 Esc 都取消；選字中的 Esc 是取消組字，不是取消開分岔
+  const onKeyDown = (e: KeyboardEvent<HTMLFormElement>) => {
     if (e.key === 'Escape' && !isComposing(e)) draft.onCancel()
   }
   return (
     <form
       aria-label="新分岔"
       onSubmit={submit}
+      onKeyDown={onKeyDown}
       className="flex flex-col gap-3 px-5 pt-1 pb-5 text-[13px]"
     >
       <span className="text-xs font-medium text-brand">新分岔 · 引用的訊息</span>
@@ -114,7 +114,7 @@ function NewBranchForm({ draft, blocked }: { draft: BranchDraft; blocked: boolea
           ref={inputRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKeyDown}
+          onKeyDown={blockImeSubmit}
           placeholder="例如：為什麼建議 429 而不是 423？"
           className={inputClass}
         />

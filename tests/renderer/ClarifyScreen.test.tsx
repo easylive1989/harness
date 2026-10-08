@@ -69,6 +69,11 @@ test('從訊息分岔：取消（按鈕或 Esc）不建立分岔', async () => {
   await userEvent.click(screen.getByRole('button', { name: '從這則訊息分岔' }))
   await userEvent.type(topicInput(), '{Escape}')
   expect(screen.queryByRole('form', { name: '新分岔' })).not.toBeInTheDocument()
+  // 焦點在表單的其他地方（例如按了取消旁邊的按鈕）時 Esc 也取消
+  await userEvent.click(screen.getByRole('button', { name: '從這則訊息分岔' }))
+  within(newBranchForm()).getByRole('button', { name: '取消' }).focus()
+  await userEvent.keyboard('{Escape}')
+  expect(screen.queryByRole('form', { name: '新分岔' })).not.toBeInTheDocument()
   expect(call).not.toHaveBeenCalled()
 })
 
