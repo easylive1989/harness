@@ -181,6 +181,21 @@ describe('store.init / open / act', () => {
   })
 })
 
+describe('store.open：設定頁的返回目標', () => {
+  test('打開設定時記住原本的畫面；在設定頁裡再打開設定不覆蓋', async () => {
+    vi.mocked(call).mockResolvedValue([])
+    useStore.setState({ settingsReturn: undefined })
+    await useStore.getState().open({ kind: 'task', taskId: 'a' })
+    await useStore.getState().open({ kind: 'settings' })
+    expect(useStore.getState().settingsReturn).toEqual({ kind: 'task', taskId: 'a' })
+    await useStore.getState().open({ kind: 'settings' })
+    expect(useStore.getState().settingsReturn).toEqual({ kind: 'task', taskId: 'a' })
+    await useStore.getState().open({ kind: 'new' })
+    await useStore.getState().open({ kind: 'settings' })
+    expect(useStore.getState().settingsReturn).toEqual({ kind: 'new' })
+  })
+})
+
 describe('store.recheckClaude（視窗取得焦點時）', () => {
   const focus = () => window.dispatchEvent(new Event('focus'))
   const statusCalls = () =>

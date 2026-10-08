@@ -14,6 +14,8 @@ export interface State {
   tasks: Record<string, Task>
   timelines: Record<string, TimelineEvent[]>
   view: View
+  /** 打開設定前的畫面：設定頁的「返回」回到這裡 */
+  settingsReturn?: View
   activeBranch: Record<string, string | undefined>
   feedback: Record<string, FeedbackItem[]>
   /** id 每次遞增：同樣的錯誤再出現一次也會重新計時 */
@@ -126,7 +128,12 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async open(view) {
-    set({ view })
+    const prev = get().view
+    set(
+      view.kind === 'settings' && prev.kind !== 'settings'
+        ? { view, settingsReturn: prev }
+        : { view }
+    )
     if (view.kind !== 'task') return
     const id = view.taskId
     if (get().timelines[id] || loadingTimelines.has(id)) return

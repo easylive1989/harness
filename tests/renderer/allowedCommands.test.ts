@@ -20,10 +20,26 @@ describe('checkNewPattern', () => {
     (c) => expect(checkNewPattern(c, existing).error).toMatch('一律需要核准')
   )
 
-  test.each(['npm *', 'git *', 'rm *'])('只有一個字加上 * 的「%s」提醒範圍很廣', (c) => {
+  test.each(['npm *', 'git *', 'make *'])('只有一個字加上 * 的「%s」提醒範圍很廣', (c) => {
     const r = checkNewPattern(c, existing)
     expect(r.error).toBeUndefined()
     expect(r.warning).toBe(`「${c}」會允許所有 ${c.slice(0, -2)} 開頭的指令，範圍很廣`)
+  })
+
+  test.each([
+    ['rm *', '刪除任何檔案'],
+    ['rm -rf *', '刪除任何檔案'],
+    ['git push *', '推送到遠端'],
+    ['git diff *', '--output'],
+    ['git log *', '--output'],
+    ['curl *', '網路'],
+    ['sudo *', '管理員權限'],
+    ['sudo  npm   test *', '管理員權限']
+  ])('已知危險的「%s」說明原因，仍可加入', (c, reason) => {
+    const r = checkNewPattern(c, existing)
+    expect(r.error).toBeUndefined()
+    expect(r.warning).toContain(reason)
+    expect(r.warning).toContain(`「${r.pattern}」`)
   })
 
   test('* 不在結尾時提醒會當成一般字元', () => {

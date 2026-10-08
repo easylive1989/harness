@@ -1543,7 +1543,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 10：Repository（設定、repo、任務、時間軸、報告的存取）
 
 **Files:**
-- Create: `src/main/store/repository.ts`
+- Create: `src/main/store/repository.ts`（設定的讀寫依序進行並快取：`updateSettings` 合併寫入、`cachedSettings()` 同步取得最近一次的設定）
 - Create: `tests/fixtures/task.ts`
 - Test: `tests/main/repository.test.ts`
 
@@ -1608,6 +1608,50 @@ describe('Repository', () => {
     expect(s.alwaysAllowedCommands).toEqual(['git status', 'git diff', 'git log', 'ls', 'ls *'])
     await repo.saveSettings({ ...s, branchPrefix: 'x/' })
     expect((await repo.getSettings()).branchPrefix).toBe('x/')
+  })
+
+  test('updateSettings 依序合併：同時更新不同欄位都會保留', async () => {
+    const [a, b] = await Promise.all([
+      repo.updateSettings({ branchPrefix: 'a/' }),
+      repo.updateSettings({ loadProjectSettings: false })
+    ])
+    expect(a.branchPrefix).toBe('a/')
+    expect(b).toMatchObject({ branchPrefix: 'a/', loadProjectSettings: false })
+    expect(await repo.getSettings()).toMatchObject({
+      branchPrefix: 'a/',
+      loadProjectSettings: false
+    })
+  })
+
+  test('讀取排在進行中的更新之後，不會讀到舊值', async () => {
+    const [, read] = await Promise.all([
+      repo.updateSettings({ branchPrefix: 'a/' }),
+      repo.getSettings()
+    ])
+    expect(read.branchPrefix).toBe('a/')
+  })
+
+  test('cachedSettings：尚未讀取時是預設值，之後是最近一次讀取或寫入的設定', async () => {
+    expect(repo.cachedSettings().branchPrefix).toBe('harness/')
+    await writeFile(join(root, 'settings.json'), JSON.stringify({ branchPrefix: 'disk/' }))
+    await repo.getSettings()
+    expect(repo.cachedSettings().branchPrefix).toBe('disk/')
+    await repo.updateSettings({ alwaysAllowedCommands: ['npm test'] })
+    expect(repo.cachedSettings()).toMatchObject({
+      branchPrefix: 'disk/',
+      alwaysAllowedCommands: ['npm test']
+    })
+  })
+
+  test('寫入失敗時快取維持原值，之後的更新照常進行', async () => {
+    const store = new Store(root)
+    const failing = new Repository(store, '/Users/me')
+    await failing.getSettings()
+    const write = vi.spyOn(store, 'writeJson').mockRejectedValueOnce(new Error('disk full'))
+    await expect(failing.updateSettings({ branchPrefix: 'x/' })).rejects.toThrow('disk full')
+    expect(failing.cachedSettings().branchPrefix).toBe('harness/')
+    write.mockRestore()
+    expect((await failing.updateSettings({ branchPrefix: 'y/' })).branchPrefix).toBe('y/')
   })
 
   test('任務依建立時間新到舊排序', async () => {
@@ -1682,19 +1726,56 @@ export const defaultSettings = (home: string): Settings => ({
 })
 
 export class Repository {
+  /** 設定的讀寫依序進行：「讀取 → 合併 → 寫入」之間不會插進另一個寫入 */
+  private settingsLock: Promise<unknown> = Promise.resolve()
+  /** 最近一次讀取或寫入的設定 */
+  private settings?: Settings
+
   constructor(
     private store: Store,
     private home: string
   ) {}
 
-  async getSettings(): Promise<Settings> {
-    return {
+  private withSettingsLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.settingsLock.then(fn)
+    this.settingsLock = run.catch(() => undefined)
+    return run
+  }
+
+  private async readSettings(): Promise<Settings> {
+    const s = {
       ...defaultSettings(this.home),
       ...(await this.store.readJson<Partial<Settings>>('settings.json', {}))
     }
+    this.settings = s
+    return s
+  }
+
+  private async writeSettings(s: Settings) {
+    await this.store.writeJson('settings.json', s)
+    this.settings = s
+  }
+
+  getSettings(): Promise<Settings> {
+    return this.withSettingsLock(() => this.readSettings())
   }
   saveSettings(s: Settings) {
-    return this.store.writeJson('settings.json', s)
+    return this.withSettingsLock(() => this.writeSettings(s))
+  }
+  /** 讀出目前的設定、合併 patch 後寫回；同時呼叫也不會互相蓋掉欄位 */
+  updateSettings(patch: Partial<Settings>): Promise<Settings> {
+    return this.withSettingsLock(async () => {
+      const next = { ...(await this.readSettings()), ...patch }
+      await this.writeSettings(next)
+      return next
+    })
+  }
+  /**
+   * 同步取得最近一次讀取或寫入的設定（尚未讀取時是預設值）。
+   * 給執行中的權限判斷用：設定頁移除允許的指令後，進行中的對話輪也立即適用。
+   */
+  cachedSettings(): Settings {
+    return this.settings ?? defaultSettings(this.home)
   }
 
   listRepos() {
@@ -3389,15 +3470,17 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 16：偵測 Claude Code 與登入狀態、修正 PATH
 
 **Files:**
-- Create: `src/main/claude/detect.ts`
+- Create: `src/main/claude/detect.ts`（含 `createClaudeStatusCache`：只採用最後開始的那次偵測）
 - Test: `tests/main/detect.test.ts`
 
 **Step 1: 寫失敗測試**
 
 ```ts
 import { afterEach, describe, expect, test } from 'vitest'
+import type { ClaudeStatus } from '@shared/types'
 import {
   applyLoginShellPath,
+  createClaudeStatusCache,
   detectClaude,
   execCapture,
   type Exec
@@ -3558,6 +3641,45 @@ describe('applyLoginShellPath', () => {
     expect(process.env.PATH).toBe('/keep')
   })
 })
+
+describe('createClaudeStatusCache', () => {
+  const status = (path: string): ClaudeStatus => ({ found: true, loggedIn: true, path })
+  const deferred = () => {
+    let resolve!: (s: ClaudeStatus) => void
+    const promise = new Promise<ClaudeStatus>((r) => (resolve = r))
+    return { promise, resolve }
+  }
+
+  test('不重新偵測時回傳快取；重新偵測後更新快取', async () => {
+    const cache = createClaudeStatusCache(async () => status('/new'), status('/old'))
+    expect(await cache.status()).toEqual(status('/old'))
+    expect(await cache.status(true)).toEqual(status('/new'))
+    expect(cache.current().path).toBe('/new')
+  })
+
+  test('較早開始、較晚結束的偵測不會蓋掉較新的結果', async () => {
+    const first = deferred()
+    const second = deferred()
+    const pending = [first, second]
+    const cache = createClaudeStatusCache(() => pending.shift()!.promise, status('/initial'))
+    const older = cache.status(true)
+    const newer = cache.status(true)
+    second.resolve(status('/second'))
+    expect(await newer).toEqual(status('/second'))
+    first.resolve(status('/first'))
+    // 較舊的呼叫拿到的是目前的快取（較新的結果）
+    expect(await older).toEqual(status('/second'))
+    expect(cache.current().path).toBe('/second')
+  })
+
+  test('偵測失敗時保留原本的快取', async () => {
+    const cache = createClaudeStatusCache(async () => {
+      throw new Error('boom')
+    }, status('/old'))
+    await expect(cache.status(true)).rejects.toThrow('boom')
+    expect(cache.current().path).toBe('/old')
+  })
+})
 ```
 
 **Step 2: 確認失敗**
@@ -3674,6 +3796,29 @@ export async function detectClaude(exec: Exec, explicitPath?: string): Promise<C
     subscriptionType: auth.subscriptionType,
     email: auth.email,
     error: loggedIn ? undefined : '尚未登入，請在終端機執行 claude 並完成登入。'
+  }
+}
+
+/**
+ * 快取的 Claude Code 狀態。`status(true)` 重新偵測；同時有多次偵測時只有最後開始的那次會更新快取
+ * （較早開始、較晚結束的偵測不會蓋掉較新的結果），每次呼叫都回傳當下的快取。
+ */
+export function createClaudeStatusCache(
+  detect: () => Promise<ClaudeStatus>,
+  initial: ClaudeStatus
+) {
+  let cached = initial
+  let generation = 0
+  return {
+    current: () => cached,
+    async status(refresh = false): Promise<ClaudeStatus> {
+      if (refresh) {
+        const mine = ++generation
+        const next = await detect()
+        if (mine === generation) cached = next
+      }
+      return cached
+    }
   }
 }
 
@@ -5856,8 +6001,9 @@ export class TaskManager {
     const gateCtx: GateContext = {
       getPhase: () => (branch ? 'branch' : phaseOf(this.task(taskId).status)),
       worktreePath: t.worktreePath,
+      // 每次判斷都讀目前的設定：設定頁移除允許的指令後，進行中的這一輪也立即適用
       getAllowedPatterns: () => [
-        ...settings.alwaysAllowedCommands,
+        ...this.d.repo.cachedSettings().alwaysAllowedCommands,
         ...this.task(taskId).allowedCommands
       ],
       requestApproval: (req, signal) =>
@@ -6558,6 +6704,33 @@ describe('TaskManager：規格與實作', () => {
     })
     expect(tm.get(id).pendingPermission).toBeUndefined()
     await expect(tm.resolvePermission(id, req.id, { allow: true })).rejects.toThrow('失效')
+  })
+
+  test('永遠允許的指令以目前的設定判斷：執行中移除樣式後，下一個指令就要核准', async () => {
+    const { tm, claude, repo, create } = await setup()
+    await repo.updateSettings({ alwaysAllowedCommands: ['npm test'] })
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+    }
+    const id = await create()
+    const results: (PermissionResult | null)[] = []
+    let proceed!: () => void
+    const removed = new Promise<void>((r) => (proceed = r))
+    claude.script = async ({ options }) => {
+      results.push(await options.canUseTool!('Bash', { command: 'npm test' }, signalOf()))
+      await removed
+      results.push(await options.canUseTool!('Bash', { command: 'npm test' }, signalOf()))
+    }
+    await tm.approveSpec(id)
+    await until(() => results.length === 1)
+    expect(results[0]?.behavior).toBe('allow')
+    expect(tm.get(id).pendingPermission).toBeUndefined()
+    await repo.updateSettings({ alwaysAllowedCommands: [] })
+    proceed()
+    await until(() => !!tm.get(id).pendingPermission)
+    await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: false })
+    await tm.whenIdle(id)
+    expect(results.map((r) => r?.behavior)).toEqual(['allow', 'deny'])
   })
 
   test('同時有多個核准請求時依序顯示', async () => {
@@ -7732,7 +7905,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 設計重點：
 - renderer 傳進來的任務／repo id 在 IPC 邊界先檢查格式（`/^[A-Za-z0-9_-]{1,64}$/`），再交給會組出 Store 路徑的模組（Store 本身也擋路徑穿越）。報告版本必須是正整數，channel 只能是 `main` 或 `branch:<id>`；文字參數（訊息、需求、base branch、問題／分岔／核准請求 id）必須是非空白字串並有長度上限，model 必須是支援的模型。
-- `settings:set` 只保留已知欄位並逐欄檢查型別（worktree 位置必須是絕對路徑、claudePath 空字串代表自動偵測）。
+- `settings:set` 只保留已知欄位並逐欄檢查型別：worktree 位置去掉前後空白、必須是絕對路徑並以 `path.resolve` 正規化；分支前綴去掉前後空白，`${前綴}x` 必須符合 git 分支名稱規則（純 JS 的 `isValidBranchName`，錯誤「分支前綴不符合 git 分支名稱規則」）；允許清單去掉前後空白與重複；claudePath 空字串代表自動偵測。合併寫入用 `Repository.updateSettings`（設定的讀寫依序進行，同時呼叫不會互相蓋掉欄位），重新偵測 Claude Code 在鎖外進行。
+- Claude Code 狀態用 `createClaudeStatusCache`（Task 16）：同時有多次重新偵測時只有最後開始的那次會更新快取。
 - 只接受主視窗 main frame 送來的 IPC（`e.senderFrame === win.webContents.mainFrame`）；session 的權限請求與檢查一律拒絕。
 - `shell:showInFolder` 只能打開已加入的 repo 或任務 worktree 裡的路徑；`report:saveHtml` 的預設路徑只取檔名。
 - 啟動失敗（例如資料夾無法讀取）時顯示錯誤對話框並結束。
@@ -7756,6 +7930,7 @@ import {
   ensureClaudeReady,
   isPathInside,
   isSafeId,
+  isValidBranchName,
   validateSettingsPatch
 } from '../../src/main/ipcGuards'
 
@@ -7809,6 +7984,47 @@ describe('validateSettingsPatch', () => {
     })
   })
 
+  test('worktree 位置去掉前後空白並正規化；分支前綴去掉前後空白；允許清單去掉重複', () => {
+    expect(validateSettingsPatch({ worktreeRoot: '  /tmp/a/../wt/ ' })).toEqual({
+      worktreeRoot: '/tmp/wt'
+    })
+    expect(validateSettingsPatch({ branchPrefix: ' feat/ ' })).toEqual({ branchPrefix: 'feat/' })
+    expect(
+      validateSettingsPatch({ alwaysAllowedCommands: ['ls', ' ls ', 'npm test', 'ls'] })
+    ).toEqual({ alwaysAllowedCommands: ['ls', 'npm test'] })
+  })
+
+  test.each(['harness/', 'feat-', 'me/wip/', 'a.b/', 'x', 'x.', 'user@host/'])(
+    '接受分支前綴 %s',
+    (prefix) =>
+      expect(validateSettingsPatch({ branchPrefix: prefix })).toEqual({ branchPrefix: prefix })
+  )
+
+  test.each([
+    'has space/',
+    'tab\t/',
+    'ctrl\u0001',
+    'a~b',
+    'a^b',
+    'a:b',
+    'a?b',
+    'a*b',
+    'a[b',
+    'a\\b',
+    'a..b',
+    'a@{b',
+    'a//',
+    '-x',
+    '/x',
+    '.hidden/',
+    'x/.y',
+    'x.lock/'
+  ])('拒絕不符合 git 分支名稱規則的前綴 %j', (prefix) => {
+    expect(() => validateSettingsPatch({ branchPrefix: prefix })).toThrow(
+      '分支前綴不符合 git 分支名稱規則'
+    )
+  })
+
   test('claudePath 空字串或 undefined 代表自動偵測', () => {
     expect(validateSettingsPatch({ claudePath: '  ' })).toEqual({ claudePath: undefined })
     expect(validateSettingsPatch({ claudePath: undefined })).toEqual({ claudePath: undefined })
@@ -7829,6 +8045,16 @@ describe('validateSettingsPatch', () => {
   ])('拒絕 %j', (patch, msg) => {
     expect(() => validateSettingsPatch(patch)).toThrow(msg)
   })
+})
+
+describe('isValidBranchName', () => {
+  test.each(['main', 'harness/20261008-ab12cd34', 'feat/a.b', 'v1.2', 'a-b_c'])('接受 %s', (n) =>
+    expect(isValidBranchName(n)).toBe(true)
+  )
+  test.each(['', 'a.', 'a/', 'a.lock', 'a/b.lock', '.a', 'a/.b', 'a b', 'a..b', 'a@{1}', '-a'])(
+    '拒絕 %j',
+    (n) => expect(isValidBranchName(n)).toBe(false)
+  )
 })
 
 describe('assertString', () => {
@@ -7960,7 +8186,21 @@ export function assertModel(value: unknown): ModelId {
 
 const nonEmpty = (v: unknown, what: string) => {
   if (typeof v !== 'string' || !v.trim()) throw new Error(`${what}必須是非空白的文字`)
-  return v
+  return v.trim()
+}
+
+/**
+ * git check-ref-format 的分支名稱規則（純 JS 版，不必執行 git）：不可有空白、控制字元與
+ * ~^:?*[\，不可有 ..、@{、//，不可以 - 或 / 開頭、以 / 或 . 結尾，
+ * 每一段不可以 . 開頭或以 .lock 結尾。
+ */
+export function isValidBranchName(name: string): boolean {
+  if (!name || /[\s~^:?*[\\]/.test(name)) return false
+  // 控制字元（含 DEL）
+  if ([...name].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f)) return false
+  if (name.includes('..') || name.includes('@{') || name.includes('//')) return false
+  if (/^[-/]/.test(name) || /[/.]$/.test(name)) return false
+  return name.split('/').every((part) => !part.startsWith('.') && !part.endsWith('.lock'))
 }
 
 /** 每個已知設定欄位的檢查與整理；未知欄位不寫進 settings.json */
@@ -7972,13 +8212,19 @@ const SETTINGS_VALIDATORS: { [K in keyof Settings]-?: (v: unknown) => Settings[K
   worktreeRoot: (v) => {
     const p = nonEmpty(v, 'worktree 位置')
     if (!isAbsolute(p)) throw new Error('worktree 位置必須是絕對路徑')
-    return p
+    // 去掉 ..、多餘的 / 與結尾的 /
+    return resolve(p)
   },
-  branchPrefix: (v) => nonEmpty(v, '分支前綴'),
+  branchPrefix: (v) => {
+    const prefix = nonEmpty(v, '分支前綴')
+    // 前綴後面會接「日期-代號」，所以檢查接上一個字元之後的名稱
+    if (!isValidBranchName(`${prefix}x`)) throw new Error('分支前綴不符合 git 分支名稱規則')
+    return prefix
+  },
   alwaysAllowedCommands: (v) => {
     if (!Array.isArray(v) || v.some((c) => typeof c !== 'string' || !c.trim()))
       throw new Error('允許清單必須是非空白指令的清單')
-    return v.map((c: string) => c.trim())
+    return [...new Set(v.map((c: string) => c.trim()))]
   },
   loadProjectSettings: (v) => {
     if (typeof v !== 'boolean') throw new Error('載入專案設定必須是開或關')
@@ -8412,8 +8658,8 @@ export function registerIpc(d: IpcDeps) {
     'settings:get': () => d.repo.getSettings(),
     'settings:set': async (raw) => {
       const patch = validateSettingsPatch(raw)
-      const next = { ...(await d.repo.getSettings()), ...patch }
-      await d.repo.saveSettings(next)
+      // 依序合併寫入；重新偵測 Claude Code 在鎖外進行，不擋住其他設定的儲存
+      const next = await d.repo.updateSettings(patch)
       if ('claudePath' in patch) await d.claudeStatus(true)
       return next
     },
@@ -8537,9 +8783,13 @@ import { app, BrowserWindow, dialog, protocol, session, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { APP_EVENT_CHANNEL, type AppEvent } from '@shared/ipc'
-import type { ClaudeStatus } from '@shared/types'
 import type { QueryFn } from './agent/agentRun'
-import { applyLoginShellPath, detectClaude, execCapture } from './claude/detect'
+import {
+  applyLoginShellPath,
+  createClaudeStatusCache,
+  detectClaude,
+  execCapture
+} from './claude/detect'
 import { GitService } from './git/gitService'
 import { registerIpc } from './ipc'
 import { BLOCK_CSP, parseBlockUrl, wrapBlockHtml } from './report/blockHtml'
@@ -8617,11 +8867,10 @@ async function start() {
     app.getPath('home')
   )
   const git = new GitService()
-  let claude: ClaudeStatus = await detectClaude(execCapture, (await repo.getSettings()).claudePath)
-  const claudeStatus = async (refresh?: boolean) => {
-    if (refresh) claude = await detectClaude(execCapture, (await repo.getSettings()).claudePath)
-    return claude
-  }
+  const detect = async () => detectClaude(execCapture, (await repo.getSettings()).claudePath)
+  // 同時有多次重新偵測（重新檢查、改 claude 路徑、視窗取得焦點）時只採用最後開始的那次
+  const claude = createClaudeStatusCache(detect, await detect())
+  const claudeStatus = (refresh?: boolean) => claude.status(refresh)
   const emit = (e: AppEvent) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(APP_EVENT_CHANNEL, e)
   }
@@ -8632,7 +8881,7 @@ async function start() {
     emit,
     queryFn: query as unknown as QueryFn,
     createToolServer: createHarnessServer,
-    getClaudePath: () => claude.path,
+    getClaudePath: () => claude.current().path,
     verify: runVerification
   })
   await tm.init()
@@ -9029,6 +9278,21 @@ describe('store.init / open / act', () => {
   })
 })
 
+describe('store.open：設定頁的返回目標', () => {
+  test('打開設定時記住原本的畫面；在設定頁裡再打開設定不覆蓋', async () => {
+    vi.mocked(call).mockResolvedValue([])
+    useStore.setState({ settingsReturn: undefined })
+    await useStore.getState().open({ kind: 'task', taskId: 'a' })
+    await useStore.getState().open({ kind: 'settings' })
+    expect(useStore.getState().settingsReturn).toEqual({ kind: 'task', taskId: 'a' })
+    await useStore.getState().open({ kind: 'settings' })
+    expect(useStore.getState().settingsReturn).toEqual({ kind: 'task', taskId: 'a' })
+    await useStore.getState().open({ kind: 'new' })
+    await useStore.getState().open({ kind: 'settings' })
+    expect(useStore.getState().settingsReturn).toEqual({ kind: 'new' })
+  })
+})
+
 describe('store.recheckClaude（視窗取得焦點時）', () => {
   const focus = () => window.dispatchEvent(new Event('focus'))
   const statusCalls = () =>
@@ -9159,6 +9423,8 @@ export interface State {
   tasks: Record<string, Task>
   timelines: Record<string, TimelineEvent[]>
   view: View
+  /** 打開設定前的畫面：設定頁的「返回」回到這裡 */
+  settingsReturn?: View
   activeBranch: Record<string, string | undefined>
   feedback: Record<string, FeedbackItem[]>
   /** id 每次遞增：同樣的錯誤再出現一次也會重新計時 */
@@ -9271,7 +9537,12 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async open(view) {
-    set({ view })
+    const prev = get().view
+    set(
+      view.kind === 'settings' && prev.kind !== 'settings'
+        ? { view, settingsReturn: prev }
+        : { view }
+    )
     if (view.kind !== 'task') return
     const id = view.taskId
     if (get().timelines[id] || loadingTimelines.has(id)) return
@@ -18505,19 +18776,24 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Create: `src/shared/commandPattern.ts`（`normalizeCommand`、`hasShellOperators` 從 Task 12 的 `src/main/permissions/commandPattern.ts` 移過來：權限判斷與設定頁的輸入檢查用同一份）
 - Modify: `src/main/permissions/commandPattern.ts`（改用共用的版本，`hasShellOperators` 照樣 re-export，gate／taskManager 不用改）
+- Modify（主程序，完整程式碼已併入各 Task）：`src/main/store/repository.ts`（Task 10：`updateSettings`、`cachedSettings`）、`src/main/claude/detect.ts`（Task 16：`createClaudeStatusCache`）、`src/main/tasks/taskManager.ts`（Task 21：`getAllowedPatterns` 讀即時設定）、`src/main/ipcGuards.ts`／`src/main/ipc.ts`／`src/main/index.ts`（Task 25：分支前綴規則、worktree 路徑正規化、依序寫入、只採用最新的偵測）；測試見各 Task 的 `repository`／`detect`／`taskManager`／`ipcGuards` 測試
+- Modify: `src/renderer/src/store.ts`（Task 26：`settingsReturn`，打開設定時記住原本的畫面）、`tests/renderer/store.test.ts`
 - Create: `src/renderer/src/lib/allowedCommands.ts`
 - Create: `src/renderer/src/screens/SettingsScreen.tsx`
 - Modify: `src/renderer/src/App.tsx`（`view.kind === 'settings'` 時渲染，並隱藏 Sidebar）
 - Test: `tests/renderer/allowedCommands.test.ts`、`tests/renderer/SettingsScreen.test.tsx`
 
 **行為重點：**
-- 版面對照 `docs/design/B6-Settings.dc.html`：設定頁自帶左欄（返回＋四個分類），所以 App 在設定頁不顯示 Sidebar。左欄的分類以 `aria-current="location"` 標示目前區塊：點分類時平滑捲到該區（`scroll-mt-9`）並把焦點移到區塊，以點的分類為準（最後幾區捲不到頂端）；使用者自己捲動（wheel／touch／鍵盤）後改依捲動位置判斷，捲到底時是最後一區。返回回到新任務頁。
-- 設定變更經由 `useSaveSettings` 排隊一次送一個：主程序的 `settings:set` 是「讀取 → 合併 → 寫入」，同時送出兩個會讓後寫入的蓋掉先寫入的欄位。回傳的完整設定寫回 store。
-- 失焦（或 Enter）才儲存的文字欄位（claude 路徑、worktree 位置、分支前綴）：沒有修改就不送；儲存失敗時**保留使用者輸入的內容**，在欄位下方以 `role="alert"` 顯示主程序的錯誤（例如「worktree 位置必須是絕對路徑」「分支前綴必須是非空白的文字」），欄位標 `aria-invalid`；Esc 還原成目前的設定值；儲存中停用欄位。輸入狀態存成 `draft`（`null` 代表顯示目前的設定值），不在 effect 裡同步。
-- claude 路徑留空代表自動偵測（送空字串，主程序存成 undefined）；主程序在 `claudePath` 改變時已重新偵測，renderer 存好後只讀回 `claude:status`（不帶 refresh）。「重新檢查」才帶 `true` 重新偵測。
-- 單選（預設模型）與勾選（載入專案設定）點了就存：儲存中先顯示新值並停用，失敗時回到原值並以 toast 顯示錯誤。
-- 權限區塊的前三列是固定規則（worktree 內讀寫自動允許、修改 `.git`／`.claude`／`.mcp.json` 需要核准、shell 指令需要核准），只顯示「固定」標籤，不是開關。
-- 永遠允許的指令：新增前先正規化空白；空白輸入時「新增」停用；和清單中的樣式相同（忽略空白差異）或含 `` ; & | ` < > $ `` 的樣式不能加入（後者永遠不會生效），錯誤以 `role="alert"` 顯示並保留輸入；只有一個字加上 ` *`（例如 `npm *`、`rm *`）或 `*` 不在結尾時只提醒、仍可加入。清單下方說明比對規則。儲存中停用新增與移除；移除後焦點回到輸入框。
+- 版面對照 `docs/design/B6-Settings.dc.html`：設定頁自帶左欄（返回＋四個分類），所以 App 在設定頁不顯示 Sidebar。「返回」回到打開設定前的畫面（store 的 `settingsReturn`；那個任務已不存在時回到新任務）。
+- 左欄的分類以 `aria-current="location"` 標示目前區塊：點分類時捲到該區（`scroll-mt-9`；偏好減少動態時不用平滑捲動）並把焦點移到區塊（鍵盤操作時顯示焦點框），以點的分類為準（最後幾區捲不到頂端）；使用者自己捲動（滾輪、觸控、鍵盤）或在內容區按下指標後改依捲動位置判斷，捲到底時是最後一區。
+- 設定變更經由 `useSaveSettings` 排隊一次送一個（主程序的 `Repository.updateSettings` 也依序合併寫入）；回傳的完整設定寫回 store。
+- 儲存中不讓控制項失去焦點：按鈕用 `aria-disabled`（外觀同停用）並忽略點擊；單選與勾選儲存中不停用（連點時每次都送，依序處理，畫面顯示最後點選的值）；文字欄位儲存中 `readOnly` ＋ `aria-busy`，按 Enter 直接儲存、焦點留在欄位。新增指令成功後焦點回到輸入框。
+- 失焦（或 Enter）才儲存的文字欄位（claude 路徑、worktree 位置、分支前綴）：沒有修改就不送；儲存失敗時**保留使用者輸入的內容**，在欄位下方以 `role="alert"` 顯示主程序的錯誤（例如「worktree 位置必須是絕對路徑」「分支前綴不符合 git 分支名稱規則」），欄位標 `aria-invalid`，`aria-describedby` 同時指向錯誤與說明；Esc 還原成目前的設定值。輸入狀態存成 `draft`（`null` 代表顯示目前的設定值），不在 effect 裡同步。畫面已卸載（例如儲存途中離開設定頁）才失敗的儲存改用 toast。
+- claude 路徑留空代表自動偵測（送空字串，主程序存成 undefined）；主程序在 `claudePath` 改變時已重新偵測，renderer 存好後只讀回 `claude:status`（不帶 refresh）。「重新檢查」才帶 `true` 重新偵測。還沒有偵測結果時以中性樣式顯示「正在檢查」。
+- 單選（預設模型）與勾選（載入專案設定）點了就存，失敗時回到原值並以 toast 顯示錯誤。
+- 權限區塊的前三列是固定規則（worktree 內讀寫自動允許、修改 `.git`／`.claude`／`.mcp.json` 需要核准、shell 指令需要核准），只顯示「固定」標籤，不是開關。移除允許的指令後，進行中的對話輪也立即適用（TaskManager 讀 `cachedSettings()`）。
+- 永遠允許的指令：新增前先正規化空白；空白輸入時「新增」標示停用；和清單中的樣式相同（忽略空白差異）或含 `` ; & | ` < > $ `` 的樣式不能加入（後者永遠不會生效），錯誤以 `role="alert"` 顯示並保留輸入；已知危險的樣式（`rm *`、`rm -rf *`、`git push *`、`git diff *`、`git log *`、`curl *`、`sudo …`）說明原因、只有一個字加上 ` *`（例如 `npm *`）或 `*` 不在結尾時只提醒，都仍可加入。清單下方說明比對規則。清單以指令字串為 key（主程序存檔時去掉重複）。
+- 分支前綴下方說明分支名稱的樣子（例如 `harness/20261008-1a2b3c4d`）。
 - 設計稿 worktree 位置旁的「選擇…」按鈕需要新的資料夾選擇 IPC，這個 Task 不做（直接輸入絕對路徑）。
 
 **Step 1: 寫失敗測試**
@@ -18545,10 +18821,26 @@ describe('checkNewPattern', () => {
     (c) => expect(checkNewPattern(c, existing).error).toMatch('一律需要核准')
   )
 
-  test.each(['npm *', 'git *', 'rm *'])('只有一個字加上 * 的「%s」提醒範圍很廣', (c) => {
+  test.each(['npm *', 'git *', 'make *'])('只有一個字加上 * 的「%s」提醒範圍很廣', (c) => {
     const r = checkNewPattern(c, existing)
     expect(r.error).toBeUndefined()
     expect(r.warning).toBe(`「${c}」會允許所有 ${c.slice(0, -2)} 開頭的指令，範圍很廣`)
+  })
+
+  test.each([
+    ['rm *', '刪除任何檔案'],
+    ['rm -rf *', '刪除任何檔案'],
+    ['git push *', '推送到遠端'],
+    ['git diff *', '--output'],
+    ['git log *', '--output'],
+    ['curl *', '網路'],
+    ['sudo *', '管理員權限'],
+    ['sudo  npm   test *', '管理員權限']
+  ])('已知危險的「%s」說明原因，仍可加入', (c, reason) => {
+    const r = checkNewPattern(c, existing)
+    expect(r.error).toBeUndefined()
+    expect(r.warning).toContain(reason)
+    expect(r.warning).toContain(`「${r.pattern}」`)
   })
 
   test('* 不在結尾時提醒會當成一般字元', () => {
@@ -18565,9 +18857,9 @@ describe('checkNewPattern', () => {
 
 ```tsx
 // tests/renderer/SettingsScreen.test.tsx
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
   call: vi.fn(),
   onEvent: vi.fn(() => () => {}),
@@ -18578,6 +18870,7 @@ import { call } from '@renderer/api'
 import App from '@renderer/App'
 import { SettingsScreen } from '@renderer/screens/SettingsScreen'
 import { resetStoreInternals, useStore } from '@renderer/store'
+import { makeTask } from '../fixtures/task'
 // 用主程序真正的檢查，錯誤訊息和實際 IPC 回傳的一樣
 import { validateSettingsPatch } from '../../src/main/ipcGuards'
 
@@ -18596,7 +18889,23 @@ const deferred = () => {
   const promise = new Promise<void>((r) => (resolve = r))
   return { promise, resolve }
 }
-const setCalls = () => vi.mocked(call).mock.calls.filter(([ch]) => ch === 'settings:set')
+const callsOf = (channel: string) => vi.mocked(call).mock.calls.filter(([ch]) => ch === channel)
+const setCalls = () => callsOf('settings:set')
+const saveFails = (message = '無法寫入設定檔') => {
+  replies['settings:set'] = () => {
+    throw new Error(message)
+  }
+}
+/** settings:set 等到回傳的 gate 打開才回應；match 可只擋特定的 patch */
+function holdSettingsSet(match: (patch: Partial<Settings>) => boolean = () => true) {
+  const gate = deferred()
+  const save = replies['settings:set']
+  replies['settings:set'] = async (patch: never) => {
+    if (match(patch)) await gate.promise
+    return save(patch)
+  }
+  return gate
+}
 
 beforeEach(() => {
   stored = { ...initial }
@@ -18606,7 +18915,8 @@ beforeEach(() => {
       return stored
     },
     'settings:get': () => stored,
-    'claude:status': () => useStore.getState().claude
+    'claude:status': () => useStore.getState().claude,
+    'tasks:timeline': () => []
   }
   vi.mocked(call).mockReset()
   vi.mocked(call).mockImplementation((async (ch: string, ...args: never[]) =>
@@ -18619,6 +18929,7 @@ beforeEach(() => {
     tasks: {},
     timelines: {},
     view: { kind: 'settings' },
+    settingsReturn: undefined,
     toast: undefined,
     claude: {
       found: true,
@@ -18635,6 +18946,8 @@ beforeEach(() => {
 const region = (name: string) => screen.getByRole('region', { name })
 const addInput = () => screen.getByLabelText('新增指令')
 const addButton = () => screen.getByRole('button', { name: '新增' })
+const radio = (name: RegExp) => screen.getByRole('radio', { name })
+const projectBox = () => screen.getByRole('checkbox', { name: /載入 repo 的 CLAUDE.md/ })
 
 describe('SettingsScreen：Claude 帳號', () => {
   test('顯示登入狀態、路徑、版本與帳號；重新檢查會重新偵測', async () => {
@@ -18652,9 +18965,34 @@ describe('SettingsScreen：Claude 帳號', () => {
     })
     await userEvent.click(within(account).getByRole('button', { name: '重新檢查' }))
     expect(call).toHaveBeenCalledWith('claude:status', true)
-    expect(
-      await within(account).findByText('尚未登入，請在終端機執行 claude 並完成登入。')
-    ).toBeInTheDocument()
+    const error = await within(account).findByText('尚未登入，請在終端機執行 claude 並完成登入。')
+    expect(error).toHaveClass('text-danger')
+  })
+
+  test('重新檢查進行中：按鈕保留焦點、標示停用並忽略再次點擊', async () => {
+    const gate = deferred()
+    replies['claude:status'] = async () => {
+      await gate.promise
+      return useStore.getState().claude
+    }
+    render(<SettingsScreen />)
+    const button = screen.getByRole('button', { name: '重新檢查' })
+    await userEvent.click(button)
+    expect(button).toHaveTextContent('檢查中…')
+    expect(button).toHaveAttribute('aria-disabled', 'true')
+    expect(button).toHaveFocus()
+    await userEvent.click(button)
+    expect(callsOf('claude:status')).toHaveLength(1)
+    await act(async () => gate.resolve())
+    await waitFor(() => expect(button).not.toHaveAttribute('aria-disabled'))
+    expect(button).toHaveTextContent('重新檢查')
+    expect(button).toHaveFocus()
+  })
+
+  test('還沒有偵測結果時以中性樣式顯示「正在檢查」', () => {
+    useStore.setState({ claude: undefined })
+    render(<SettingsScreen />)
+    expect(screen.getByText('正在檢查 Claude Code…')).not.toHaveClass('text-danger')
   })
 
   test('claude 路徑失焦時儲存並讀回偵測結果；清空改回自動偵測', async () => {
@@ -18683,46 +19021,56 @@ describe('SettingsScreen：Claude 帳號', () => {
 })
 
 describe('SettingsScreen：模型與專案設定', () => {
-  test('點選模型即儲存為預設模型', async () => {
+  test('點選模型即儲存；儲存中選項不停用，焦點留在選項上', async () => {
+    const gate = holdSettingsSet()
     render(<SettingsScreen />)
-    expect(screen.getByRole('radio', { name: /Opus 5.5/ })).toBeChecked()
-    await userEvent.click(screen.getByRole('radio', { name: /Sonnet 5.5/ }))
+    expect(radio(/Opus 5.5/)).toBeChecked()
+    await userEvent.click(radio(/Sonnet 5.5/))
     expect(call).toHaveBeenCalledWith('settings:set', { defaultModel: 'claude-sonnet-5-5' })
+    // 儲存中先顯示新的選擇
+    expect(radio(/Sonnet 5.5/)).toBeChecked()
+    expect(radio(/Sonnet 5.5/)).toHaveFocus()
+    expect(radio(/Opus 5.5/)).toBeEnabled()
+    expect(screen.getByRole('radiogroup')).toHaveAttribute('aria-busy', 'true')
+    await act(async () => gate.resolve())
     await waitFor(() =>
       expect(useStore.getState().settings?.defaultModel).toBe('claude-sonnet-5-5')
     )
-    expect(screen.getByRole('radio', { name: /Sonnet 5.5/ })).toBeChecked()
+    expect(radio(/Sonnet 5.5/)).toBeChecked()
+    expect(radio(/Sonnet 5.5/)).toHaveFocus()
+    expect(screen.getByRole('radiogroup')).not.toHaveAttribute('aria-busy')
   })
 
-  test('載入專案設定：勾選即儲存；失敗時回到原值並顯示 toast', async () => {
+  test('模型儲存失敗時回到原值並顯示 toast', async () => {
+    saveFails()
     render(<SettingsScreen />)
-    const box = screen.getByRole('checkbox', { name: /載入 repo 的 CLAUDE.md/ })
+    await userEvent.click(radio(/Sonnet 5.5/))
+    await waitFor(() => expect(useStore.getState().toast?.text).toBe('無法寫入設定檔'))
+    expect(radio(/Opus 5.5/)).toBeChecked()
+    expect(radio(/Sonnet 5.5/)).toHaveFocus()
+  })
+
+  test('載入專案設定：勾選即儲存且保留焦點；失敗時回到原值並顯示 toast', async () => {
+    render(<SettingsScreen />)
+    const box = projectBox()
     expect(box).toBeChecked()
     await userEvent.click(box)
     expect(call).toHaveBeenCalledWith('settings:set', { loadProjectSettings: false })
     await waitFor(() => expect(box).not.toBeChecked())
+    expect(box).toHaveFocus()
 
-    replies['settings:set'] = () => {
-      throw new Error('無法寫入設定檔')
-    }
+    saveFails()
     await userEvent.click(box)
     await waitFor(() => expect(useStore.getState().toast?.text).toBe('無法寫入設定檔'))
     expect(box).not.toBeChecked()
+    expect(box).toHaveFocus()
   })
 
   test('設定變更依序送出：前一個完成前不送下一個', async () => {
-    const gate = deferred()
-    const save = replies['settings:set']
-    replies['settings:set'] = async (patch: never) => {
-      if ('defaultModel' in (patch as object)) await gate.promise
-      return save(patch)
-    }
+    const gate = holdSettingsSet((patch) => 'defaultModel' in patch)
     render(<SettingsScreen />)
-    await userEvent.click(screen.getByRole('radio', { name: /Sonnet 5.5/ }))
-    // 儲存中先顯示新的選擇，並停用選項
-    expect(screen.getByRole('radio', { name: /Sonnet 5.5/ })).toBeChecked()
-    expect(screen.getByRole('radio', { name: /Opus 5.5/ })).toBeDisabled()
-    await userEvent.click(screen.getByRole('checkbox', { name: /載入 repo 的 CLAUDE.md/ }))
+    await userEvent.click(radio(/Sonnet 5.5/))
+    await userEvent.click(projectBox())
     expect(setCalls()).toHaveLength(1)
     await act(async () => gate.resolve())
     await waitFor(() => expect(setCalls()).toHaveLength(2))
@@ -18748,18 +19096,28 @@ describe('SettingsScreen：權限', () => {
     expect(within(perm).getByText(/一律需要核准/)).toBeInTheDocument()
   })
 
-  test('新增指令時正規化空白，成功後清空輸入', async () => {
+  test('新增指令時正規化空白，成功後清空輸入且焦點回到輸入框', async () => {
     render(<SettingsScreen />)
-    expect(addButton()).toBeDisabled()
+    expect(addButton()).toHaveAttribute('aria-disabled', 'true')
     await userEvent.type(addInput(), '   ')
-    expect(addButton()).toBeDisabled()
+    expect(addButton()).toHaveAttribute('aria-disabled', 'true')
+    await userEvent.click(addButton())
+    expect(setCalls()).toHaveLength(0)
     await userEvent.type(addInput(), 'npm   test *')
+    expect(addButton()).not.toHaveAttribute('aria-disabled')
     await userEvent.click(addButton())
     expect(call).toHaveBeenCalledWith('settings:set', {
       alwaysAllowedCommands: ['git status', 'git diff', 'ls *', 'npm test *']
     })
     await waitFor(() => expect(addInput()).toHaveValue(''))
+    expect(addInput()).toHaveFocus()
     expect(screen.getByRole('button', { name: '移除 npm test *' })).toBeInTheDocument()
+
+    // 用 Enter 新增時焦點本來就在輸入框
+    await userEvent.type(addInput(), 'npm run lint{Enter}')
+    await waitFor(() => expect(addInput()).toHaveValue(''))
+    expect(addInput()).toHaveFocus()
+    expect(screen.getByRole('button', { name: '移除 npm run lint' })).toBeInTheDocument()
   })
 
   test('重複或含串接符號的樣式不能加入，錯誤顯示在輸入框下方', async () => {
@@ -18776,11 +19134,14 @@ describe('SettingsScreen：權限', () => {
     expect(setCalls()).toHaveLength(0)
   })
 
-  test('範圍很廣的樣式只提醒，仍可加入', async () => {
+  test('範圍很廣或已知危險的樣式只提醒，仍可加入', async () => {
     render(<SettingsScreen />)
+    await userEvent.type(addInput(), 'git push *')
+    expect(screen.getByText(/「git push \*」會允許把變更推送到遠端/)).toBeInTheDocument()
+    await userEvent.clear(addInput())
     await userEvent.type(addInput(), 'npm *')
     expect(screen.getByText('「npm *」會允許所有 npm 開頭的指令，範圍很廣')).toBeInTheDocument()
-    expect(addButton()).toBeEnabled()
+    expect(addButton()).not.toHaveAttribute('aria-disabled')
     await userEvent.click(addButton())
     expect(call).toHaveBeenCalledWith('settings:set', {
       alwaysAllowedCommands: ['git status', 'git diff', 'ls *', 'npm *']
@@ -18788,24 +19149,35 @@ describe('SettingsScreen：權限', () => {
     await waitFor(() => expect(screen.queryByText(/範圍很廣/)).not.toBeInTheDocument())
   })
 
-  test('移除指令；儲存中停用清單按鈕，完成後焦點回到輸入框', async () => {
-    const gate = deferred()
-    const save = replies['settings:set']
-    replies['settings:set'] = async (patch: never) => {
-      await gate.promise
-      return save(patch)
-    }
+  test('新增時儲存失敗：顯示錯誤並保留輸入', async () => {
+    saveFails()
+    render(<SettingsScreen />)
+    await userEvent.type(addInput(), 'npm test *{Enter}')
+    expect(await screen.findByRole('alert')).toHaveTextContent('無法寫入設定檔')
+    expect(addInput()).toHaveValue('npm test *')
+    expect(addInput()).toHaveFocus()
+    expect(useStore.getState().settings?.alwaysAllowedCommands).toEqual(
+      initial.alwaysAllowedCommands
+    )
+  })
+
+  test('移除指令；儲存中清單按鈕標示停用並忽略點擊，完成後焦點回到輸入框', async () => {
+    const gate = holdSettingsSet()
     render(<SettingsScreen />)
     await userEvent.click(screen.getByRole('button', { name: '移除 ls *' }))
     expect(call).toHaveBeenCalledWith('settings:set', {
       alwaysAllowedCommands: ['git status', 'git diff']
     })
-    expect(screen.getByRole('button', { name: '移除 git status' })).toBeDisabled()
+    const other = screen.getByRole('button', { name: '移除 git status' })
+    expect(other).toHaveAttribute('aria-disabled', 'true')
+    expect(addButton()).toHaveAttribute('aria-disabled', 'true')
+    await userEvent.click(other)
+    expect(setCalls()).toHaveLength(1)
     await act(async () => gate.resolve())
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: '移除 ls *' })).not.toBeInTheDocument()
     )
-    expect(screen.getByRole('button', { name: '移除 git status' })).toBeEnabled()
+    expect(other).not.toHaveAttribute('aria-disabled')
     expect(addInput()).toHaveFocus()
   })
 
@@ -18826,14 +19198,40 @@ describe('SettingsScreen：Worktree 與分支', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('worktree 位置必須是絕對路徑')
     expect(field).toHaveValue('worktrees')
     expect(field).toHaveAttribute('aria-invalid', 'true')
+    // 錯誤與說明都在欄位的描述裡
+    expect(field).toHaveAccessibleDescription(
+      /worktree 位置必須是絕對路徑.*必須是絕對路徑。只影響之後建立的任務/
+    )
     expect(useStore.getState().settings?.worktreeRoot).toBe('/Users/me/.harness/worktrees')
 
     await userEvent.clear(field)
-    await userEvent.type(field, '/tmp/wt{Enter}')
+    await userEvent.type(field, '/tmp/wt/{Enter}')
+    // 主程序正規化路徑（去掉結尾的 /），欄位顯示正規化後的值
     await waitFor(() => expect(useStore.getState().settings?.worktreeRoot).toBe('/tmp/wt'))
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(field).toHaveValue('/tmp/wt')
     expect(field).not.toHaveAttribute('aria-invalid')
+  })
+
+  test('Enter 直接儲存：儲存中欄位唯讀並標示忙碌，焦點留在欄位', async () => {
+    const gate = holdSettingsSet()
+    render(<SettingsScreen />)
+    const field = screen.getByLabelText('Worktree 存放位置')
+    await userEvent.clear(field)
+    await userEvent.type(field, '/tmp/wt{Enter}')
+    expect(setCalls()).toHaveLength(1)
+    expect(field).toHaveFocus()
+    expect(field).toHaveAttribute('readonly')
+    expect(field).toHaveAttribute('aria-busy', 'true')
+    expect(field).toBeEnabled()
+    await act(async () => gate.resolve())
+    await waitFor(() => expect(field).not.toHaveAttribute('readonly'))
+    expect(field).not.toHaveAttribute('aria-busy')
+    expect(field).toHaveFocus()
+    expect(useStore.getState().settings?.worktreeRoot).toBe('/tmp/wt')
+    // 已儲存，之後失焦不再送出
+    await userEvent.tab()
+    expect(setCalls()).toHaveLength(1)
   })
 
   test('Esc 還原成目前的設定值；沒有修改時失焦不儲存', async () => {
@@ -18857,23 +19255,149 @@ describe('SettingsScreen：Worktree 與分支', () => {
     expect(field).toHaveValue('')
     expect(useStore.getState().settings?.branchPrefix).toBe('harness/')
   })
+
+  test('分支前綴不符合 git 分支名稱規則時顯示錯誤；說明顯示分支名稱的樣子', async () => {
+    render(<SettingsScreen />)
+    const field = screen.getByLabelText('分支名稱前綴')
+    expect(field).toHaveAccessibleDescription(/例如 harness\/20261008-1a2b3c4d/)
+    await userEvent.clear(field)
+    await userEvent.type(field, 'my branch/{Enter}')
+    expect(await screen.findByRole('alert')).toHaveTextContent('分支前綴不符合 git 分支名稱規則')
+    expect(field).toHaveValue('my branch/')
+    expect(useStore.getState().settings?.branchPrefix).toBe('harness/')
+  })
+
+  test('離開設定頁後才失敗的儲存改用 toast 告知', async () => {
+    const failLater = () => {
+      const gate = deferred()
+      replies['settings:set'] = async () => {
+        await gate.promise
+        throw new Error('無法寫入設定檔')
+      }
+      return gate
+    }
+    let gate = failLater()
+    const first = render(<SettingsScreen />)
+    await userEvent.type(screen.getByLabelText('分支名稱前綴'), 'x{Enter}')
+    first.unmount()
+    await act(async () => gate.resolve())
+    await waitFor(() => expect(useStore.getState().toast?.text).toBe('無法寫入設定檔'))
+
+    useStore.setState({ toast: undefined })
+    gate = failLater()
+    const second = render(<SettingsScreen />)
+    await userEvent.type(addInput(), 'npm test *{Enter}')
+    second.unmount()
+    await act(async () => gate.resolve())
+    await waitFor(() => expect(useStore.getState().toast?.text).toBe('無法寫入設定檔'))
+  })
 })
 
 describe('SettingsScreen：版面與導覽', () => {
+  const navLink = (name: string) =>
+    within(screen.getByRole('navigation', { name: '設定分類' })).getByRole('link', { name })
+  const current = () =>
+    within(screen.getByRole('navigation', { name: '設定分類' }))
+      .getAllByRole('link')
+      .filter((a) => a.getAttribute('aria-current') === 'location')
+      .map((a) => a.textContent)
+
+  /** jsdom 沒有版面：給捲動區與各區塊固定的位置，回傳「捲到某處並觸發 scroll」 */
+  function mockLayout() {
+    const main = screen.getByRole('main')
+    let top = 0
+    const offsets = { account: 0, model: 400, perm: 700, workspace: 1100 }
+    Object.defineProperties(main, {
+      clientHeight: { configurable: true, value: 600 },
+      scrollHeight: { configurable: true, value: 1400 },
+      scrollTop: { configurable: true, get: () => top, set: (v: number) => (top = v) }
+    })
+    main.getBoundingClientRect = () => ({ top: 0 }) as DOMRect
+    for (const [id, offset] of Object.entries(offsets))
+      document.getElementById(`settings-${id}`)!.getBoundingClientRect = () =>
+        ({ top: offset - top }) as DOMRect
+    return (to: number) => {
+      top = to
+      fireEvent.scroll(main)
+    }
+  }
+
+  afterEach(() => {
+    delete (Element.prototype as Partial<Element>).scrollIntoView
+    delete (window as Partial<Window>).matchMedia
+  })
+
   test('設定頁取代側欄；左欄標示目前分類，返回回到新任務', async () => {
     render(<App />)
     expect(screen.queryByRole('navigation', { name: 'Repo 與任務' })).not.toBeInTheDocument()
-    const nav = screen.getByRole('navigation', { name: '設定分類' })
-    const link = (name: string) => within(nav).getByRole('link', { name })
-    expect(link('Claude 帳號')).toHaveAttribute('aria-current', 'location')
-    await userEvent.click(link('權限'))
-    expect(link('權限')).toHaveAttribute('aria-current', 'location')
-    expect(link('Claude 帳號')).not.toHaveAttribute('aria-current')
+    expect(navLink('Claude 帳號')).toHaveAttribute('aria-current', 'location')
+    await userEvent.click(navLink('權限'))
+    expect(current()).toEqual(['權限'])
     expect(region('實作階段權限')).toHaveFocus()
 
-    await userEvent.click(within(nav).getByRole('button', { name: '返回' }))
+    await userEvent.click(screen.getByRole('button', { name: '返回' }))
     expect(useStore.getState().view).toEqual({ kind: 'new' })
     expect(screen.getByRole('navigation', { name: 'Repo 與任務' })).toBeInTheDocument()
+  })
+
+  test('返回回到打開設定前的畫面；那個任務已不存在時回到新任務', async () => {
+    useStore.setState({
+      tasks: { a: makeTask({ id: 'a' }) },
+      settingsReturn: { kind: 'task', taskId: 'a' }
+    })
+    const { unmount } = render(<SettingsScreen />)
+    await userEvent.click(screen.getByRole('button', { name: '返回' }))
+    expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 'a' })
+    unmount()
+
+    useStore.setState({
+      view: { kind: 'settings' },
+      settingsReturn: { kind: 'task', taskId: 'gone' }
+    })
+    render(<SettingsScreen />)
+    await userEvent.click(screen.getByRole('button', { name: '返回' }))
+    expect(useStore.getState().view).toEqual({ kind: 'new' })
+  })
+
+  test('捲動時標示目前分類；捲到底時是最後一個', () => {
+    render(<SettingsScreen />)
+    const scrollTo = mockLayout()
+    scrollTo(0)
+    expect(current()).toEqual(['Claude 帳號'])
+    scrollTo(250)
+    expect(current()).toEqual(['模型'])
+    scrollTo(520)
+    expect(current()).toEqual(['權限'])
+    scrollTo(800)
+    expect(current()).toEqual(['Worktree 與專案設定'])
+  })
+
+  test('點左欄後以點的分類為準；捲動滑鼠或在內容區按下後改看捲動位置', async () => {
+    render(<SettingsScreen />)
+    const scrollTo = mockLayout()
+    await userEvent.click(navLink('模型'))
+    // 點選觸發的捲動（例如捲到底）不改變標示
+    scrollTo(800)
+    expect(current()).toEqual(['模型'])
+    fireEvent.wheel(screen.getByRole('main'))
+    expect(current()).toEqual(['Worktree 與專案設定'])
+
+    await userEvent.click(navLink('權限'))
+    expect(current()).toEqual(['權限'])
+    fireEvent.pointerDown(screen.getByText('每個任務建立時也可以單獨選擇。'))
+    expect(current()).toEqual(['Worktree 與專案設定'])
+  })
+
+  test('點左欄時平滑捲動；偏好減少動態時直接跳過去', async () => {
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    render(<SettingsScreen />)
+    await userEvent.click(navLink('模型'))
+    expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'smooth', block: 'start' })
+    window.matchMedia = vi.fn(() => ({ matches: true })) as unknown as typeof window.matchMedia
+    await userEvent.click(navLink('權限'))
+    expect(window.matchMedia).toHaveBeenCalledWith('(prefers-reduced-motion: reduce)')
+    expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'auto', block: 'start' })
   })
 
   test('設定沒有載入時可以重新載入', async () => {
@@ -18887,9 +19411,11 @@ describe('SettingsScreen：版面與導覽', () => {
 })
 ```
 
+主程序與 store 的測試見 Task 10／16／23／25／26 的測試區塊（`updateSettings`／`cachedSettings`、`createClaudeStatusCache`、執行中移除允許的指令、分支前綴與 worktree 路徑、`settingsReturn`）。
+
 **Step 2: 確認失敗**
 
-Run: `npx vitest run tests/renderer/allowedCommands.test.ts tests/renderer/SettingsScreen.test.tsx` → FAIL（模組不存在）
+Run: `npx vitest run tests/renderer/allowedCommands.test.ts tests/renderer/SettingsScreen.test.tsx tests/renderer/store.test.ts tests/main/repository.test.ts tests/main/detect.test.ts tests/main/ipcGuards.test.ts tests/main/taskManager.test.ts` → FAIL
 
 **Step 3: 共用的指令正規化與串接判斷**
 
@@ -18929,7 +19455,9 @@ export function suggestPattern(command: string): string {
 }
 ```
 
-**Step 4: lib/allowedCommands.ts**
+**Step 4: 主程序與 store** — 依 Task 10（`repository.ts`）、Task 16（`detect.ts`）、Task 21（`getAllowedPatterns`）、Task 25（`ipcGuards.ts`、`ipc.ts`、`index.ts`）、Task 26（`store.ts`）目前的程式碼修改。
+
+**Step 5: lib/allowedCommands.ts**
 
 ```ts
 // src/renderer/src/lib/allowedCommands.ts
@@ -18941,8 +19469,18 @@ export interface PatternCheck {
   pattern: string
   /** 不能加入的原因 */
   error?: string
-  /** 可以加入，但要提醒使用者的事（範圍很廣、* 不在結尾） */
+  /** 可以加入，但要提醒使用者的事（已知危險、範圍很廣、* 不在結尾） */
   warning?: string
+}
+
+/** 已知會造成破壞或能寫到 worktree 以外的樣式：可以加入，但說明原因 */
+const DANGEROUS: Record<string, string> = {
+  'rm *': '會允許刪除任何檔案',
+  'rm -rf *': '會允許遞迴刪除任何檔案',
+  'git push *': '會允許把變更推送到遠端',
+  'git diff *': '會允許 git diff 帶 --output，把結果寫到 worktree 以外的檔案',
+  'git log *': '會允許 git log 帶 --output，把結果寫到 worktree 以外的檔案',
+  'curl *': '會允許任意網路請求，也能下載或上傳檔案'
 }
 
 export function checkNewPattern(raw: string, existing: string[]): PatternCheck {
@@ -18953,6 +19491,10 @@ export function checkNewPattern(raw: string, existing: string[]): PatternCheck {
   // 含串接或重導的指令一律詢問，這種樣式永遠不會生效
   if (hasShellOperators(pattern))
     return { pattern, error: '含有 ; & | ` < > $ 的指令一律需要核准，加進清單也不會生效' }
+  if (pattern.split(' ')[0] === 'sudo')
+    return { pattern, warning: `「${pattern}」會允許以管理員權限執行指令，請確認真的需要` }
+  if (DANGEROUS[pattern])
+    return { pattern, warning: `「${pattern}」${DANGEROUS[pattern]}，請確認真的需要` }
   const wildcard = pattern.endsWith(' *')
   const prefix = wildcard ? pattern.slice(0, -2) : pattern
   if (prefix.includes('*'))
@@ -18966,7 +19508,7 @@ export function checkNewPattern(raw: string, existing: string[]): PatternCheck {
 }
 ```
 
-**Step 5: SettingsScreen.tsx（對照 `docs/design/B6-Settings.dc.html`）**
+**Step 6: SettingsScreen.tsx（對照 `docs/design/B6-Settings.dc.html`）**
 
 ```tsx
 // src/renderer/src/screens/SettingsScreen.tsx
@@ -18976,6 +19518,7 @@ import {
   type MouseEvent,
   type ReactNode,
   useCallback,
+  useEffect,
   useId,
   useRef,
   useState
@@ -18989,6 +19532,13 @@ import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
 
 type Save = (patch: Partial<Settings>) => Promise<Settings>
+
+/**
+ * 儲存中的按鈕用 aria-disabled 而不是 disabled：停用的按鈕會失去焦點，
+ * 鍵盤使用者會被丟回頁首。外觀與停用相同，點擊由各按鈕自己忽略。
+ */
+const pendingLook = 'aria-disabled:cursor-not-allowed aria-disabled:opacity-50'
+const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
 
 const SECTIONS = [
   { id: 'account', label: 'Claude 帳號' },
@@ -19030,16 +19580,46 @@ function useSaveSettings(): Save {
   }, [])
 }
 
-/** 點一下就生效的選項（單選、勾選）：儲存期間先顯示新值，失敗時回到原值並以 toast 顯示錯誤 */
+/**
+ * 儲存失敗的回報：畫面還在時交給 onError 顯示在欄位旁；
+ * 已經卸載（例如儲存途中離開設定頁）就改用 toast，錯誤才不會無聲消失。
+ */
+function useSaveErrorReporter(onError: (text: string) => void) {
+  const mounted = useRef(false)
+  const showToast = useStore((s) => s.showToast)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+  return (e: unknown) => {
+    const text = errorText(e)
+    if (mounted.current) onError(text)
+    else showToast(text)
+  }
+}
+
+/**
+ * 點一下就生效的選項（單選、勾選）：儲存期間先顯示最後點選的值，失敗時回到原值並以 toast 顯示錯誤。
+ * 儲存中不停用選項（停用會讓焦點消失）；連點時每次都送出，由 useSaveSettings 依序處理。
+ */
 function useInstantSetting<K extends keyof Settings>(key: K, saved: Settings[K], save: Save) {
   const act = useStore((s) => s.act)
-  const [saving, run] = usePending()
-  const [next, setNext] = useState<Settings[K]>(saved)
-  const set = (value: Settings[K]) => {
-    setNext(value)
-    void run(() => act(() => save({ [key]: value } as Partial<Settings>)))
+  // 最後一次點選的值；它的儲存結束（且之後沒有再點）時清掉，改顯示 store 裡的設定
+  const [latest, setLatest] = useState<{ value: Settings[K]; seq: number }>()
+  const seq = useRef(0)
+  const set = async (value: Settings[K]) => {
+    const mine = ++seq.current
+    setLatest({ value, seq: mine })
+    await act(() => save({ [key]: value } as Partial<Settings>))
+    setLatest((l) => (l?.seq === mine ? undefined : l))
   }
-  return { value: saving ? next : saved, saving, set }
+  return {
+    value: latest ? latest.value : saved,
+    saving: !!latest,
+    set: (value: Settings[K]) => void set(value)
+  }
 }
 
 /** 左欄分類對應的區塊；tabIndex 讓點左欄後焦點移到這裡 */
@@ -19049,7 +19629,7 @@ function Section({ id, title, children }: { id: SectionId; title: string; childr
       id={sectionDomId(id)}
       aria-labelledby={sectionTitleId(id)}
       tabIndex={-1}
-      className="flex scroll-mt-9 flex-col gap-3 outline-none"
+      className="flex scroll-mt-9 flex-col gap-3 rounded-lg outline-none focus-visible:shadow-[0_0_0_6px_var(--color-surface),0_0_0_8px_var(--color-brand)]"
     >
       <h2 id={sectionTitleId(id)} className="m-0 text-[15px] font-bold">
         {title}
@@ -19061,7 +19641,7 @@ function Section({ id, title, children }: { id: SectionId; title: string; childr
 
 /**
  * 失焦或按 Enter 時儲存的文字設定。儲存失敗時保留輸入的內容並在下方顯示錯誤，
- * 按 Esc 還原成目前的設定值。
+ * 按 Esc 還原成目前的設定值。儲存中欄位唯讀（不停用，按 Enter 儲存時焦點留在欄位）。
  */
 function TextSetting({
   label,
@@ -19080,6 +19660,7 @@ function TextSetting({
   const [draft, setDraft] = useState<string | null>(null)
   const [error, setError] = useState<string>()
   const [saving, run] = usePending()
+  const report = useSaveErrorReporter(setError)
   const id = useId()
   const commit = async () => {
     if (draft === null) return
@@ -19095,10 +19676,11 @@ function TextSetting({
         setDraft(null)
         setError(undefined)
       } catch (e) {
-        setError(errorText(e))
+        report(e)
       }
     })
   }
+  const describedBy = [error && `${id}-error`, hint && `${id}-hint`].filter(Boolean).join(' ')
   return (
     <div className="flex flex-col gap-1.5 text-[13px]">
       <label htmlFor={id} className="font-medium">
@@ -19110,20 +19692,23 @@ function TextSetting({
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => void commit()}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') e.currentTarget.blur()
-          else if (e.key === 'Escape') {
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            void commit()
+          } else if (e.key === 'Escape' && !saving) {
             setDraft(null)
             setError(undefined)
           }
         }}
-        disabled={saving}
+        readOnly={saving}
+        aria-busy={saving || undefined}
         placeholder={placeholder}
         spellCheck={false}
         aria-invalid={error ? true : undefined}
-        aria-describedby={error ? `${id}-error` : hint ? `${id}-hint` : undefined}
+        aria-describedby={describedBy || undefined}
         className={cx(
           inputClass,
-          'h-10 rounded-[10px] px-3 font-mono text-xs disabled:bg-fill-2',
+          'h-10 rounded-[10px] px-3 font-mono text-xs aria-busy:bg-fill-2 aria-busy:text-muted',
           error && 'border-danger focus:border-danger'
         )}
       />
@@ -19156,11 +19741,14 @@ function AccountSection({
 }) {
   const act = useStore((s) => s.act)
   const [checking, runCheck] = usePending()
-  const ok = !!claude?.loggedIn
-  const recheck = () =>
+  // 還沒有偵測結果時是「檢查中」，用中性樣式，不當成錯誤
+  const state = !claude ? 'checking' : claude.loggedIn ? 'ok' : 'error'
+  const recheck = () => {
+    if (checking) return
     void runCheck(() =>
       act(async () => useStore.setState({ claude: await call('claude:status', true) }))
     )
+  }
   // 主程序在 claudePath 改變時已重新偵測，這裡只需讀回最新狀態
   const saveClaudePath = async (value: string) => {
     await save({ claudePath: value })
@@ -19171,27 +19759,33 @@ function AccountSection({
       <div
         className={cx(
           'flex flex-wrap items-center gap-3.5 rounded-[14px] p-4',
-          ok ? 'bg-brand-tint' : 'bg-danger-soft'
+          { ok: 'bg-brand-tint', checking: 'bg-fill-2', error: 'bg-danger-soft' }[state]
         )}
       >
         <span
           aria-hidden
-          className={cx('size-2.5 flex-none rounded-full', ok ? 'bg-ok' : 'bg-danger')}
+          className={cx(
+            'size-2.5 flex-none rounded-full',
+            { ok: 'bg-ok', checking: 'bg-muted-2', error: 'bg-danger' }[state]
+          )}
         />
         <span role="status" className="flex min-w-0 flex-[1_1_240px] flex-col">
-          <span className={cx('font-medium', !ok && 'text-danger')}>
-            {ok
+          <span className={cx('font-medium', state === 'error' && 'text-danger')}>
+            {state === 'ok'
               ? `已透過 Claude Code 登入 · ${planLabel(claude?.subscriptionType)}`
               : (claude?.error ?? '正在檢查 Claude Code…')}
           </span>
-          <span className={cx('text-xs', ok ? 'text-brand-muted' : 'text-muted')}>
+          <span className={cx('text-xs', state === 'ok' ? 'text-brand-muted' : 'text-muted')}>
             使用本機 Claude Code 的登入憑證，不需要 API key
           </span>
         </span>
         <Button
-          disabled={checking}
+          aria-disabled={checking || undefined}
           onClick={recheck}
-          className="h-[38px] rounded-[10px] bg-surface px-3.5 text-ink hover:bg-fill"
+          className={cx(
+            'h-[38px] rounded-[10px] bg-surface px-3.5 text-ink hover:bg-fill',
+            pendingLook
+          )}
         >
           {checking ? '檢查中…' : '重新檢查'}
         </Button>
@@ -19231,6 +19825,7 @@ function ModelSection({ settings, save }: { settings: Settings; save: Save }) {
       <div
         role="radiogroup"
         aria-labelledby={sectionTitleId('model')}
+        aria-busy={model.saving || undefined}
         className="grid grid-cols-2 gap-2.5"
       >
         {MODELS.map((m) => {
@@ -19247,7 +19842,6 @@ function ModelSection({ settings, save }: { settings: Settings; save: Save }) {
                 type="radio"
                 name="defaultModel"
                 checked={on}
-                disabled={model.saving}
                 onChange={() => model.set(m.id)}
                 className="mt-[5px] accent-brand"
               />
@@ -19285,10 +19879,12 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
   const [input, setInput] = useState('')
   const [error, setError] = useState<string>()
   const [saving, run] = usePending()
+  const report = useSaveErrorReporter(setError)
   const inputRef = useRef<HTMLInputElement>(null)
   const id = useId()
   const check = checkNewPattern(input, list)
   const warning = !error && check.warning
+  const canAdd = !saving && !!check.pattern
 
   const update = (next: string[]) =>
     run(async () => {
@@ -19297,20 +19893,25 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
         setError(undefined)
         return true
       } catch (e) {
-        setError(errorText(e))
+        report(e)
         return false
       }
     })
   const add = async (e: FormEvent) => {
     e.preventDefault()
-    if (!check.pattern) return
+    if (!canAdd) return
     if (check.error) {
       setError(check.error)
       return
     }
-    if (await update([...list, check.pattern])) setInput('')
+    if (await update([...list, check.pattern])) {
+      setInput('')
+      // 按「新增」按鈕時焦點在按鈕上：回到輸入框，方便接著輸入下一個
+      inputRef.current?.focus()
+    }
   }
   const remove = async (c: string) => {
+    if (saving) return
     // 移除的按鈕會消失，把焦點交給輸入框
     if (await update(list.filter((x) => x !== c))) inputRef.current?.focus()
   }
@@ -19322,18 +19923,21 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
       </span>
       {list.length > 0 ? (
         <ul aria-labelledby={`${id}-label`} className="m-0 flex list-none flex-wrap gap-1.5 p-0">
-          {list.map((c, i) => (
+          {list.map((c) => (
             <li
-              key={`${i}:${c}`}
+              key={c}
               className="flex items-center gap-1.5 rounded-full bg-fill py-1 pr-1.5 pl-2.5 font-mono text-xs"
             >
               {c}
               <button
                 type="button"
                 aria-label={`移除 ${c}`}
-                disabled={saving}
+                aria-disabled={saving || undefined}
                 onClick={() => void remove(c)}
-                className="flex size-[22px] cursor-pointer items-center justify-center rounded-full text-muted hover:bg-chip hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                className={cx(
+                  'flex size-[22px] cursor-pointer items-center justify-center rounded-full text-muted hover:bg-chip hover:text-ink',
+                  pendingLook
+                )}
               >
                 <Icons.X width={10} height={10} />
               </button>
@@ -19354,6 +19958,8 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
           }}
           placeholder="例如 npm test *"
           spellCheck={false}
+          readOnly={saving}
+          aria-busy={saving || undefined}
           aria-invalid={error ? true : undefined}
           aria-describedby={[error && `${id}-error`, warning && `${id}-warning`, `${id}-hint`]
             .filter(Boolean)
@@ -19366,8 +19972,8 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
         />
         <Button
           type="submit"
-          disabled={saving || !check.pattern}
-          className="h-[38px] rounded-[10px] px-3.5 text-ink"
+          aria-disabled={!canAdd || undefined}
+          className={cx('h-[38px] rounded-[10px] px-3.5 text-ink', pendingLook)}
         >
           新增
         </Button>
@@ -19434,6 +20040,7 @@ function WorkspaceSection({ settings, save }: { settings: Settings; save: Save }
         label="分支名稱前綴"
         saved={settings.branchPrefix}
         onSave={(v) => save({ branchPrefix: v })}
+        hint={`新任務的分支名稱是前綴加上日期與代號，例如 ${settings.branchPrefix}20261008-1a2b3c4d；需符合 git 分支名稱規則。`}
       />
       <label className="flex cursor-pointer items-center gap-3 rounded-[14px] px-4 py-3.5 shadow-[0_0_0_1px_var(--color-chip)]">
         <span className="flex flex-1 flex-col">
@@ -19445,7 +20052,7 @@ function WorkspaceSection({ settings, save }: { settings: Settings; save: Save }
         <input
           type="checkbox"
           checked={loadProject.value}
-          disabled={loadProject.saving}
+          aria-busy={loadProject.saving || undefined}
           onChange={(e) => loadProject.set(e.target.checked)}
           className="size-[18px] flex-none accent-brand"
         />
@@ -19460,8 +20067,14 @@ export function SettingsScreen() {
   )
   const act = useStore((s) => s.act)
   const open = useStore((s) => s.open)
+  // 返回打開設定前的畫面；那個任務已不存在時回到新任務
+  const back = useStore((s) => {
+    const r = s.settingsReturn
+    return r?.kind === 'task' && !s.tasks[r.taskId] ? undefined : r
+  })
   const save = useSaveSettings()
-  // 目前分類：點左欄時以點的那個為準（目標可能捲不到頂端），使用者自己捲動後改看捲動位置
+  // 目前分類：點左欄時以點的那個為準（目標可能捲不到頂端），
+  // 使用者自己捲動（滾輪、觸控、鍵盤）或在內容區按下指標後改看捲動位置
   const [spied, setSpied] = useState<SectionId>('account')
   const [clicked, setClicked] = useState<SectionId | null>(null)
   const active = clicked ?? spied
@@ -19471,7 +20084,7 @@ export function SettingsScreen() {
     e.preventDefault()
     setClicked(id)
     const el = document.getElementById(sectionDomId(id))
-    el?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+    el?.scrollIntoView?.({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' })
     el?.focus({ preventScroll: true })
   }
   const reload = () =>
@@ -19482,7 +20095,7 @@ export function SettingsScreen() {
       <nav aria-label="設定分類" className="flex w-[236px] flex-none flex-col gap-1 px-1.5 py-2">
         <button
           type="button"
-          onClick={() => void open({ kind: 'new' })}
+          onClick={() => void open(back ?? { kind: 'new' })}
           className="mb-3 flex h-10 cursor-pointer items-center gap-2 px-2.5 text-[13px] text-ink-2 hover:text-ink"
         >
           <Icons.Back width={14} height={14} />
@@ -19510,7 +20123,7 @@ export function SettingsScreen() {
         onWheel={release}
         onTouchMove={release}
         onKeyDown={release}
-        onPointerDown={(e) => e.target === e.currentTarget && release()}
+        onPointerDown={release}
         className="min-w-0 flex-1 overflow-y-auto rounded-2xl bg-surface px-7 py-9 shadow-card"
       >
         <div className="mx-auto flex max-w-[680px] flex-col gap-8">
@@ -19537,7 +20150,7 @@ export function SettingsScreen() {
 }
 ```
 
-**Step 6: App.tsx**（設定頁隱藏 Sidebar 並渲染 SettingsScreen；完整檔案）
+**Step 7: App.tsx**（設定頁隱藏 Sidebar 並渲染 SettingsScreen；完整檔案）
 
 ```tsx
 // src/renderer/src/App.tsx
@@ -19598,15 +20211,19 @@ export default function App() {
 }
 ```
 
-**Step 7: 確認通過** — `npm test` 全部通過；`npm run typecheck`、`npm run lint` PASS
+**Step 8: 確認通過** — `npm test` 全部通過；`npm run typecheck`、`npm run lint` PASS
 
-**Step 8: 手動驗證** — 從側欄底部進入設定：新增／移除允許的指令、切換模型與載入專案設定後重開 app 仍保留；worktree 位置輸入相對路徑時欄位下方顯示錯誤且保留輸入，改成絕對路徑後儲存；claude 路徑填不存在的路徑時帳號區顯示偵測錯誤，清空後回到自動偵測。
+**Step 9: 手動驗證** — 從任務頁進入設定：新增／移除允許的指令、切換模型與載入專案設定後重開 app 仍保留；worktree 位置輸入相對路徑時欄位下方顯示錯誤且保留輸入，改成絕對路徑後儲存；分支前綴輸入含空白的值時顯示錯誤；claude 路徑填不存在的路徑時帳號區顯示偵測錯誤，清空後回到自動偵測；用鍵盤操作時焦點不會在儲存後跳走；「返回」回到原本的任務。
 
-**Step 9: Commit**
+**Step 10: Commit**
 
 ```bash
 git add src/shared/commandPattern.ts src/main/permissions/commandPattern.ts
 git commit -m "refactor: share command normalization and shell operator check
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git add src/main tests/main
+git commit -m "fix(main): serialize settings updates, validate branch prefix and keep the latest Claude detection
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 git add src/renderer/src docs/plans tests/renderer

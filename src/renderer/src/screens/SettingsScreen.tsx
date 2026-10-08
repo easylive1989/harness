@@ -5,6 +5,7 @@ import {
   type MouseEvent,
   type ReactNode,
   useCallback,
+  useEffect,
   useId,
   useRef,
   useState
@@ -18,6 +19,13 @@ import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
 
 type Save = (patch: Partial<Settings>) => Promise<Settings>
+
+/**
+ * 儲存中的按鈕用 aria-disabled 而不是 disabled：停用的按鈕會失去焦點，
+ * 鍵盤使用者會被丟回頁首。外觀與停用相同，點擊由各按鈕自己忽略。
+ */
+const pendingLook = 'aria-disabled:cursor-not-allowed aria-disabled:opacity-50'
+const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
 
 const SECTIONS = [
   { id: 'account', label: 'Claude 帳號' },
@@ -59,16 +67,46 @@ function useSaveSettings(): Save {
   }, [])
 }
 
-/** 點一下就生效的選項（單選、勾選）：儲存期間先顯示新值，失敗時回到原值並以 toast 顯示錯誤 */
+/**
+ * 儲存失敗的回報：畫面還在時交給 onError 顯示在欄位旁；
+ * 已經卸載（例如儲存途中離開設定頁）就改用 toast，錯誤才不會無聲消失。
+ */
+function useSaveErrorReporter(onError: (text: string) => void) {
+  const mounted = useRef(false)
+  const showToast = useStore((s) => s.showToast)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+  return (e: unknown) => {
+    const text = errorText(e)
+    if (mounted.current) onError(text)
+    else showToast(text)
+  }
+}
+
+/**
+ * 點一下就生效的選項（單選、勾選）：儲存期間先顯示最後點選的值，失敗時回到原值並以 toast 顯示錯誤。
+ * 儲存中不停用選項（停用會讓焦點消失）；連點時每次都送出，由 useSaveSettings 依序處理。
+ */
 function useInstantSetting<K extends keyof Settings>(key: K, saved: Settings[K], save: Save) {
   const act = useStore((s) => s.act)
-  const [saving, run] = usePending()
-  const [next, setNext] = useState<Settings[K]>(saved)
-  const set = (value: Settings[K]) => {
-    setNext(value)
-    void run(() => act(() => save({ [key]: value } as Partial<Settings>)))
+  // 最後一次點選的值；它的儲存結束（且之後沒有再點）時清掉，改顯示 store 裡的設定
+  const [latest, setLatest] = useState<{ value: Settings[K]; seq: number }>()
+  const seq = useRef(0)
+  const set = async (value: Settings[K]) => {
+    const mine = ++seq.current
+    setLatest({ value, seq: mine })
+    await act(() => save({ [key]: value } as Partial<Settings>))
+    setLatest((l) => (l?.seq === mine ? undefined : l))
   }
-  return { value: saving ? next : saved, saving, set }
+  return {
+    value: latest ? latest.value : saved,
+    saving: !!latest,
+    set: (value: Settings[K]) => void set(value)
+  }
 }
 
 /** 左欄分類對應的區塊；tabIndex 讓點左欄後焦點移到這裡 */
@@ -78,7 +116,7 @@ function Section({ id, title, children }: { id: SectionId; title: string; childr
       id={sectionDomId(id)}
       aria-labelledby={sectionTitleId(id)}
       tabIndex={-1}
-      className="flex scroll-mt-9 flex-col gap-3 outline-none"
+      className="flex scroll-mt-9 flex-col gap-3 rounded-lg outline-none focus-visible:shadow-[0_0_0_6px_var(--color-surface),0_0_0_8px_var(--color-brand)]"
     >
       <h2 id={sectionTitleId(id)} className="m-0 text-[15px] font-bold">
         {title}
@@ -90,7 +128,7 @@ function Section({ id, title, children }: { id: SectionId; title: string; childr
 
 /**
  * 失焦或按 Enter 時儲存的文字設定。儲存失敗時保留輸入的內容並在下方顯示錯誤，
- * 按 Esc 還原成目前的設定值。
+ * 按 Esc 還原成目前的設定值。儲存中欄位唯讀（不停用，按 Enter 儲存時焦點留在欄位）。
  */
 function TextSetting({
   label,
@@ -109,6 +147,7 @@ function TextSetting({
   const [draft, setDraft] = useState<string | null>(null)
   const [error, setError] = useState<string>()
   const [saving, run] = usePending()
+  const report = useSaveErrorReporter(setError)
   const id = useId()
   const commit = async () => {
     if (draft === null) return
@@ -124,10 +163,11 @@ function TextSetting({
         setDraft(null)
         setError(undefined)
       } catch (e) {
-        setError(errorText(e))
+        report(e)
       }
     })
   }
+  const describedBy = [error && `${id}-error`, hint && `${id}-hint`].filter(Boolean).join(' ')
   return (
     <div className="flex flex-col gap-1.5 text-[13px]">
       <label htmlFor={id} className="font-medium">
@@ -139,20 +179,23 @@ function TextSetting({
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => void commit()}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') e.currentTarget.blur()
-          else if (e.key === 'Escape') {
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            void commit()
+          } else if (e.key === 'Escape' && !saving) {
             setDraft(null)
             setError(undefined)
           }
         }}
-        disabled={saving}
+        readOnly={saving}
+        aria-busy={saving || undefined}
         placeholder={placeholder}
         spellCheck={false}
         aria-invalid={error ? true : undefined}
-        aria-describedby={error ? `${id}-error` : hint ? `${id}-hint` : undefined}
+        aria-describedby={describedBy || undefined}
         className={cx(
           inputClass,
-          'h-10 rounded-[10px] px-3 font-mono text-xs disabled:bg-fill-2',
+          'h-10 rounded-[10px] px-3 font-mono text-xs aria-busy:bg-fill-2 aria-busy:text-muted',
           error && 'border-danger focus:border-danger'
         )}
       />
@@ -185,11 +228,14 @@ function AccountSection({
 }) {
   const act = useStore((s) => s.act)
   const [checking, runCheck] = usePending()
-  const ok = !!claude?.loggedIn
-  const recheck = () =>
+  // 還沒有偵測結果時是「檢查中」，用中性樣式，不當成錯誤
+  const state = !claude ? 'checking' : claude.loggedIn ? 'ok' : 'error'
+  const recheck = () => {
+    if (checking) return
     void runCheck(() =>
       act(async () => useStore.setState({ claude: await call('claude:status', true) }))
     )
+  }
   // 主程序在 claudePath 改變時已重新偵測，這裡只需讀回最新狀態
   const saveClaudePath = async (value: string) => {
     await save({ claudePath: value })
@@ -200,27 +246,33 @@ function AccountSection({
       <div
         className={cx(
           'flex flex-wrap items-center gap-3.5 rounded-[14px] p-4',
-          ok ? 'bg-brand-tint' : 'bg-danger-soft'
+          { ok: 'bg-brand-tint', checking: 'bg-fill-2', error: 'bg-danger-soft' }[state]
         )}
       >
         <span
           aria-hidden
-          className={cx('size-2.5 flex-none rounded-full', ok ? 'bg-ok' : 'bg-danger')}
+          className={cx(
+            'size-2.5 flex-none rounded-full',
+            { ok: 'bg-ok', checking: 'bg-muted-2', error: 'bg-danger' }[state]
+          )}
         />
         <span role="status" className="flex min-w-0 flex-[1_1_240px] flex-col">
-          <span className={cx('font-medium', !ok && 'text-danger')}>
-            {ok
+          <span className={cx('font-medium', state === 'error' && 'text-danger')}>
+            {state === 'ok'
               ? `已透過 Claude Code 登入 · ${planLabel(claude?.subscriptionType)}`
               : (claude?.error ?? '正在檢查 Claude Code…')}
           </span>
-          <span className={cx('text-xs', ok ? 'text-brand-muted' : 'text-muted')}>
+          <span className={cx('text-xs', state === 'ok' ? 'text-brand-muted' : 'text-muted')}>
             使用本機 Claude Code 的登入憑證，不需要 API key
           </span>
         </span>
         <Button
-          disabled={checking}
+          aria-disabled={checking || undefined}
           onClick={recheck}
-          className="h-[38px] rounded-[10px] bg-surface px-3.5 text-ink hover:bg-fill"
+          className={cx(
+            'h-[38px] rounded-[10px] bg-surface px-3.5 text-ink hover:bg-fill',
+            pendingLook
+          )}
         >
           {checking ? '檢查中…' : '重新檢查'}
         </Button>
@@ -260,6 +312,7 @@ function ModelSection({ settings, save }: { settings: Settings; save: Save }) {
       <div
         role="radiogroup"
         aria-labelledby={sectionTitleId('model')}
+        aria-busy={model.saving || undefined}
         className="grid grid-cols-2 gap-2.5"
       >
         {MODELS.map((m) => {
@@ -276,7 +329,6 @@ function ModelSection({ settings, save }: { settings: Settings; save: Save }) {
                 type="radio"
                 name="defaultModel"
                 checked={on}
-                disabled={model.saving}
                 onChange={() => model.set(m.id)}
                 className="mt-[5px] accent-brand"
               />
@@ -314,10 +366,12 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
   const [input, setInput] = useState('')
   const [error, setError] = useState<string>()
   const [saving, run] = usePending()
+  const report = useSaveErrorReporter(setError)
   const inputRef = useRef<HTMLInputElement>(null)
   const id = useId()
   const check = checkNewPattern(input, list)
   const warning = !error && check.warning
+  const canAdd = !saving && !!check.pattern
 
   const update = (next: string[]) =>
     run(async () => {
@@ -326,20 +380,25 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
         setError(undefined)
         return true
       } catch (e) {
-        setError(errorText(e))
+        report(e)
         return false
       }
     })
   const add = async (e: FormEvent) => {
     e.preventDefault()
-    if (!check.pattern) return
+    if (!canAdd) return
     if (check.error) {
       setError(check.error)
       return
     }
-    if (await update([...list, check.pattern])) setInput('')
+    if (await update([...list, check.pattern])) {
+      setInput('')
+      // 按「新增」按鈕時焦點在按鈕上：回到輸入框，方便接著輸入下一個
+      inputRef.current?.focus()
+    }
   }
   const remove = async (c: string) => {
+    if (saving) return
     // 移除的按鈕會消失，把焦點交給輸入框
     if (await update(list.filter((x) => x !== c))) inputRef.current?.focus()
   }
@@ -351,18 +410,21 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
       </span>
       {list.length > 0 ? (
         <ul aria-labelledby={`${id}-label`} className="m-0 flex list-none flex-wrap gap-1.5 p-0">
-          {list.map((c, i) => (
+          {list.map((c) => (
             <li
-              key={`${i}:${c}`}
+              key={c}
               className="flex items-center gap-1.5 rounded-full bg-fill py-1 pr-1.5 pl-2.5 font-mono text-xs"
             >
               {c}
               <button
                 type="button"
                 aria-label={`移除 ${c}`}
-                disabled={saving}
+                aria-disabled={saving || undefined}
                 onClick={() => void remove(c)}
-                className="flex size-[22px] cursor-pointer items-center justify-center rounded-full text-muted hover:bg-chip hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                className={cx(
+                  'flex size-[22px] cursor-pointer items-center justify-center rounded-full text-muted hover:bg-chip hover:text-ink',
+                  pendingLook
+                )}
               >
                 <Icons.X width={10} height={10} />
               </button>
@@ -383,6 +445,8 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
           }}
           placeholder="例如 npm test *"
           spellCheck={false}
+          readOnly={saving}
+          aria-busy={saving || undefined}
           aria-invalid={error ? true : undefined}
           aria-describedby={[error && `${id}-error`, warning && `${id}-warning`, `${id}-hint`]
             .filter(Boolean)
@@ -395,8 +459,8 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
         />
         <Button
           type="submit"
-          disabled={saving || !check.pattern}
-          className="h-[38px] rounded-[10px] px-3.5 text-ink"
+          aria-disabled={!canAdd || undefined}
+          className={cx('h-[38px] rounded-[10px] px-3.5 text-ink', pendingLook)}
         >
           新增
         </Button>
@@ -463,6 +527,7 @@ function WorkspaceSection({ settings, save }: { settings: Settings; save: Save }
         label="分支名稱前綴"
         saved={settings.branchPrefix}
         onSave={(v) => save({ branchPrefix: v })}
+        hint={`新任務的分支名稱是前綴加上日期與代號，例如 ${settings.branchPrefix}20261008-1a2b3c4d；需符合 git 分支名稱規則。`}
       />
       <label className="flex cursor-pointer items-center gap-3 rounded-[14px] px-4 py-3.5 shadow-[0_0_0_1px_var(--color-chip)]">
         <span className="flex flex-1 flex-col">
@@ -474,7 +539,7 @@ function WorkspaceSection({ settings, save }: { settings: Settings; save: Save }
         <input
           type="checkbox"
           checked={loadProject.value}
-          disabled={loadProject.saving}
+          aria-busy={loadProject.saving || undefined}
           onChange={(e) => loadProject.set(e.target.checked)}
           className="size-[18px] flex-none accent-brand"
         />
@@ -489,8 +554,14 @@ export function SettingsScreen() {
   )
   const act = useStore((s) => s.act)
   const open = useStore((s) => s.open)
+  // 返回打開設定前的畫面；那個任務已不存在時回到新任務
+  const back = useStore((s) => {
+    const r = s.settingsReturn
+    return r?.kind === 'task' && !s.tasks[r.taskId] ? undefined : r
+  })
   const save = useSaveSettings()
-  // 目前分類：點左欄時以點的那個為準（目標可能捲不到頂端），使用者自己捲動後改看捲動位置
+  // 目前分類：點左欄時以點的那個為準（目標可能捲不到頂端），
+  // 使用者自己捲動（滾輪、觸控、鍵盤）或在內容區按下指標後改看捲動位置
   const [spied, setSpied] = useState<SectionId>('account')
   const [clicked, setClicked] = useState<SectionId | null>(null)
   const active = clicked ?? spied
@@ -500,7 +571,7 @@ export function SettingsScreen() {
     e.preventDefault()
     setClicked(id)
     const el = document.getElementById(sectionDomId(id))
-    el?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+    el?.scrollIntoView?.({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' })
     el?.focus({ preventScroll: true })
   }
   const reload = () =>
@@ -511,7 +582,7 @@ export function SettingsScreen() {
       <nav aria-label="設定分類" className="flex w-[236px] flex-none flex-col gap-1 px-1.5 py-2">
         <button
           type="button"
-          onClick={() => void open({ kind: 'new' })}
+          onClick={() => void open(back ?? { kind: 'new' })}
           className="mb-3 flex h-10 cursor-pointer items-center gap-2 px-2.5 text-[13px] text-ink-2 hover:text-ink"
         >
           <Icons.Back width={14} height={14} />
@@ -539,7 +610,7 @@ export function SettingsScreen() {
         onWheel={release}
         onTouchMove={release}
         onKeyDown={release}
-        onPointerDown={(e) => e.target === e.currentTarget && release()}
+        onPointerDown={release}
         className="min-w-0 flex-1 overflow-y-auto rounded-2xl bg-surface px-7 py-9 shadow-card"
       >
         <div className="mx-auto flex max-w-[680px] flex-col gap-8">
