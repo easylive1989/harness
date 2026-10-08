@@ -52,6 +52,20 @@ describe('QuestionCard', () => {
     })
   })
 
+  test('Claude 對反問的回答以 Markdown 呈現', () => {
+    const md: Question = {
+      ...q,
+      followups: [
+        { role: 'user', text: '423 還是 429？' },
+        { role: 'assistant', text: '**建議 429**\n\n- 搭配 `Retry-After`' }
+      ]
+    }
+    render(<QuestionCard task={makeTask({ questions: [md] })} question={md} />)
+    expect(screen.getByText('建議 429').tagName).toBe('STRONG')
+    expect(screen.getByText('Retry-After').tagName).toBe('CODE')
+    expect(screen.queryByText(/\*\*/)).not.toBeInTheDocument()
+  })
+
   test('選「其他」時送出自由文字', async () => {
     render(<QuestionCard task={task} question={q} />)
     await userEvent.click(screen.getByRole('radio', { name: /其他/ }))

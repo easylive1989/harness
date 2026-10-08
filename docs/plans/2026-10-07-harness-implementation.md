@@ -11210,6 +11210,20 @@ describe('QuestionCard', () => {
     })
   })
 
+  test('Claude 對反問的回答以 Markdown 呈現', () => {
+    const md: Question = {
+      ...q,
+      followups: [
+        { role: 'user', text: '423 還是 429？' },
+        { role: 'assistant', text: '**建議 429**\n\n- 搭配 `Retry-After`' }
+      ]
+    }
+    render(<QuestionCard task={makeTask({ questions: [md] })} question={md} />)
+    expect(screen.getByText('建議 429').tagName).toBe('STRONG')
+    expect(screen.getByText('Retry-After').tagName).toBe('CODE')
+    expect(screen.queryByText(/\*\*/)).not.toBeInTheDocument()
+  })
+
   test('選「其他」時送出自由文字', async () => {
     render(<QuestionCard task={task} question={q} />)
     await userEvent.click(screen.getByRole('radio', { name: /其他/ }))
@@ -11973,6 +11987,7 @@ import { blockImeSubmit } from '../lib/ime'
 import { awaitingCounterReply, isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
+import { Markdown } from './Markdown'
 import { Button, cx, Icons, inputClass, LiveStatus, textareaClass } from './ui'
 
 const OTHER = '__other'
@@ -12171,7 +12186,14 @@ export function QuestionCard({
                   <span className="sr-only">Claude</span>
                 </span>
               )}
-              <span className="min-w-0 whitespace-pre-wrap">{f.text}</span>
+              {f.role === 'user' ? (
+                <span className="min-w-0 whitespace-pre-wrap">{f.text}</span>
+              ) : (
+                // Claude 的回答常用粗體、清單與程式碼，和時間軸一樣以 Markdown 呈現
+                <div className="min-w-0 flex-1">
+                  <Markdown text={f.text} />
+                </div>
+              )}
             </div>
           ))}
           <LiveStatus text={waitingCounter && 'Claude 正在回答…'} />
