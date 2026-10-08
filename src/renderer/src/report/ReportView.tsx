@@ -454,9 +454,10 @@ export function ReportView({
                   data-anchor={anchorAttr(anchor)}
                   className="flex min-w-0 flex-col gap-2 rounded-[14px] p-4 shadow-[0_0_0_1px_var(--color-chip)]"
                 >
-                  <div className="flex items-center gap-2">
+                  {/* 窄視窗時來源標籤與留言換到下一行，標題不會被擠成一字一行 */}
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span className="font-mono text-xs text-muted">{d.id.toUpperCase()}</span>
-                    <span className="min-w-0 font-bold">
+                    <span className="min-w-0 flex-[1_1_7em] font-bold">
                       <InlineCode text={d.title} />
                     </span>
                     <span className="ml-auto flex flex-none items-center gap-1">
