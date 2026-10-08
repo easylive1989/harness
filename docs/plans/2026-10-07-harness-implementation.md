@@ -182,7 +182,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 2：設計 tokens、字體與基本樣式
 
 **Files:**
-- Create: `src/renderer/src/styles/app.css`
+- Create: `src/renderer/src/styles/app.css`（`warn`／`warn-soft` 是 Task 36 的「沒有新增測試」警示色）
 - Modify: `src/renderer/src/main.tsx`、`src/renderer/src/App.tsx`、`src/renderer/index.html`
 - Delete: `src/renderer/src/assets/main.css`、`src/renderer/src/assets/base.css`
 
@@ -231,6 +231,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   --color-review-soft: #e0ecff;
   --color-danger: #b42318;
   --color-danger-soft: #fef3f2;
+  --color-warn: #c4320a;
+  --color-warn-soft: #fff6ed;
   --color-ok: #15803d;
   --color-note: #fef9c3;
   --color-note-ink: #713f12;
@@ -4616,6 +4618,8 @@ test('提示涵蓋所有工具與訊息格式', () => {
     'tests：最優先',
     '在什麼情況下 → 做什麼 → 預期什麼',
     'tests_note',
+    '只有在沒有新增也沒有修改任何測試時 tests 才留空',
+    '修改的測試仍要列出',
     '高度由內容決定，不要使用 vh 或 100% 高度',
     '繁體中文'
   ]) {
@@ -4659,7 +4663,7 @@ export const MAIN_SYSTEM_APPEND = `
 - 完成後執行專案既有的測試、型別檢查、lint（若有），然後呼叫 mcp__harness__submit_report。
 
 ### submit_report 的寫法
-- tests：最優先，使用者會先看這一段。列出本次新增或修改的每一個測試：id（t1、t2…）、file（相對於 repo 根目錄的路徑）、name（測試名稱）、kind（unit／integration／e2e／other）、change（added／modified）、scenario（用白話說明情境：在什麼情況下 → 做什麼 → 預期什麼）、line（測試在新版檔案的行號，選填）。修改既有測試時用 why 說明為什麼改。沒有新增測試時 tests 留空，並在 tests_note 說明原因。
+- tests：最優先，使用者會先看這一段。列出本次新增或修改的每一個測試：id（t1、t2…）、file（相對於 repo 根目錄的路徑）、name（測試名稱）、kind（unit／integration／e2e／other）、change（added／modified）、scenario（用白話說明情境：在什麼情況下 → 做什麼 → 預期什麼）、line（測試在新版檔案的行號，選填）。修改既有測試時用 why 說明為什麼改。只有在沒有新增也沒有修改任何測試時 tests 才留空；沒有新增測試時在 tests_note 說明原因（修改的測試仍要列出）。
 - architecture：before 與 after 各 3–10 個節點（模組、檔案群或外部服務），status 標 added / modified / unchanged，files 列相關路徑；edges 表示呼叫或資料流向。
 - decisions：每個關鍵決策寫出選擇、捨棄的方案與原因；source 指回釐清的問題或分岔，實作中自己做的決定用 implementation。
 - limitations：已知限制與風險；followups：刻意延後的事項。
@@ -7326,7 +7330,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 24：TaskManager（四）報告整理、回饋與收尾
 
 **Files:**
-- Create: `src/main/tasks/prBody.ts`（摘要之後優先列出「新增的測試」，見 Task 36）
+- Create: `src/main/tasks/prBody.ts`（摘要之後優先列出「新增的測試」，用到 Task 36 的 `src/shared/testFiles.ts`：照順序執行時先依 Task 36 Step 4 建立）
 - Modify: `src/main/tasks/taskManager.ts`
 - Test: `tests/main/taskManager.test.ts`、`tests/main/prBody.test.ts`
 
@@ -7338,7 +7342,7 @@ import { expect, test } from 'vitest'
 import { prBody } from '../../src/main/tasks/prBody'
 import type { ReportInput } from '@shared/report'
 import type { Report } from '@shared/types'
-import { sampleReport } from '../fixtures/report'
+import { bigDiff, sampleDiff, sampleReport } from '../fixtures/report'
 
 const report = (input: ReportInput = sampleReport): Report => ({
   version: 1,
@@ -7389,44 +7393,125 @@ test('沒有新增測試時寫明，附上 Claude 說明的原因', () => {
   const onlyModified = prBody(report({ ...sampleReport, tests: [sampleReport.tests[1]] }))
   expect(onlyModified).toContain('這次沒有新增測試。\n- 修改：**錯誤密碼回 401**')
 })
+
+test('沒有說明新增的測試、但 diff 裡有新增的測試檔：不說「沒有新增測試」，列出那些檔案', () => {
+  // 舊報告讀出來是 tests: []；diff 裡有新增的 lockout.test.ts（login.test.ts 是修改，不算）
+  const old = { ...report({ ...sampleReport, tests: [] }), diff: sampleDiff }
+  const body = prBody(old)
+  expect(body).toContain('## 新增的測試\nClaude 沒有說明新增的測試：`src/auth/lockout.test.ts`\n')
+  expect(body).not.toContain('這次沒有新增測試')
+
+  const two = prBody({
+    ...report({ ...sampleReport, tests: [], tests_note: '只是重構' }),
+    diff: sampleDiff + bigDiff('tests/e2e/lockout.spec.ts', 1) + bigDiff('tests/fixtures/u.ts', 1)
+  })
+  expect(two).toContain(
+    'Claude 沒有說明新增的測試：`src/auth/lockout.test.ts`、`tests/e2e/lockout.spec.ts`\nClaude 的說明：只是重構\n'
+  )
+
+  // 有說明新增的測試，另外還有沒說明的新增測試檔
+  const extra = prBody({ ...report(), diff: sampleDiff + bigDiff('tests/e2e/lockout.spec.ts', 1) })
+  expect(extra).toContain('- **連續失敗 5 次後鎖定帳號**')
+  expect(extra).toContain('- 未說明的新增測試檔：`tests/e2e/lockout.spec.ts`')
+})
+
+test('Claude 給的文字壓成一行；code span 裡的反引號會跳脫', () => {
+  const body = prBody({
+    ...report({
+      ...sampleReport,
+      tests: [
+        {
+          id: 't1',
+          file: 'src/`odd`.test.ts',
+          name: '多行\n名稱',
+          kind: 'unit',
+          change: 'added',
+          scenario: '第一行\n\n  第二行'
+        }
+      ],
+      decisions: [{ ...sampleReport.decisions[0], rationale: '多台\n機器共享' }]
+    }),
+    verification: [{ command: 'echo `x`', exitCode: 0, durationMs: 1, outputTail: '' }]
+  })
+  expect(body).toContain('- **多行 名稱**（`` src/`odd`.test.ts ``）：第一行 第二行')
+  expect(body).toContain('（原因：多台 機器共享）')
+  expect(body).toContain('- ✅ `` echo `x` ``')
+})
 ```
 
 **Step 2: prBody 實作**
 
 ```ts
 // src/main/tasks/prBody.ts
+import { addedTestFiles, resolveTestPath } from '@shared/testFiles'
 import type { Report } from '@shared/types'
+
+/** Claude 給的文字放進清單項目：換行與連續空白壓成一個空白，不會拆壞 Markdown 清單 */
+const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim()
+
+/** Markdown code span：用比內容裡最長的反引號串多一個的反引號包住；開頭或結尾是反引號時補空白 */
+function code(s: string): string {
+  const text = oneLine(s)
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((m) => m.length))
+  const fence = '`'.repeat(longest + 1)
+  const pad = longest > 0 ? ' ' : ''
+  return `${fence}${pad}${text}${pad}${fence}`
+}
+
+/** 「新增的測試」段落：Claude 說明的新增／修改測試；沒說明但 diff 裡有新增的測試檔時照實寫出，不說沒有新增 */
+function testLines(r: Report): string[] {
+  const i = r.input
+  const added = i.tests.filter((t) => t.change === 'added')
+  const modified = i.tests.filter((t) => t.change === 'modified')
+  const files = addedTestFiles(r.diff)
+  const described = new Set(i.tests.map((t) => resolveTestPath(t.file, files)))
+  const undocumented = files.filter((f) => !described.has(f))
+  const list = (paths: string[]) => paths.map(code).join('、')
+  const lines = ['## 新增的測試']
+  if (!added.length) {
+    if (undocumented.length) {
+      lines.push(`Claude 沒有說明新增的測試：${list(undocumented)}`)
+      if (i.tests_note) lines.push(`Claude 的說明：${oneLine(i.tests_note)}`)
+    } else
+      lines.push(i.tests_note ? `這次沒有新增測試：${oneLine(i.tests_note)}` : '這次沒有新增測試。')
+  }
+  lines.push(
+    ...added.map((t) => `- **${oneLine(t.name)}**（${code(t.file)}）：${oneLine(t.scenario)}`),
+    ...modified.map(
+      (t) =>
+        `- 修改：**${oneLine(t.name)}**（${code(t.file)}）：${oneLine(t.scenario)}` +
+        (t.why ? `（為什麼改：${oneLine(t.why)}）` : '')
+    )
+  )
+  if (added.length && undocumented.length) lines.push(`- 未說明的新增測試檔：${list(undocumented)}`)
+  lines.push('')
+  return lines
+}
 
 /** PR 內文：報告摘要、新增的測試（最優先）、決策、限制、後續工作與驗證結果 */
 export function prBody(r: Report): string {
   const i = r.input
-  const lines = ['## 摘要', i.overview.summary, '']
-  const added = i.tests.filter((t) => t.change === 'added')
-  const modified = i.tests.filter((t) => t.change === 'modified')
-  lines.push('## 新增的測試')
-  if (!added.length)
-    lines.push(i.tests_note ? `這次沒有新增測試：${i.tests_note}` : '這次沒有新增測試。')
-  lines.push(
-    ...added.map((t) => `- **${t.name}**（\`${t.file}\`）：${t.scenario}`),
-    ...modified.map(
-      (t) =>
-        `- 修改：**${t.name}**（\`${t.file}\`）：${t.scenario}${t.why ? `（為什麼改：${t.why}）` : ''}`
-    ),
-    ''
-  )
+  const lines = ['## 摘要', i.overview.summary, '', ...testLines(r)]
   if (i.decisions.length) {
     lines.push(
       '## 決策',
-      ...i.decisions.map((d) => `- **${d.title}**：${d.chosen}（原因：${d.rationale}）`),
+      ...i.decisions.map(
+        (d) => `- **${oneLine(d.title)}**：${oneLine(d.chosen)}（原因：${oneLine(d.rationale)}）`
+      ),
       ''
     )
   }
-  if (i.limitations.length)
-    lines.push('## 限制與風險', ...i.limitations.map((l) => `- ${l.title}：${l.detail}`), '')
+  if (i.limitations.length) {
+    lines.push(
+      '## 限制與風險',
+      ...i.limitations.map((l) => `- ${oneLine(l.title)}：${oneLine(l.detail)}`),
+      ''
+    )
+  }
   if (i.followups.length) {
     lines.push(
       '## 後續工作',
-      ...i.followups.map((f) => `- ${f.title}${f.detail ? `：${f.detail}` : ''}`),
+      ...i.followups.map((f) => `- ${oneLine(f.title)}${f.detail ? `：${oneLine(f.detail)}` : ''}`),
       ''
     )
   }
@@ -7435,8 +7520,8 @@ export function prBody(r: Report): string {
       '## 驗證',
       ...r.verification.map((v) =>
         v.skipped
-          ? `- ⏭️ \`${v.command}\`（${v.skipped}）`
-          : `- ${v.exitCode === 0 ? '✅' : '❌'} \`${v.command}\``
+          ? `- ⏭️ ${code(v.command)}（${oneLine(v.skipped)}）`
+          : `- ${v.exitCode === 0 ? '✅' : '❌'} ${code(v.command)}`
       ),
       ''
     )
@@ -9381,7 +9466,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `src/renderer/src/store.ts`
 - Create: `src/renderer/src/lib/stage.ts`
 - Create: `src/renderer/src/lib/ime.ts`（輸入法選字中的 Enter／Esc：不送出、不儲存、不關閉）
-- Create: `src/renderer/src/components/ui.tsx`
+- Create: `src/renderer/src/components/ui.tsx`（`Pill` 的 `warn` 色調是 Task 36 加的）
 - Modify: `src/renderer/src/styles/app.css`（補 `line-strong`、`brand-halo`、`review-soft`、`danger-soft` 四個 token，取代 Tailwind 預設色）
 - Test: `tests/renderer/stage.test.ts`、`tests/renderer/store.test.ts`、`tests/renderer/api.test.ts`、`tests/renderer/ime.test.ts`
 
@@ -10170,13 +10255,15 @@ export function Panel({ className, ...p }: HTMLAttributes<HTMLElement>) {
   return <section className={cx('rounded-2xl bg-surface shadow-card', className)} {...p} />
 }
 
-export type Tone = 'neutral' | 'brand' | 'decision' | 'progress' | 'review' | 'danger' | 'muted'
+export type Tone =
+  'neutral' | 'brand' | 'decision' | 'progress' | 'review' | 'warn' | 'danger' | 'muted'
 const TONES: Record<Tone, string> = {
   neutral: 'bg-fill text-ink-2',
   brand: 'bg-brand-soft text-brand-ink',
   decision: 'bg-decision text-decision-ink',
   progress: 'bg-decision text-progress',
   review: 'bg-review-soft text-review',
+  warn: 'bg-warn-soft text-warn',
   danger: 'bg-danger-soft text-danger',
   muted: 'bg-fill text-muted'
 }
@@ -10186,6 +10273,7 @@ export const TONE_TEXT: Record<Tone, string> = {
   decision: 'text-decision-ink',
   progress: 'text-progress',
   review: 'text-review',
+  warn: 'text-warn',
   danger: 'text-danger',
   muted: 'text-muted'
 }
@@ -16118,7 +16206,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `src/renderer/src/report/ArchitectureDiagram.tsx`
 - Create: `src/renderer/src/report/CustomBlockFrame.tsx`
 - Create: `src/renderer/src/report/DiffView.tsx`
-- Create: `src/renderer/src/report/ReportView.tsx`（概觀之後的「新增的測試」區塊用到 Task 36 的 `testItems.ts`、`TestsSection.tsx`：照順序執行時先依 Task 36 Step 4–5 建立這兩個檔案）
+- Create: `src/renderer/src/report/ReportView.tsx`（概觀之後的「新增的測試」區塊用到 Task 36 的 `src/shared/testFiles.ts`、`testItems.ts`、`TestsSection.tsx`：照順序執行時先依 Task 36 Step 4–6 建立這三個檔案）
 - Create: `src/renderer/src/report/FeedbackPanel.tsx`
 - Create: `src/renderer/src/report/exportHtml.tsx`
 - Create: `src/renderer/src/screens/ReportScreen.tsx`
@@ -17125,9 +17213,7 @@ test('匯出的 HTML 自含、轉義所有報告文字、沒有互動控制', as
   expect(tests.textContent).toContain('src/auth/lockout.test.ts:3')
   expect(tests.textContent).toContain('同一帳號連續輸錯密碼 5 次 → 第 6 次登入 → 回 423')
   expect(tests.textContent).toContain('登入前多了鎖定檢查')
-  expect(tests.textContent).toContain('驗證：1 / 2 通過')
-  expect(tests.querySelector('a')?.getAttribute('href')).toBe('#report-tests')
-  expect(doc.getElementById('report-tests')).not.toBeNull()
+  expect(tests.textContent).toContain('驗證：npm test 通過')
 
   const frames = doc.querySelectorAll('iframe')
   expect(frames).toHaveLength(1)
@@ -17137,6 +17223,20 @@ test('匯出的 HTML 自含、轉義所有報告文字、沒有互動控制', as
   const srcdoc = frame.getAttribute('srcdoc') ?? ''
   expect(srcdoc).toContain('<div>正常 → 鎖定</div>')
   expect(srcdoc).toContain(`content="${BLOCK_CSP}"`)
+})
+
+test('匯出檔裡測試的整體驗證結果用頁內連結連到測試結果', async () => {
+  const report = makeReport({
+    verification: [
+      { command: 'npm run lint', exitCode: 1, durationMs: 1, outputTail: '' },
+      { command: 'npm run typecheck', exitCode: 0, durationMs: 1, outputTail: '' }
+    ]
+  })
+  const doc = parse(await buildReportHtml(makeTask(), report))
+  const tests = doc.querySelector('section[aria-label="新增的測試"]')!
+  expect(tests.textContent).toContain('驗證：1 / 2 通過')
+  expect(tests.querySelector('a')?.getAttribute('href')).toBe('#report-tests')
+  expect(doc.getElementById('report-tests')).not.toBeNull()
 })
 
 test('匯出檔名去掉控制字元與不能用在檔名的字元，並限制長度', () => {
@@ -17559,6 +17659,20 @@ export const findAnchor = (anchor: string) =>
   [...document.querySelectorAll<HTMLElement>('[data-anchor]')].find(
     (e) => e.dataset.anchor === anchor
   )
+
+/**
+ * 跳到報告上的某個位置：捲過去，焦點也移過去（tabIndex=-1，不會多一個 Tab 停留點），
+ * 鍵盤與螢幕閱讀器的使用者從那裡繼續。
+ */
+export function reveal(
+  el: HTMLElement | null | undefined,
+  block: ScrollLogicalPosition = 'center'
+) {
+  if (!el) return
+  el.scrollIntoView?.({ behavior: 'smooth', block })
+  if (!el.hasAttribute('tabindex')) el.tabIndex = -1
+  el.focus({ preventScroll: true })
+}
 
 /** 指向 diff 的錨點對應的檔案與行號（路徑本身可能含冒號，所以行號取最後一個冒號之後） */
 export function anchorTarget(anchor: string): { path: string; line?: number } | undefined {
@@ -18215,23 +18329,25 @@ export function DiffView({
 ```tsx
 // src/renderer/src/report/ReportView.tsx
 // 對照 docs/design/B5-Report.dc.html 的 <main>；isStatic 給匯出 HTML 用，不含任何互動控制
-import { type ReactNode, useState } from 'react'
+import { type ReactNode, useMemo, useState } from 'react'
 import { flushSync } from 'react-dom'
+import { parseUnifiedDiff } from '@shared/diff'
 import { layoutGraph } from '@shared/layout'
 import { wrapBlockHtml } from '@shared/blockHtml'
 import type { ReportInput } from '@shared/report'
+import { undocumentedTestFiles } from '@shared/testFiles'
 import type { Report, Task, VerificationResult } from '@shared/types'
 import { InlineCode } from '../components/Markdown'
 import { cx, Icons, Pill } from '../components/ui'
 import { shortTime } from '../lib/format'
 import { useStore } from '../store'
-import { diffAnchor, fileAnchor, findAnchor } from './anchors'
+import { diffAnchor, fileAnchor, findAnchor, reveal } from './anchors'
 import { ArchitectureDiagram } from './ArchitectureDiagram'
 import { BLOCK_DEFAULT_H } from './blocks'
 import { CommentButton, CommentForm, FeedbackNote } from './comments'
 import { CustomBlockFrame } from './CustomBlockFrame'
 import { DiffView } from './DiffView'
-import { runState } from './testItems'
+import { runState, summarizeRuns } from './testItems'
 import { TestsSection } from './TestsSection'
 
 type Decision = ReportInput['decisions'][number]
@@ -18324,7 +18440,8 @@ function Stat({
   return (
     <div className={cx('flex flex-col rounded-[14px] bg-fill-2 px-4 py-3.5', className)}>
       <span className={cx('text-xs text-muted', labelClass)}>{label}</span>
-      <span className="text-2xl font-bold">{children}</span>
+      {/* 數字比格子寬時換行，不會被切掉 */}
+      <span className="text-2xl font-bold wrap-anywhere">{children}</span>
     </div>
   )
 }
@@ -18458,12 +18575,17 @@ export function ReportView({
     )
   )
   const changed = new Set(report.stats.perFile.map((f) => f.path))
-  const ran = report.verification.filter((v) => !v.skipped)
-  const passed = ran.filter((v) => v.exitCode === 0).length
-  const skipped = report.verification.length - ran.length
-  const allPassed = ran.length > 0 && passed === ran.length
+  const { ran, passed, skipped, state: verifyState } = summarizeRuns(report.verification)
+  const allPassed = verifyState === 'passed'
+  // 「新增的測試」：diff 裡的檔案、Claude 沒說明的測試檔（大 diff 只解析一次）
+  const diffFiles = useMemo(() => parseUnifiedDiff(report.diff), [report.diff])
+  const undocumented = useMemo(
+    () => undocumentedTestFiles(diffFiles, r.tests, task.worktreePath),
+    [diffFiles, r.tests, task.worktreePath]
+  )
   const addedTests = r.tests.filter((t) => t.change === 'added').length
   const modifiedTests = r.tests.length - addedTests
+  const undocumentedAdded = undocumented.filter((f) => f.status === 'added').length
 
   const button = (anchor: string, label: string, aria = `對「${label}」留言`) =>
     commentable && <CommentButton label={aria} onClick={() => setCommentOn(anchor)} />
@@ -18481,15 +18603,13 @@ export function ReportView({
     onDiffFile?.(path)
     document.getElementById('report-diff')?.scrollIntoView?.({ behavior: 'smooth' })
   }
-  /** 從「新增的測試」跳到 diff：先畫出選到的檔案（與行），再捲到那一行；找不到那一行就捲到檔頭 */
+  /** 從「新增的測試」跳到 diff：先畫出選到的檔案（與行），再捲到那一行；找不到那一行就到檔頭 */
   const jumpToTest = (path: string, line?: number) => {
     flushSync(() => onDiffFile?.(path, line))
     const atLine = line === undefined ? undefined : findAnchor(diffAnchor(path, line))
-    const target = atLine ?? findAnchor(fileAnchor(path))
-    target?.scrollIntoView?.({ behavior: 'smooth', block: atLine ? 'center' : 'start' })
+    reveal(atLine ?? findAnchor(fileAnchor(path)), atLine ? 'center' : 'start')
   }
-  const showResults = () =>
-    document.getElementById('report-tests')?.scrollIntoView?.({ behavior: 'smooth' })
+  const showResults = () => reveal(document.getElementById('report-tests'), 'start')
 
   return (
     <div className="flex flex-col gap-3">
@@ -18510,17 +18630,18 @@ export function ReportView({
             <InlineCode text={r.overview.summary} />
           </span>
         </div>
-        <div className="grid grid-cols-5 gap-2.5">
+        {/* 窄視窗時換行（不會擠到數字被切掉）；寬的時候五格一排 */}
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(112px,1fr))] gap-2.5">
           <Stat label="變更檔案">{report.stats.files}</Stat>
           <Stat label="行數">
             <span className="text-ok">+{report.stats.additions}</span>{' '}
             <span className="text-lg text-danger">−{report.stats.deletions}</span>
           </Stat>
-          {/* 沒有新增測試時用提醒的顏色 */}
+          {/* 沒有新增測試時用警示的顏色；Claude 沒說明的新增測試檔另外標出 */}
           <Stat
             label="新增測試"
-            className={addedTests ? undefined : 'bg-decision'}
-            labelClass={addedTests ? undefined : 'text-decision-ink'}
+            className={addedTests ? undefined : 'bg-warn-soft'}
+            labelClass={addedTests ? undefined : 'text-warn'}
           >
             {addedTests}
             {modifiedTests > 0 && (
@@ -18528,14 +18649,19 @@ export function ReportView({
                 修改 {modifiedTests}
               </span>
             )}
+            {undocumentedAdded > 0 && (
+              <span className="ml-1.5 inline-block text-xs font-normal whitespace-nowrap text-warn">
+                未說明 {undocumentedAdded}
+              </span>
+            )}
           </Stat>
           <Stat
             label="驗證"
-            className={ran.length === 0 ? '' : allPassed ? 'bg-brand-tint' : 'bg-danger-soft'}
+            className={ran === 0 ? '' : allPassed ? 'bg-brand-tint' : 'bg-danger-soft'}
             labelClass={allPassed ? 'text-brand-muted' : undefined}
           >
-            <span className={allPassed ? 'text-brand-ink' : ran.length ? 'text-danger' : ''}>
-              {ran.length ? `${passed} / ${ran.length} 通過` : '未執行'}
+            <span className={allPassed ? 'text-brand-ink' : ran ? 'text-danger' : ''}>
+              {ran ? `${passed} / ${ran} 通過` : '未執行'}
             </span>
             {skipped > 0 && (
               // 五格並排時可能放不下：整段換到下一行，不在字中間斷開
@@ -18561,7 +18687,8 @@ export function ReportView({
         <TestsSection
           tests={r.tests}
           note={r.tests_note}
-          diff={report.diff}
+          files={diffFiles}
+          undocumented={undocumented}
           root={task.worktreePath}
           runs={report.verification}
           isStatic={isStatic}
@@ -19153,7 +19280,7 @@ import { call, errorText } from '../api'
 import { Button, Spinner } from '../components/ui'
 import { shortTime } from '../lib/format'
 import { usePending } from '../lib/usePending'
-import { anchorTarget, findAnchor } from '../report/anchors'
+import { anchorTarget, findAnchor, reveal } from '../report/anchors'
 import { buildReportHtml, exportFileName } from '../report/exportHtml'
 import { FeedbackPanel } from '../report/FeedbackPanel'
 import { ReportView } from '../report/ReportView'
@@ -19235,7 +19362,7 @@ export function ReportScreen({
       const target = anchorTarget(anchor)
       if (target) setDiffFocus({ version: latest, ...target })
     })
-    findAnchor(anchor)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+    reveal(findAnchor(anchor))
   }
 
   return (
@@ -21020,27 +21147,32 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 使用者在 2026-10-08 要求：「報告的環節要優先報告新增了哪些測試，解釋測試的情境是什麼（如果有的話）」。報告、匯出的 HTML 與 PR 內文都要先讓使用者看到這次新增（與修改）了哪些測試、各自驗證什麼情境。
 
 **Files:**
-- Create: `src/renderer/src/report/testItems.ts`（依路徑判斷測試檔、Claude 沒說明的測試檔、驗證指令的狀態與涵蓋判斷）
+- Create: `src/shared/testFiles.ts`（依路徑判斷測試檔、Claude 給的路徑對到 diff、沒說明的測試檔、新增的測試檔；報告畫面與 PR 內文共用）
+- Create: `src/renderer/src/report/testItems.ts`（驗證指令的狀態與整體數字 `summarizeRuns`、輸出涵蓋判斷、跑測試的指令、每個測試要顯示的驗證 `testVerdict`）
 - Create: `src/renderer/src/report/TestsSection.tsx`（「新增的測試」區塊的內容）
 - Modify（各 Task 的程式碼區塊已更新為最終版本）：
+  - Task 2：`src/renderer/src/styles/app.css`（`--color-warn`、`--color-warn-soft`：沒有新增測試的警示，跟決策的黃色分開）
   - Task 4：`src/shared/report.ts`（`TestNoteSchema`、`tests`、`tests_note`、測試 id 不重複）、`tests/fixtures/report.ts`（`sampleReport.tests`：一個新增、一個修改）、`tests/shared/report.test.ts`
   - Task 10：`src/main/store/repository.ts`（`getReport` 替舊版報告補 `tests: []`）、`tests/main/repository.test.ts`
   - Task 19：`src/main/agent/prompts.ts`、`tests/main/prompts.test.ts`
   - Task 24：`src/main/tasks/prBody.ts`、`tests/main/prBody.test.ts`
-  - Task 33：`src/renderer/src/report/anchors.ts`（`testAnchor`、`findAnchor`、「測試」標籤）、`FeedbackPanel.tsx`（空清單的提示提到測試）、`ReportView.tsx`（新區塊與「新增測試」數據格、`jumpToTest`）、`src/renderer/src/screens/ReportScreen.tsx`（`onDiffFile` 帶行號）、`tests/fixtures/report.ts`（`sampleDiff` 加上兩個測試檔、`makeReport` 的統計）、`tests/renderer/DiffView.test.tsx`、`ReportScreen.test.tsx`、`exportHtml.test.tsx`
+  - Task 26：`src/renderer/src/components/ui.tsx`（`Pill` 的 `warn` 色調）
+  - Task 33：`src/renderer/src/report/anchors.ts`（`testAnchor`、`findAnchor`、`reveal`、「測試」標籤）、`FeedbackPanel.tsx`（空清單的提示提到測試）、`ReportView.tsx`（新區塊、「新增測試」數據格、數據格自動換行、`jumpToTest`）、`src/renderer/src/screens/ReportScreen.tsx`（`onDiffFile` 帶行號、跳轉後焦點移到目標）、`tests/fixtures/report.ts`（`sampleDiff` 加上兩個測試檔、`makeReport` 的統計）、`tests/renderer/DiffView.test.tsx`、`ReportScreen.test.tsx`、`exportHtml.test.tsx`
 - Modify: `docs/plans/2026-10-07-harness-design.md`（§3.6、§3.7）
-- Test: `tests/renderer/testItems.test.ts`、`tests/renderer/TestsSection.test.tsx`
+- Test: `tests/shared/testFiles.test.ts`、`tests/renderer/testItems.test.ts`、`tests/renderer/TestsSection.test.tsx`
 
 **行為重點：**
-- Schema：`tests[{ id, file, name, kind: unit|integration|e2e|other（預設 unit）, change: added|modified（預設 added）, scenario（至少 1 字）, why?, line?（正整數） }]` 預設 `[]`，`tests_note?` 是沒有新增測試的原因；測試 id 不能重複（同 custom block）。`tests` 放在 `ReportInputShape` 的 overview 之後，submit_report 的 JSON schema 也是這個順序。沒有這些欄位的舊報告照樣能解析；已存檔的舊報告由 `Repository.getReport` 補上 `tests: []`，畫面與 PR 內文不必再判斷。
-- 提示（submit_report 的寫法第一條）：tests 最優先，每個新增或修改的測試都要寫情境（在什麼情況下 → 做什麼 → 預期什麼），修改的測試用 why 說明為什麼改；沒有新增測試時 tests 留空並在 tests_note 說明原因。`[report_feedback]` 的錨點說明加上 `test:測試 id`、`section:tests`。
-- 報告：概觀之後、其他區塊之前是「新增的測試」區塊（`section:tests`，可留言）。新增的在前、修改的在後；每個項目是與決策卡片相同的外框，包含名稱、檔案（Claude 給的絕對路徑去掉 worktree 前綴、開頭的 `./` 也去掉；有行號時顯示 `路徑:行`）、「新增」（brand）／「修改」（review）標籤、類型標籤（單元／整合／端對端／其他）、「情境」、修改的測試另有「為什麼改」，以及驗證結果。每個項目可留言（`test:<id>`，標籤為測試名稱，回饋清單顯示「測試 · 名稱」，點了捲回那個項目）。
-- 驗證結果不捏造逐個測試的結果：輸出末段提到這個測試檔（路徑或檔名）的指令顯示該指令的結果；否則只有一個驗證指令時顯示它的結果（通過／失敗（exit N）／未完成／未執行）；多個時顯示「驗證：x / y 通過 · 略過 k」與「查看測試結果」（畫面上捲到「測試結果」，匯出檔是 `#report-tests` 頁內連結）；沒有驗證指令時寫「沒有驗證指令」。區塊副標註明「驗證是 Harness 實際執行指令的整體結果，不是逐個測試的結果」。
-- 點項目的名稱或檔案：ReportScreen 的 `diffFocus` 切到那個檔案（與行），`flushSync` 畫出來後捲到那一行（找不到就捲到檔頭）。測試檔不在這次的 diff 裡時不能點，標「（不在這次的變更中）」。
-- Harness 自己從 diff 偵測測試檔（`*.test.*`、`*.spec.*`、`*_test.*`、`test_*.py`，或在 `tests/`、`test/`、`__tests__/`、`spec/` 底下），Claude 沒說明的列在區塊最後，附檔案狀態（新增／修改／刪除／改名）與「未說明」，點了一樣跳到 diff（刪除的測試檔也列出：移除測試是審閱時該注意的事）。
-- 沒有新增測試（`change: 'added'` 的一個都沒有）：提醒樣式（`bg-decision`）寫「這次沒有新增測試」與 `tests_note`（沒寫原因時「Claude 沒有說明原因。」）；若 diff 裡其實有新增的測試檔，標題改為「Claude 沒有說明新增的測試」，不說沒有新增。修改的測試照樣列出。
-- 概觀的數據改成五格：變更檔案、行數、新增測試（只算新增的，有修改的另標「修改 N」；0 時用提醒顏色）、驗證、決策。數據旁的小字（「修改 N」「略過 N」）整段換行，不在字中間斷開。
-- PR 內文：「摘要」之後是「新增的測試」：`- **名稱**（`檔案`）：情境`，修改的測試寫成 `- 修改：**名稱**（`檔案`）：情境（為什麼改：…）`；沒有新增時先寫「這次沒有新增測試：原因」（沒有原因時「這次沒有新增測試。」）。
+- Schema：`tests[{ id, file, name, kind: unit|integration|e2e|other（預設 unit）, change: added|modified（預設 added）, scenario（至少 1 字）, why?, line?（正整數） }]` 預設 `[]`，`tests_note?` 是沒有新增測試的原因；測試 id 不能重複（同 custom block）。`tests` 放在 `ReportInputShape` 的 overview 之後，submit_report 的 JSON schema 也是這個順序。沒有這些欄位的舊報告照樣能解析；已存檔的舊報告由 `Repository.getReport` 補上 `tests: []`。
+- 提示（submit_report 的寫法第一條）：tests 最優先，每個新增或修改的測試都要寫情境（在什麼情況下 → 做什麼 → 預期什麼），修改的測試用 why 說明為什麼改；只有在沒有新增也沒有修改任何測試時 tests 才留空；沒有新增測試時在 tests_note 說明原因（修改的測試仍要列出）。`[report_feedback]` 的錨點說明加上 `test:測試 id`、`section:tests`。
+- 測試檔（`src/shared/testFiles.ts`，Harness 自己從 diff 判斷）：一定是原始碼（ts/tsx/js/jsx/mjs/cjs/py/rb/go/rs/java/kt/swift/php/cs），而且檔名是 `*.test.*`、`*.spec.*`、`*.cy.*`、`*_test.*`、`test_*.py`、`*_spec.rb`、`*Test(s).java|kt`，或放在 `tests/`、`test/`、`__tests__/`、`spec/`、`Tests/` 底下；`fixtures?/`、`__snapshots__/`、`__mocks__/`、`testdata/` 裡的檔案與 `.snap` 不算，測試資料夾裡的輔助檔（`helper(s)`、`setup`、`util(s)`、`conftest`，可帶前綴如 `spec_helper`、`vitest.setup`）也不算。
+- Claude 給的路徑對到 diff（`resolveTestPath`）：去掉空白、worktree 前綴與開頭的 `./`；仍對不到時以結尾比對（絕對路徑、`/var` 與 `/private/var`、省略前段的相對路徑），只在剛好對到一個檔案時採用。對到的檔案不會再列成「未說明」。
+- 報告：概觀之後、其他區塊之前是「新增的測試」區塊（`section:tests`，可留言）。新增的在前、修改的在後；每個項目與決策卡片同樣的外框：名稱是 `h3`（可以點，按鈕的 `::after` 蓋住名稱與檔案，點檔案也會跳；`aria-describedby` 指向檔案）、檔案（`路徑:行`）、「新增」（brand）／「修改」（review）標籤、類型標籤（單元／整合／端對端／其他）、「情境」、修改的測試另有「為什麼改」，以及驗證結果。每個項目可留言（`test:<id>`，標籤為測試名稱，回饋清單顯示「測試 · 名稱」，點了捲回那個項目）。
+- 驗證結果不捏造逐個測試的結果（`testVerdict`）：輸出末段以路徑或空白為邊界提到這個測試檔（完整路徑或檔名）的指令，顯示該指令的結果；沒有的話顯示所有看起來是跑測試的指令（`test`、`vitest`、`jest`、`pytest`、`go test`、`cargo test`、`rspec`、`playwright`、`cypress`、`mocha`）的結果（通過／失敗（exit N）／未完成／未執行，指令全文放在 `title`）；連一個都沒有（例如只有 lint、typecheck）時只給整體的「x / y 通過 · 略過 k」，用中性的顏色、不打紅叉，附「查看測試結果」（畫面上捲到「測試結果」並移動焦點，匯出檔是 `#report-tests` 頁內連結）；沒有驗證指令時寫「沒有驗證指令」。區塊副標註明「驗證是 Harness 實際執行指令的整體結果，不是逐個測試的結果」。
+- 點項目：ReportScreen 的 `diffFocus` 切到那個檔案（與行），`flushSync` 畫出來後捲到那一行（找不到就到檔頭），焦點也移過去（`reveal`：`tabIndex=-1`、`focus({ preventScroll: true })`；回饋清單的跳轉也一樣）。測試檔不在這次的 diff 裡時不能點，標「（不在這次的變更中）」。
+- Claude 沒說明的測試檔列在區塊最後，附檔案狀態（新增／修改／刪除／改名）與「未說明」（`warn` 色調），點了一樣跳到 diff（刪除的測試檔也列出：移除測試是審閱時該注意的事）。
+- 沒有新增測試（`change: 'added'` 的一個都沒有）：警示樣式（`bg-warn-soft`）寫「這次沒有新增測試」與 `tests_note`（沒寫原因時「Claude 沒有說明原因。」）；若 diff 裡其實有新增的測試檔，標題改為「Claude 沒有說明新增的測試」，不說沒有新增。修改的測試照樣列出。
+- 概觀的數據：變更檔案、行數、新增測試（只算新增的；有修改的另標「修改 N」，有沒說明的新增測試檔另標「未說明 N」；0 時用警示顏色）、驗證、決策。格子用 `grid-cols-[repeat(auto-fit,minmax(112px,1fr))]`：寬的時候五格一排，最小視窗寬度（1100px）時換成 3＋2，數字比格子寬時換行（`wrap-anywhere`），不會被切掉；小字（「修改 N」「略過 N」）整段換行。
+- PR 內文：「摘要」之後是「新增的測試」：`- **名稱**（`檔案`）：情境`，修改的測試寫成 `- 修改：**名稱**（`檔案`）：情境（為什麼改：…）`。沒有說明新增的測試時：diff 裡有新增的測試檔就寫「Claude 沒有說明新增的測試：`a`、`b`」（有 tests_note 時下一行「Claude 的說明：…」），否則「這次沒有新增測試：原因」或「這次沒有新增測試。」；有說明新增的測試、另外還有沒說明的新增測試檔時加一行「- 未說明的新增測試檔：…」。Claude 給的文字壓成一行（換行與連續空白變成一個空白，決策、限制、後續工作也一樣），code span 依內容裡的反引號加長外圍的反引號。
 - 匯出 HTML：同一個區塊靜態呈現（沒有按鈕、沒有 `data-anchor`）。
 
 **Step 1: 寫失敗測試**
@@ -21048,82 +21180,163 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 既有的測試檔加上（程式碼在各 Task 的區塊裡）：
 - `tests/shared/report.test.ts`（Task 4）：缺少選填陣列時 `tests` 為 `[]`、`tests_note` 為 undefined；「測試的類型預設單元、狀態預設新增；行號與修改原因選填」「測試一定要有情境說明，行號要是正整數」「測試 id 重複時失敗」。
 - `tests/main/repository.test.ts`（Task 10）：「舊版報告（沒有 tests 欄位）讀出來時補上空的測試清單」。
-- `tests/main/prompts.test.ts`（Task 19）：清單補上 `'test:測試 id'`、`'section:tests'`、`'tests：最優先'`、`'在什麼情況下 → 做什麼 → 預期什麼'`、`'tests_note'`。
-- `tests/main/prBody.test.ts`（Task 24）：「摘要之後優先列出新增的測試與情境；修改的測試另外標出並附原因」「沒有新增測試時寫明，附上 Claude 說明的原因」。
-- `tests/renderer/exportHtml.test.tsx`（Task 33）：匯出檔裡「新增的測試」排在概觀之後，情境、修改原因與「驗證：1 / 2 通過」都在，「查看測試結果」連到 `#report-tests`。
+- `tests/main/prompts.test.ts`（Task 19）：清單補上 `'test:測試 id'`、`'section:tests'`、`'tests：最優先'`、`'在什麼情況下 → 做什麼 → 預期什麼'`、`'tests_note'`、`'只有在沒有新增也沒有修改任何測試時 tests 才留空'`、`'修改的測試仍要列出'`。
+- `tests/main/prBody.test.ts`（Task 24）：「摘要之後優先列出新增的測試與情境；修改的測試另外標出並附原因」「沒有新增測試時寫明，附上 Claude 說明的原因」「沒有說明新增的測試、但 diff 裡有新增的測試檔：不說『沒有新增測試』，列出那些檔案」（含舊報告 `tests: []`）「Claude 給的文字壓成一行；code span 裡的反引號會跳脫」。
+- `tests/renderer/exportHtml.test.tsx`（Task 33）：匯出檔裡「新增的測試」排在概觀之後，情境、修改原因與「驗證：npm test 通過」都在；只有 lint／typecheck 時「驗證：1 / 2 通過」的「查看測試結果」連到 `#report-tests`。
 - fixture 加了兩個測試檔後，`tests/renderer/DiffView.test.tsx` 的檔案標籤清單、`tests/renderer/ReportScreen.test.tsx` 的「變更檔案 4」「行數 +12 −1」跟著更新（Task 33）。
 
 新的測試檔：
 
 ```ts
-// tests/renderer/testItems.test.ts
+// tests/shared/testFiles.test.ts
 import { expect, test } from 'vitest'
-import {
-  coveringRuns,
-  isTestFile,
-  normalizeTestPath,
-  runState,
-  undocumentedTestFiles
-} from '@renderer/report/testItems'
 import { parseUnifiedDiff } from '@shared/diff'
-import type { VerificationResult } from '@shared/types'
+import {
+  addedTestFiles,
+  isTestFile,
+  resolveTestPath,
+  undocumentedTestFiles
+} from '@shared/testFiles'
 import { bigDiff, sampleReport } from '../fixtures/report'
 
-test('依路徑判斷測試檔', () => {
+test('依路徑判斷測試檔：檔名慣例，或測試資料夾底下的原始碼', () => {
   for (const p of [
     'src/a.test.ts',
     'a.test.js',
     'src/ui/Button.spec.tsx',
+    'cypress/e2e/login.cy.ts',
     'pkg/lockout_test.go',
     'app/test_views.py',
-    'tests/helpers.ts',
-    'packages/x/test/run.js',
-    'src/__tests__/a.ts',
-    'spec/models/user_spec.rb'
+    'spec/models/user_spec.rb',
+    'src/LoginTest.java',
+    'app/src/test/kotlin/LoginTests.kt',
+    'tests/login.ts',
+    'packages/x/test/run.mjs',
+    'src/__tests__/a.jsx',
+    'spec/models/user.rb',
+    'src/test/java/com/x/Login.java',
+    'Tests/AppTests/LoginTests.swift',
+    'tests/Feature/LoginTest.php',
+    'tests/Login.cs',
+    'tests/lockout.rs'
   ])
     expect(isTestFile(p), p).toBe(true)
+})
+
+test('不是測試檔：一般程式碼、文件與資料、fixture、snapshot、mock、測試輔助檔', () => {
   for (const p of [
     'src/testing.ts',
     'src/latest/a.ts',
     'src/attest/a.ts',
-    'docs/test.md',
-    'src/test_utils.ts',
-    'specs.md',
     'src/contest.test',
-    'src/spec.ts'
+    'src/spec.ts',
+    'src/test_utils.ts',
+    'src/Contest.java',
+    'Test.java',
+    // 文件、資料與規格文件
+    'docs/test.md',
+    'specs.md',
+    'tests/README.md',
+    'test/data.json',
+    'docs/spec/api.md',
+    'api.spec.md',
+    'openapi.spec.yaml',
+    'Tests/Info.plist',
+    // fixture、snapshot、mock、testdata
+    'tests/fixtures/users.ts',
+    'tests/fixtures/user.json',
+    'test/fixture/a.js',
+    'src/fixtures/login.test.ts',
+    'src/__snapshots__/a.test.ts.snap',
+    'src/a.test.ts.snap',
+    'src/__mocks__/api.ts',
+    'pkg/testdata/a_test.go',
+    // 測試資料夾裡的輔助檔
+    'tests/helpers.ts',
+    'tests/helper.py',
+    'test/setup.js',
+    'tests/vitest.setup.ts',
+    'tests/utils.ts',
+    'tests/util.py',
+    'tests/test-utils.tsx',
+    'spec/spec_helper.rb',
+    'test/test_helper.rb',
+    'tests/conftest.py'
   ])
     expect(isTestFile(p), p).toBe(false)
 })
 
-test('測試檔路徑：去掉 worktree 前綴與開頭的 ./', () => {
-  expect(normalizeTestPath('./src/a.test.ts')).toBe('src/a.test.ts')
-  expect(normalizeTestPath('/tmp/wt/t1/src/a.test.ts', '/tmp/wt/t1')).toBe('src/a.test.ts')
-  expect(normalizeTestPath('/tmp/wt/t1/src/a.test.ts', '/tmp/wt/t1/')).toBe('src/a.test.ts')
-  expect(normalizeTestPath('/tmp/wt/t10/a.test.ts', '/tmp/wt/t1')).toBe('/tmp/wt/t10/a.test.ts')
-  expect(normalizeTestPath(' src/a.test.ts ')).toBe('src/a.test.ts')
+const paths = [
+  'src/auth/lockout.test.ts',
+  'src/auth/login.test.ts',
+  'pkg/a/x.test.ts',
+  'pkg/b/x.test.ts'
+]
+
+test('Claude 給的路徑對到 diff 裡的路徑：去掉 ./ 與 worktree 前綴', () => {
+  expect(resolveTestPath('src/auth/lockout.test.ts', paths)).toBe('src/auth/lockout.test.ts')
+  expect(resolveTestPath(' ./src/auth/lockout.test.ts ', paths)).toBe('src/auth/lockout.test.ts')
+  expect(resolveTestPath('/tmp/wt/t1/src/auth/login.test.ts', paths, '/tmp/wt/t1/')).toBe(
+    'src/auth/login.test.ts'
+  )
 })
 
-test('Claude 沒說明的測試檔：diff 裡是測試檔、但不在 tests 裡（含刪除的）', () => {
-  const files = parseUnifiedDiff(
-    [
-      bigDiff('src/auth/lockout.test.ts', 2),
-      bigDiff('tests/e2e/lockout.spec.ts', 3),
-      bigDiff('src/auth/lockout.ts', 1),
-      `diff --git a/src/old.test.ts b/src/old.test.ts
+test('絕對路徑（/var 與 /private/var 不同）或省略前段時，以結尾對到 diff 裡唯一的檔案', () => {
+  const abs = '/private/var/folders/x/wt/t1/src/auth/login.test.ts'
+  expect(resolveTestPath(abs, paths, '/var/folders/x/wt/t1')).toBe('src/auth/login.test.ts')
+  expect(resolveTestPath('auth/lockout.test.ts', paths)).toBe('src/auth/lockout.test.ts')
+  expect(resolveTestPath('lockout.test.ts', paths)).toBe('src/auth/lockout.test.ts')
+  // 有兩個候選時不猜
+  expect(resolveTestPath('x.test.ts', paths)).toBe('x.test.ts')
+  // 不在 diff 裡：只做基本的整理
+  expect(resolveTestPath('/tmp/wt/t1/src/gone.test.ts', paths, '/tmp/wt/t1')).toBe(
+    'src/gone.test.ts'
+  )
+  expect(resolveTestPath('src/xlockout.test.ts', paths)).toBe('src/xlockout.test.ts')
+})
+
+const deleted = `diff --git a/src/old.test.ts b/src/old.test.ts
 deleted file mode 100644
 --- a/src/old.test.ts
 +++ /dev/null
 @@ -1 +0,0 @@
 -test('舊的', () => {})
 `
-    ].join('')
+
+test('Claude 沒說明的測試檔：diff 裡是測試檔、但沒有對到 tests（含刪除的，不含 fixture）', () => {
+  const files = parseUnifiedDiff(
+    bigDiff('src/auth/lockout.test.ts', 2) +
+      bigDiff('tests/e2e/lockout.spec.ts', 3) +
+      bigDiff('tests/fixtures/users.ts', 3) +
+      bigDiff('src/auth/lockout.ts', 1) +
+      deleted
   )
-  const tests = [{ ...sampleReport.tests[0], file: './src/auth/lockout.test.ts' }]
-  expect(undocumentedTestFiles(files, tests).map((f) => [f.path, f.status])).toEqual([
+  // 絕對路徑（/private 前綴）也算說明過，不會重複列出
+  const tests = [{ ...sampleReport.tests[0], file: '/private/tmp/wt/t1/src/auth/lockout.test.ts' }]
+  expect(undocumentedTestFiles(files, tests, '/tmp/wt/t1').map((f) => [f.path, f.status])).toEqual([
     ['tests/e2e/lockout.spec.ts', 'added'],
     ['src/old.test.ts', 'deleted']
   ])
 })
+
+test('新增的測試檔（PR 內文判斷有沒有新增測試用）', () => {
+  const diff = bigDiff('src/a.test.ts', 1) + bigDiff('src/a.ts', 1) + deleted
+  expect(addedTestFiles(diff)).toEqual(['src/a.test.ts'])
+  expect(addedTestFiles('')).toEqual([])
+})
+```
+
+```ts
+// tests/renderer/testItems.test.ts
+import { expect, test } from 'vitest'
+import {
+  coveringRuns,
+  isTestRunner,
+  runState,
+  summarizeRuns,
+  testVerdict
+} from '@renderer/report/testItems'
+import type { VerificationResult } from '@shared/types'
 
 const run = (over: Partial<VerificationResult>): VerificationResult => ({
   command: 'npm test',
@@ -21140,18 +21353,59 @@ test('驗證結果的狀態：通過、失敗（含未完成）、略過', () =>
   expect(runState(run({ exitCode: null, skipped: '未核准' }))).toBe('skipped')
 })
 
-test('輸出提到測試檔（路徑或檔名）的驗證指令才算涵蓋它；略過的不算', () => {
+test('整體結果：略過的不算在分母', () => {
+  expect(summarizeRuns([])).toEqual({ ran: 0, passed: 0, skipped: 0, state: 'skipped' })
+  expect(
+    summarizeRuns([run({}), run({ exitCode: 1 }), run({ skipped: '未核准', exitCode: null })])
+  ).toEqual({ ran: 2, passed: 1, skipped: 1, state: 'failed' })
+  expect(summarizeRuns([run({}), run({ skipped: '未核准' })])).toMatchObject({ state: 'passed' })
+})
+
+test('輸出提到測試檔（完整路徑或檔名，前後是路徑或空白的邊界）才算涵蓋；略過的不算', () => {
   const runs = [
     run({ command: 'npm run lint', exitCode: 1, outputTail: 'src/a.ts: error' }),
     run({ command: 'npm test', outputTail: ' ✓ src/auth/lockout.test.ts (1 test)' }),
-    run({ command: 'npx vitest run', outputTail: ' ✓ lockout.test.ts' }),
-    run({ command: 'npm run e2e', skipped: '未核准', outputTail: 'src/auth/lockout.test.ts' })
+    run({ command: 'npx vitest run', outputTail: ' ✓ packages/x/lockout.test.ts:3' }),
+    run({ command: 'npm run e2e', skipped: '未核准', outputTail: 'src/auth/lockout.test.ts' }),
+    run({ command: 'jest', outputTail: 'PASS xlockout.test.ts\nPASS lockout.test.tsx' })
   ]
   expect(coveringRuns('src/auth/lockout.test.ts', runs).map((v) => v.command)).toEqual([
     'npm test',
     'npx vitest run'
   ])
   expect(coveringRuns('src/auth/login.test.ts', runs)).toEqual([])
+})
+
+test('看起來是跑測試的指令', () => {
+  for (const c of [
+    'npm test',
+    'npm run test:unit',
+    'pnpm vitest run',
+    'npx jest --ci',
+    'python -m pytest -q',
+    'go test ./...',
+    'cargo test',
+    'bundle exec rspec',
+    'npx playwright test',
+    'npx cypress run',
+    'npx mocha'
+  ])
+    expect(isTestRunner(c), c).toBe(true)
+  for (const c of ['npm run lint', 'npm run typecheck', 'tsc --noEmit', 'npm run e2e', 'make'])
+    expect(isTestRunner(c), c).toBe(false)
+})
+
+test('一個測試的驗證：先看輸出提到它的指令，再看跑測試的指令，都沒有就只給整體數字', () => {
+  const lint = run({ command: 'npm run lint', exitCode: 1 })
+  const types = run({ command: 'npm run typecheck' })
+  const unit = run({ command: 'npm test', outputTail: 'ok src/a.test.ts' })
+  const e2e = run({ command: 'npx playwright test', exitCode: 1 })
+  expect(testVerdict('src/a.test.ts', [lint, unit, e2e])).toEqual({ runs: [unit] })
+  expect(testVerdict('src/b.test.ts', [lint, unit, e2e])).toEqual({ runs: [unit, e2e] })
+  expect(testVerdict('src/b.test.ts', [lint, types])).toEqual({
+    summary: { ran: 2, passed: 1, skipped: 0, state: 'failed' }
+  })
+  expect(testVerdict('src/b.test.ts', [])).toBeUndefined()
 })
 ```
 
@@ -21219,6 +21473,12 @@ test('新增的測試排在概觀之後、其他區塊之前，列出名稱、�
   )
   expect(order.slice(0, 3)).toEqual(['概觀', '新增的測試', '架構前後對照'])
 
+  // 測試名稱是標題（螢幕閱讀器可以用標題跳著看）
+  expect(
+    within(section())
+      .getAllByRole('heading', { level: 3 })
+      .map((h) => h.textContent)
+  ).toEqual(['連續失敗 5 次後鎖定帳號', '錯誤密碼回 401'])
   const added = item('連續失敗 5 次後鎖定帳號')
   expect(added).toHaveAttribute('data-anchor', 'test:t1')
   expect(within(added).getByText('src/auth/lockout.test.ts:3')).toBeInTheDocument()
@@ -21243,28 +21503,18 @@ test('新增的測試排在概觀之後、其他區塊之前，列出名稱、�
   expect(within(section()).queryByText('這次沒有新增測試')).not.toBeInTheDocument()
 })
 
-test('驗證結果：不捏造逐個測試的結果，多個指令時顯示整體並連到測試結果', async () => {
+test('驗證結果：不捏造逐個測試的結果；輸出沒提到測試檔時看跑測試的指令（不看 lint）', async () => {
   renderReport()
   await loaded()
-  // fixture：npm test 通過、lint 失敗、e2e 略過
+  // fixture：npm test 通過、lint 失敗、e2e 略過（npm run e2e 看不出是跑測試的指令）
   const added = item('連續失敗 5 次後鎖定帳號')
-  expect(added).toHaveTextContent('驗證：1 / 2 通過 · 略過 1')
-  await userEvent.click(within(added).getByRole('button', { name: '查看測試結果' }))
-  expect(scrolled.mock.contexts.at(-1)).toBe(document.getElementById('report-tests'))
+  expect(added).toHaveTextContent('驗證：npm test 通過')
+  expect(added).not.toHaveTextContent('npm run lint')
+  // 指令很長時會被截斷：完整指令放在 title
+  expect(within(added).getByText('npm test')).toHaveAttribute('title', 'npm test')
 })
 
-test('只有一個驗證指令時顯示它的結果；輸出提到測試檔時顯示那個指令的結果', async () => {
-  report = makeReport({
-    verification: [
-      { command: 'npm test', exitCode: 1, durationMs: 10, outputTail: 'Tests  1 failed' }
-    ]
-  })
-  const { unmount } = renderReport()
-  await loaded()
-  expect(item('連續失敗 5 次後鎖定帳號')).toHaveTextContent('驗證：npm test 失敗（exit 1）')
-  expect(item('錯誤密碼回 401')).toHaveTextContent('驗證：npm test 失敗（exit 1）')
-  unmount()
-
+test('輸出提到測試檔時只顯示那個指令；沒提到時顯示所有跑測試的指令', async () => {
   report = makeReport({
     verification: [
       { command: 'npm run lint', exitCode: 1, durationMs: 10, outputTail: 'error' },
@@ -21273,13 +21523,35 @@ test('只有一個驗證指令時顯示它的結果；輸出提到測試檔時�
         exitCode: 0,
         durationMs: 10,
         outputTail: ' ✓ src/auth/lockout.test.ts (1 test)\n Tests  1 passed'
-      }
+      },
+      { command: 'npm run test:e2e', exitCode: 1, durationMs: 10, outputTail: '1 failed' }
     ]
   })
   renderReport()
   await loaded()
-  expect(item('連續失敗 5 次後鎖定帳號')).toHaveTextContent('驗證：npx vitest run 通過')
-  expect(item('錯誤密碼回 401')).toHaveTextContent('驗證：1 / 2 通過')
+  const added = item('連續失敗 5 次後鎖定帳號')
+  expect(added).toHaveTextContent('驗證：npx vitest run 通過')
+  expect(added).not.toHaveTextContent('test:e2e')
+  const modified = item('錯誤密碼回 401')
+  expect(modified).toHaveTextContent('npx vitest run 通過')
+  expect(modified).toHaveTextContent('npm run test:e2e 失敗（exit 1）')
+})
+
+test('沒有跑測試的指令時只給整體數字（中性樣式，不打紅叉），連到測試結果', async () => {
+  report = makeReport({
+    verification: [
+      { command: 'npm run lint', exitCode: 1, durationMs: 10, outputTail: 'error' },
+      { command: 'npm run typecheck', exitCode: 0, durationMs: 10, outputTail: '' },
+      { command: 'npm run e2e', exitCode: null, durationMs: 0, outputTail: '', skipped: '未核准' }
+    ]
+  })
+  renderReport()
+  await loaded()
+  const added = item('連續失敗 5 次後鎖定帳號')
+  expect(added).toHaveTextContent('驗證：1 / 2 通過 · 略過 1')
+  expect(within(added).getByText('1 / 2 通過').className).not.toMatch(/danger/)
+  await userEvent.click(within(added).getByRole('button', { name: '查看測試結果' }))
+  expect(scrolled.mock.contexts.at(-1)).toBe(document.getElementById('report-tests'))
 })
 
 test('沒有驗證指令或全部略過時照實顯示', async () => {
@@ -21302,13 +21574,16 @@ test('點測試跳到 diff 裡的測試檔；有行號時捲到那一行', async
   renderReport()
   await loaded()
   expect(pressed()).toMatch(/^src\/auth\/lockout\.ts/)
-  await userEvent.click(within(section()).getByText('src/auth/lockout.test.ts:3'))
+  await userEvent.click(within(section()).getByRole('button', { name: '連續失敗 5 次後鎖定帳號' }))
   expect(pressed()).toMatch(/^src\/auth\/lockout\.test\.ts/)
   expect(lastScrolled()).toBe('diff:src/auth/lockout.test.ts:3')
+  // 焦點跟著移到那一行（鍵盤與螢幕閱讀器使用者從那裡繼續）
+  expect(document.activeElement).toHaveAttribute('data-anchor', 'diff:src/auth/lockout.test.ts:3')
   // 沒有行號：捲到那個檔案
-  await userEvent.click(within(section()).getByText('src/auth/login.test.ts'))
+  await userEvent.click(within(section()).getByRole('button', { name: '錯誤密碼回 401' }))
   expect(pressed()).toMatch(/^src\/auth\/login\.test\.ts/)
   expect(lastScrolled()).toBe('file:src/auth/login.test.ts')
+  expect(document.activeElement).toHaveAttribute('data-anchor', 'file:src/auth/login.test.ts')
 })
 
 test('測試檔不在這次的變更裡時不能點，並註明', async () => {
@@ -21319,7 +21594,9 @@ test('測試檔不在這次的變更裡時不能點，並註明', async () => {
   renderReport()
   await loaded()
   const added = item('連續失敗 5 次後鎖定帳號')
-  expect(within(added).queryByRole('button', { name: /gone/ })).not.toBeInTheDocument()
+  expect(
+    within(added).queryByRole('button', { name: '連續失敗 5 次後鎖定帳號' })
+  ).not.toBeInTheDocument()
   expect(added).toHaveTextContent('src/auth/gone.test.ts（不在這次的變更中）')
 })
 
@@ -21338,6 +21615,26 @@ test('Claude 沒說明的測試檔列在區塊最後，標「未說明」，點�
   await userEvent.click(rest)
   expect(pressed()).toMatch(/^tests\/e2e\/lockout\.spec\.ts/)
   expect(lastScrolled()).toBe('file:tests/e2e/lockout.spec.ts')
+  // 概觀的「新增測試」旁邊標出未說明的新增測試檔
+  const overview = screen.getByRole('region', { name: '概觀' })
+  expect(within(overview).getByText('新增測試').nextSibling).toHaveTextContent('1修改 1未說明 1')
+})
+
+test('Claude 給的是絕對路徑（含 /private 前綴）：顯示 repo 裡的路徑，不重複列成未說明', async () => {
+  report = makeReport()
+  report.input.tests = [
+    { ...report.input.tests[0], file: '/tmp/wt/t1/src/auth/lockout.test.ts' },
+    { ...report.input.tests[1], file: '/private/tmp/wt/t1/src/auth/login.test.ts' }
+  ]
+  renderReport()
+  await loaded()
+  expect(
+    within(item('連續失敗 5 次後鎖定帳號')).getByText('src/auth/lockout.test.ts:3')
+  ).toBeInTheDocument()
+  expect(within(item('錯誤密碼回 401')).getByText('src/auth/login.test.ts')).toBeInTheDocument()
+  expect(within(section()).queryByText('未說明')).not.toBeInTheDocument()
+  await userEvent.click(within(section()).getByRole('button', { name: '錯誤密碼回 401' }))
+  expect(pressed()).toMatch(/^src\/auth\/login\.test\.ts/)
 })
 
 test('沒有新增測試：提醒樣式，附上 Claude 說明的原因；概觀顯示 0', async () => {
@@ -21372,6 +21669,9 @@ test('沒有說明任何測試、但 diff 裡有新的測試檔：不說「沒�
   expect(within(section()).queryByText('這次沒有新增測試')).not.toBeInTheDocument()
   expect(within(section()).getByText('Claude 沒有說明新增的測試')).toBeInTheDocument()
   expect(within(section()).getAllByText('未說明')).toHaveLength(2)
+  // 概觀：新增測試 0，旁邊標出 1 個未說明的新增測試檔（修改的 login.test.ts 不算）
+  const overview = screen.getByRole('region', { name: '概觀' })
+  expect(within(overview).getByText('新增測試').nextSibling).toHaveTextContent('0未說明 1')
 })
 
 test('對測試與區塊留言：回饋清單標成「測試 · 名稱」，點它捲到那個測試', async () => {
@@ -21401,14 +21701,14 @@ test('只能看時沒有留言按鈕，但仍可以跳到 diff', async () => {
   renderReport(true)
   await loaded()
   expect(within(section()).queryByRole('button', { name: /留言/ })).not.toBeInTheDocument()
-  await userEvent.click(within(section()).getByText('src/auth/login.test.ts'))
+  await userEvent.click(within(section()).getByRole('button', { name: '錯誤密碼回 401' }))
   expect(pressed()).toMatch(/^src\/auth\/login\.test\.ts/)
 })
 ```
 
 **Step 2: 確認失敗**
 
-Run: `npx vitest run tests/renderer/testItems.test.ts tests/renderer/TestsSection.test.tsx tests/renderer/exportHtml.test.tsx tests/shared/report.test.ts tests/main/repository.test.ts tests/main/prompts.test.ts tests/main/prBody.test.ts` → Expected: FAIL（模組不存在、schema 沒有 tests、PR 內文與提示缺少新增的測試）
+Run: `npx vitest run tests/shared tests/renderer/testItems.test.ts tests/renderer/TestsSection.test.tsx tests/renderer/exportHtml.test.tsx tests/main/repository.test.ts tests/main/prompts.test.ts tests/main/prBody.test.ts` → Expected: FAIL（模組不存在、schema 沒有 tests、PR 內文與提示缺少新增的測試）
 
 **Step 3: schema、舊報告、提示與 PR 內文**
 
@@ -21452,44 +21752,83 @@ export const ReportInputShape = {
   })
 ```
 
-`Repository.getReport`（Task 10）讀出報告後回傳 `{ ...r, input: { ...r.input, tests: r.input.tests ?? [] } }`；`prompts.ts`（Task 19）與 `prBody.ts`（Task 24）照各自區塊的最終版本修改。
+`Repository.getReport`（Task 10）讀出報告後回傳 `{ ...r, input: { ...r.input, tests: r.input.tests ?? [] } }`；`prompts.ts`（Task 19）與 `prBody.ts`（Task 24）照各自區塊的最終版本修改（PR 內文用下一步的 `addedTestFiles`、`resolveTestPath`）。
 
-**Step 4: testItems.ts**
+**Step 4: src/shared/testFiles.ts**
 
 ```ts
-// src/renderer/src/report/testItems.ts
-// 「新增的測試」區塊用的判斷：哪些是測試檔、Claude 沒說明的測試檔、驗證指令的結果
-import type { DiffFile } from '@shared/diff'
-import type { TestNote } from '@shared/report'
-import type { VerificationResult } from '@shared/types'
+// src/shared/testFiles.ts
+// Harness 自己從 diff 判斷哪些是測試檔（不靠 Claude 的說明）：報告的「新增的測試」區塊與 PR 內文共用
+import { type DiffFile, parseUnifiedDiff } from './diff'
+import type { TestNote } from './report'
 
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
 
-/** tests/、test/、__tests__/、spec/ 底下的檔案 */
-const TEST_DIR = /(^|\/)(tests?|__tests__|spec)\//
-/** *.test.*、*.spec.*、*_test.*、test_*.py */
-const TEST_NAME = /^(.+\.(test|spec)\..+|.+_test\..+|test_.+\.py)$/
+/** 測試檔一定是原始碼：文件、資料、設定與 snapshot 都不算 */
+const SOURCE_EXT = /\.(tsx?|jsx?|mjs|cjs|py|rb|go|rs|java|kt|swift|php|cs)$/
+/** fixture、snapshot、mock 與測試資料的資料夾：裡面的檔案不是測試本身 */
+const NOT_TESTS_DIR = /(^|\/)(fixtures?|__snapshots__|__mocks__|testdata)\//
+/** 測試資料夾（Swift 慣用 Tests/） */
+const TEST_DIR = /(^|\/)(tests?|__tests__|spec|Tests)\//
+/** 測試檔名：*.test.*、*.spec.*、*.cy.*、*_test.*、test_*.py、*_spec.rb、*Test(s).java／.kt */
+const TEST_NAME =
+  /^(.+\.(test|spec|cy)\.[^.]+|.+_test\.[^.]+|test_.+\.py|.+_spec\.rb|.+Tests?\.(java|kt))$/
+/** 測試資料夾裡的輔助檔：helper(s)、setup、util(s)、conftest，可帶前綴（spec_helper、vitest.setup） */
+const HELPER = /^([\w.-]*[._-])?(helpers?|setup|utils?|conftest)\.[^.]+$/
 
-/** 依路徑判斷是不是測試檔（Harness 自己從 diff 偵測，不靠 Claude 的說明） */
-export const isTestFile = (path: string) => TEST_DIR.test(path) || TEST_NAME.test(baseName(path))
+/** 依路徑判斷是不是測試檔 */
+export function isTestFile(path: string): boolean {
+  if (!SOURCE_EXT.test(path) || NOT_TESTS_DIR.test(path)) return false
+  const name = baseName(path)
+  if (TEST_NAME.test(name)) return true
+  return TEST_DIR.test(path) && !HELPER.test(name)
+}
 
-/** Claude 給的測試檔路徑 → diff 裡的路徑：去掉 worktree 前綴與開頭的 ./ */
-export function normalizeTestPath(file: string, root?: string): string {
+/**
+ * Claude 給的測試檔路徑 → diff 裡的路徑：去掉空白、worktree 前綴與開頭的 ./；
+ * 仍對不到時以結尾比對（絕對路徑、/var 與 /private/var、省略前段的相對路徑），
+ * 只在剛好對到一個檔案時採用；都對不到就回傳整理過的路徑。
+ */
+export function resolveTestPath(file: string, diffPaths: string[], root?: string): string {
   let p = file.trim()
   const prefix = root ? `${root.replace(/\/+$/, '')}/` : undefined
   if (prefix && p.startsWith(prefix)) p = p.slice(prefix.length)
-  return p.replace(/^(\.\/)+/, '')
+  p = p.replace(/^(\.\/)+/, '')
+  if (diffPaths.includes(p)) return p
+  // Claude 的路徑比較長（絕對路徑）：取 diff 裡最長的、是它結尾的路徑
+  const tails = diffPaths.filter((d) => p.endsWith(`/${d}`))
+  if (tails.length) return tails.reduce((a, b) => (b.length > a.length ? b : a))
+  // Claude 的路徑比較短：diff 裡只有一個檔案以它結尾時才採用
+  const heads = diffPaths.filter((d) => d.endsWith(`/${p}`))
+  return heads.length === 1 ? heads[0] : p
 }
 
-/** diff 裡的測試檔中，Claude 沒有在 tests 說明的（含刪除的測試檔） */
+/** diff 裡的測試檔中，沒有對到 Claude 在 tests 說明的（含刪除的測試檔） */
 export function undocumentedTestFiles(
   files: DiffFile[],
   tests: TestNote[],
   root?: string
 ): DiffFile[] {
-  const described = new Set(tests.map((t) => normalizeTestPath(t.file, root)))
+  const paths = files.map((f) => f.path)
+  const described = new Set(tests.map((t) => resolveTestPath(t.file, paths, root)))
   return files.filter((f) => isTestFile(f.path) && !described.has(f.path))
 }
+
+/** diff 裡新增的測試檔路徑 */
+export function addedTestFiles(diff: string): string[] {
+  return parseUnifiedDiff(diff)
+    .filter((f) => f.status === 'added' && isTestFile(f.path))
+    .map((f) => f.path)
+}
+```
+
+**Step 5: testItems.ts**
+
+```ts
+// src/renderer/src/report/testItems.ts
+// 驗證指令的結果：狀態、整體數字，以及「新增的測試」每個項目要顯示哪些指令的結果。
+// 只有指令的整體結果是真的：不從輸出推測單一測試的結果。
+import type { VerificationResult } from '@shared/types'
 
 export type RunState = 'passed' | 'failed' | 'skipped'
 
@@ -21497,39 +21836,75 @@ export type RunState = 'passed' | 'failed' | 'skipped'
 export const runState = (v: VerificationResult): RunState =>
   v.skipped ? 'skipped' : v.exitCode === 0 ? 'passed' : 'failed'
 
-/**
- * 輸出（末段）提到這個測試檔（路徑或檔名）的驗證指令。
- * 只是「這個指令跑到了這個檔案」的證據：顯示的是指令的整體結果，不是單一測試的結果。
- */
+export interface RunSummary {
+  /** 實際執行的指令數（略過的不算在分母） */
+  ran: number
+  passed: number
+  skipped: number
+  /** 全部通過、有失敗，或一個都沒執行 */
+  state: RunState
+}
+
+/** 一組驗證指令的整體結果（概觀的數據格、測試項目的整體數字共用） */
+export function summarizeRuns(runs: VerificationResult[]): RunSummary {
+  const ran = runs.filter((v) => !v.skipped)
+  const passed = ran.filter((v) => v.exitCode === 0).length
+  const state: RunState = !ran.length ? 'skipped' : passed === ran.length ? 'passed' : 'failed'
+  return { ran: ran.length, passed, skipped: runs.length - ran.length, state }
+}
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
+
+/** 輸出裡出現 term，而且前面是開頭、空白、引號、括號或 /，後面是結尾、空白、引號、括號、冒號或逗號 */
+const mentions = (output: string, term: string) =>
+  new RegExp(`(^|[\\s'"(\\[/])${escapeRegExp(term)}(?=$|[\\s'")\\]:,])`, 'm').test(output)
+
+/** 輸出（末段）提到這個測試檔（完整路徑或檔名）的驗證指令；略過的沒有輸出 */
 export function coveringRuns(file: string, runs: VerificationResult[]): VerificationResult[] {
   const name = baseName(file)
   return runs.filter(
-    (v) => !v.skipped && (v.outputTail.includes(file) || v.outputTail.includes(name))
+    (v) => !v.skipped && (mentions(v.outputTail, file) || mentions(v.outputTail, name))
   )
+}
+
+const TEST_RUNNER = /\b(test|vitest|jest|pytest|rspec|playwright|cypress|mocha)\b/
+
+/** 看起來是跑測試的指令（npm test、npm run test:unit、go test、cargo test、pytest…） */
+export const isTestRunner = (command: string) => TEST_RUNNER.test(command)
+
+/** 一個測試要顯示的驗證：指令的結果（runs），或只有整體數字（summary）；沒有驗證指令時 undefined */
+export type TestVerdict = { runs: VerificationResult[] } | { summary: RunSummary } | undefined
+
+/**
+ * 一個測試的驗證：先看輸出提到這個測試檔的指令，再看所有跑測試的指令；
+ * 都沒有（例如只有 lint、typecheck）時只給整體數字。
+ */
+export function testVerdict(file: string, runs: VerificationResult[]): TestVerdict {
+  if (!runs.length) return undefined
+  const covering = coveringRuns(file, runs)
+  if (covering.length) return { runs: covering }
+  const runners = runs.filter((v) => isTestRunner(v.command))
+  return runners.length ? { runs: runners } : { summary: summarizeRuns(runs) }
 }
 ```
 
-**Step 5: TestsSection.tsx**（外框、標題與區塊留言由 ReportView 的 `Section` 提供；只用 tokens，項目外框同決策卡片）
+**Step 6: TestsSection.tsx**（外框、標題與區塊留言由 ReportView 的 `Section` 提供；只用 tokens，項目外框同決策卡片）
 
 ```tsx
 // src/renderer/src/report/TestsSection.tsx
 // 報告最優先的區塊「新增的測試」：Claude 說明的每個測試（情境、修改原因）、
 // 對應的驗證結果（Harness 實際執行的指令整體結果，不捏造逐個測試的結果），
 // 以及 Harness 從 diff 偵測到、Claude 沒說明的測試檔。外框（標題、留言）由 ReportView 的 Section 提供。
-import { type ReactNode, useMemo } from 'react'
-import { type DiffFile, parseUnifiedDiff } from '@shared/diff'
+import { type ReactNode, useId } from 'react'
+import type { DiffFile } from '@shared/diff'
 import type { TestNote } from '@shared/report'
+import { resolveTestPath } from '@shared/testFiles'
 import type { VerificationResult } from '@shared/types'
 import { InlineCode } from '../components/Markdown'
 import { cx, Icons, Pill } from '../components/ui'
 import { testAnchor } from './anchors'
-import {
-  coveringRuns,
-  normalizeTestPath,
-  type RunState,
-  runState,
-  undocumentedTestFiles
-} from './testItems'
+import { type RunState, runState, testVerdict } from './testItems'
 
 const KIND_LABEL: Record<TestNote['kind'], string> = {
   unit: '單元',
@@ -21564,8 +21939,8 @@ function runLabel(v: VerificationResult): string {
 }
 
 /**
- * 一個測試的驗證結果：輸出提到這個測試檔的指令，或只有一個驗證指令時，顯示那個指令的結果；
- * 否則顯示全部驗證的整體結果，連到「測試結果」。
+ * 一個測試的驗證結果（規則見 testVerdict）：指令的結果附通過／失敗的顏色；
+ * 只有整體數字時用中性的樣式（那些指令不一定跟這個測試有關），連到「測試結果」。
  */
 function TestVerification({
   file,
@@ -21578,12 +21953,11 @@ function TestVerification({
   isStatic?: boolean
   onShowResults?: () => void
 }) {
-  const covering = coveringRuns(file, runs)
-  const shown = covering.length ? covering : runs.length === 1 ? runs : undefined
+  const verdict = testVerdict(file, runs)
   let body: ReactNode
-  if (runs.length === 0) body = <span className="text-muted">沒有驗證指令</span>
-  else if (shown)
-    body = shown.map((v, i) => {
+  if (!verdict) body = <span className="text-muted">沒有驗證指令</span>
+  else if ('runs' in verdict)
+    body = verdict.runs.map((v, i) => {
       const state = runState(v)
       return (
         <span
@@ -21592,24 +21966,20 @@ function TestVerification({
           className={cx('flex min-w-0 items-center gap-1', RUN_TEXT[state])}
         >
           <RunIcon state={state} />
-          <code className="min-w-0 truncate bg-transparent p-0 text-inherit">{v.command}</code>{' '}
+          <code title={v.command} className="min-w-0 truncate bg-transparent p-0 text-inherit">
+            {v.command}
+          </code>{' '}
           {runLabel(v)}
         </span>
       )
     })
   else {
-    const ran = runs.filter((v) => !v.skipped)
-    const passed = ran.filter((v) => v.exitCode === 0).length
-    const skipped = runs.length - ran.length
-    const state: RunState = !ran.length ? 'skipped' : passed === ran.length ? 'passed' : 'failed'
+    const { ran, passed, skipped } = verdict.summary
     const link = 'cursor-pointer text-brand hover:text-brand-hover'
     body = (
       <>
-        <span className={cx('flex items-center gap-1', RUN_TEXT[state])}>
-          <RunIcon state={state} />
-          {ran.length ? `${passed} / ${ran.length} 通過` : '未執行'}
-        </span>
-        {skipped > 0 && ran.length > 0 && <span className="text-muted"> · 略過 {skipped}</span>}
+        <span className="text-ink-2">{ran ? `${passed} / ${ran} 通過` : '未執行'}</span>
+        {skipped > 0 && ran > 0 && <span className="text-muted"> · 略過 {skipped}</span>}
         {isStatic ? (
           <a href="#report-tests" className={link}>
             查看測試結果
@@ -21630,39 +22000,90 @@ function TestVerification({
   )
 }
 
-/** 檔案在這次的 diff 裡、而且不是匯出檔時可以點：跳到 diff 裡的那個檔案（與行） */
-function JumpTarget({
+/** Claude 說明的一個測試：名稱（標題，可以點：跳到 diff 裡的測試檔與行）、檔案、標籤、情境、修改原因、驗證 */
+function TestItem({
+  test: t,
   path,
-  line,
-  enabled,
+  inDiff,
+  runs,
+  isStatic,
+  anchorAttr,
+  button,
+  slot,
   onJump,
-  children
+  onShowResults
 }: {
+  test: TestNote
   path: string
-  line?: number
-  enabled: boolean
+  inDiff: boolean
+  runs: VerificationResult[]
+  isStatic?: boolean
+  anchorAttr: (anchor: string) => string | undefined
+  button: (anchor: string, label: string, aria?: string) => ReactNode
+  slot: (anchor: string, label: string) => ReactNode
   onJump?: (path: string, line?: number) => void
-  children: ReactNode
+  onShowResults?: () => void
 }) {
-  const layout = 'flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left'
-  return onJump && enabled ? (
-    <button
-      type="button"
-      title="在程式碼變更中查看"
-      onClick={() => onJump(path, line)}
-      className={cx(layout, 'group cursor-pointer')}
+  const anchor = testAnchor(t.id)
+  const whereId = useId()
+  const jump = !isStatic && inDiff && onJump
+  return (
+    <div
+      data-anchor={anchorAttr(anchor)}
+      className="flex min-w-0 flex-col gap-2 rounded-[14px] p-4 shadow-[0_0_0_1px_var(--color-chip)]"
     >
-      {children}
-    </button>
-  ) : (
-    <div className={layout}>{children}</div>
+      <div className="flex items-start gap-3">
+        {/* relative：按鈕的 ::after 蓋住名稱與檔案，點檔案也會跳 */}
+        <div className="group relative flex min-w-0 flex-1 flex-col items-start gap-0.5">
+          <h3 className="m-0 text-sm leading-snug font-bold">
+            {jump ? (
+              <button
+                type="button"
+                title="在程式碼變更中查看"
+                aria-describedby={whereId}
+                onClick={() => onJump(path, t.line)}
+                className="cursor-pointer text-left group-hover:text-brand after:absolute after:inset-0 after:content-['']"
+              >
+                <InlineCode text={t.name} />
+              </button>
+            ) : (
+              <InlineCode text={t.name} />
+            )}
+          </h3>
+          <span id={whereId} className="font-mono text-xs break-all text-muted">
+            {t.line ? `${path}:${t.line}` : path}
+            {!inDiff && <span className="font-sans">（不在這次的變更中）</span>}
+          </span>
+        </div>
+        <span className="flex flex-none items-center gap-1">
+          <Pill tone={t.change === 'added' ? 'brand' : 'review'}>
+            {t.change === 'added' ? '新增' : '修改'}
+          </Pill>
+          <Pill tone="muted">{KIND_LABEL[t.kind]}</Pill>
+          {button(anchor, t.name, `對測試「${t.name}」留言`)}
+        </span>
+      </div>
+      <div className="text-[13px]">
+        <span className="mr-2 font-medium text-brand">情境</span>
+        <InlineCode text={t.scenario} />
+      </div>
+      {t.why && (
+        <div className="rounded-[10px] bg-fill-2 px-3 py-2.5 text-[13px] text-ink-2">
+          <span className="mr-2 font-medium">為什麼改</span>
+          <InlineCode text={t.why} />
+        </div>
+      )}
+      <TestVerification file={path} runs={runs} isStatic={isStatic} onShowResults={onShowResults} />
+      {slot(anchor, t.name)}
+    </div>
   )
 }
 
 export function TestsSection({
   tests,
   note,
-  diff,
+  files,
+  undocumented,
   root,
   runs,
   isStatic,
@@ -21675,7 +22096,9 @@ export function TestsSection({
   tests: TestNote[]
   /** 沒有新增測試的原因（Claude 說明） */
   note?: string
-  diff: string
+  /** diff 裡的檔案與其中 Claude 沒說明的測試檔（ReportView 算好，概觀的數據也用） */
+  files: DiffFile[]
+  undocumented: DiffFile[]
   /** worktree 路徑：Claude 給了絕對路徑時去掉 */
   root?: string
   runs: VerificationResult[]
@@ -21687,12 +22110,7 @@ export function TestsSection({
   onJump?: (path: string, line?: number) => void
   onShowResults?: () => void
 }) {
-  const files = useMemo(() => parseUnifiedDiff(diff), [diff])
-  const paths = useMemo(() => new Set(files.map((f) => f.path)), [files])
-  const undocumented = useMemo(
-    () => undocumentedTestFiles(files, tests, root),
-    [files, tests, root]
-  )
+  const paths = files.map((f) => f.path)
   // 新增的在前、修改的在後
   const ordered = [
     ...tests.filter((t) => t.change === 'added'),
@@ -21704,13 +22122,13 @@ export function TestsSection({
   return (
     <div className="flex flex-col gap-3">
       {!hasAdded && (
-        <div className="flex gap-2.5 rounded-xl bg-decision px-3.5 py-3 text-[13px]">
-          <Icons.Info className="mt-[3px] flex-none text-decision-ink" />
+        <div className="flex gap-2.5 rounded-xl bg-warn-soft px-3.5 py-3 text-[13px]">
+          <Icons.Info className="mt-[3px] flex-none text-warn" />
           <div className="flex min-w-0 flex-col gap-0.5">
-            <span className="font-medium text-decision-ink">
+            <span className="font-medium text-warn">
               {undocumentedAdded ? 'Claude 沒有說明新增的測試' : '這次沒有新增測試'}
             </span>
-            <span className="text-decision-body">
+            <span className="text-ink-2">
               {note ? (
                 <InlineCode text={note} />
               ) : undocumentedAdded ? (
@@ -21723,56 +22141,21 @@ export function TestsSection({
         </div>
       )}
       {ordered.map((t) => {
-        const anchor = testAnchor(t.id)
-        const path = normalizeTestPath(t.file, root)
-        const inDiff = paths.has(path)
+        const path = resolveTestPath(t.file, paths, root)
         return (
-          <div
+          <TestItem
             key={t.id}
-            data-anchor={anchorAttr(anchor)}
-            className="flex min-w-0 flex-col gap-2 rounded-[14px] p-4 shadow-[0_0_0_1px_var(--color-chip)]"
-          >
-            <div className="flex items-start gap-3">
-              <JumpTarget
-                path={path}
-                line={t.line}
-                enabled={inDiff}
-                onJump={isStatic ? undefined : onJump}
-              >
-                <span className="font-bold group-hover:text-brand">
-                  <InlineCode text={t.name} />
-                </span>
-                <span className="font-mono text-xs break-all text-muted">
-                  {t.line ? `${path}:${t.line}` : path}
-                  {!inDiff && <span className="font-sans">（不在這次的變更中）</span>}
-                </span>
-              </JumpTarget>
-              <span className="flex flex-none items-center gap-1">
-                <Pill tone={t.change === 'added' ? 'brand' : 'review'}>
-                  {t.change === 'added' ? '新增' : '修改'}
-                </Pill>
-                <Pill tone="muted">{KIND_LABEL[t.kind]}</Pill>
-                {button(anchor, t.name, `對測試「${t.name}」留言`)}
-              </span>
-            </div>
-            <div className="text-[13px]">
-              <span className="mr-2 font-medium text-brand">情境</span>
-              <InlineCode text={t.scenario} />
-            </div>
-            {t.why && (
-              <div className="rounded-[10px] bg-fill-2 px-3 py-2.5 text-[13px] text-ink-2">
-                <span className="mr-2 font-medium">為什麼改</span>
-                <InlineCode text={t.why} />
-              </div>
-            )}
-            <TestVerification
-              file={path}
-              runs={runs}
-              isStatic={isStatic}
-              onShowResults={onShowResults}
-            />
-            {slot(anchor, t.name)}
-          </div>
+            test={t}
+            path={path}
+            inDiff={paths.includes(path)}
+            runs={runs}
+            isStatic={isStatic}
+            anchorAttr={anchorAttr}
+            button={button}
+            slot={slot}
+            onJump={onJump}
+            onShowResults={onShowResults}
+          />
         )
       })}
       {undocumented.length > 0 && (
@@ -21786,12 +22169,21 @@ export function TestsSection({
                 key={f.path}
                 className="flex items-center gap-3 rounded-xl bg-fill-2 px-3.5 py-2.5 text-[13px]"
               >
-                <JumpTarget path={f.path} enabled onJump={isStatic ? undefined : onJump}>
-                  <span className="font-mono break-all group-hover:text-brand">{f.path}</span>
-                </JumpTarget>
+                {isStatic || !onJump ? (
+                  <span className="min-w-0 flex-1 font-mono break-all">{f.path}</span>
+                ) : (
+                  <button
+                    type="button"
+                    title="在程式碼變更中查看"
+                    onClick={() => onJump(f.path)}
+                    className="min-w-0 flex-1 cursor-pointer text-left font-mono break-all hover:text-brand"
+                  >
+                    {f.path}
+                  </button>
+                )}
                 <span className="flex flex-none items-center gap-1">
                   <Pill tone="muted">{FILE_STATUS[f.status]}</Pill>
-                  <Pill tone="decision">未說明</Pill>
+                  <Pill tone="warn">未說明</Pill>
                 </span>
               </li>
             ))}
@@ -21803,13 +22195,14 @@ export function TestsSection({
 }
 ```
 
-**Step 6: 接到報告畫面**（完整內容見 Task 33 的區塊）
+**Step 7: tokens 與接到報告畫面**（完整內容見 Task 2、26、33 的區塊）
 
-- `anchors.ts`：`testAnchor(id)`、`findAnchor(anchor)`（以 dataset 比對，ReportScreen 的回饋跳轉也改用它）、`KIND` 加上 `test: '測試'`。
-- `ReportView.tsx`：概觀改成 `grid-cols-5`，在「行數」與「驗證」之間加「新增測試」數據格；概觀之後放 `<Section id="new-tests" anchor="section:tests" title="新增的測試">`，內容是 `TestsSection`（`onJump={jumpToTest}`、`onShowResults` 捲到 `#report-tests`）；`jumpToTest(path, line)` 先 `flushSync(() => onDiffFile(path, line))` 再捲到 `diff:<路徑>:<行>`，找不到就捲到 `file:<路徑>`；`VerificationRow` 改用 `runState`。
-- `ReportScreen.tsx`：`onDiffFile={(path, line) => setDiffFocus({ version, path, line })}`。
+- `app.css`：`--color-warn: #c4320a`、`--color-warn-soft: #fff6ed`；`ui.tsx` 的 `Pill`／`TONE_TEXT` 加上 `warn`。
+- `anchors.ts`：`testAnchor(id)`、`findAnchor(anchor)`（以 dataset 比對）、`reveal(el, block)`（捲過去並把焦點移過去）、`KIND` 加上 `test: '測試'`。
+- `ReportView.tsx`：`useMemo` 解析一次 diff、算出未說明的測試檔（概觀與區塊共用）；概觀改成 `grid-cols-[repeat(auto-fit,minmax(112px,1fr))]`，數值 `wrap-anywhere`，在「行數」與「驗證」之間加「新增測試」數據格；驗證格改用 `summarizeRuns`；概觀之後放 `<Section id="new-tests" anchor="section:tests" title="新增的測試">`，內容是 `TestsSection`；`jumpToTest(path, line)` 先 `flushSync(() => onDiffFile(path, line))` 再 `reveal` 那一行（找不到就檔頭）；`VerificationRow` 改用 `runState`。
+- `ReportScreen.tsx`：`onDiffFile={(path, line) => setDiffFocus({ version, path, line })}`；回饋清單的跳轉改用 `reveal(findAnchor(anchor))`。
 
-**Step 7: 確認通過**
+**Step 8: 確認通過**
 
 ```bash
 npm test && npm run typecheck && npm run lint && npx electron-vite build
@@ -21817,17 +22210,18 @@ npm test && npm run typecheck && npm run lint && npx electron-vite build
 
 Expected: 全部通過。
 
-**Step 8: 手動驗證**（不呼叫真的 Claude）
+**Step 9: 手動驗證**（不呼叫真的 Claude）
 
 用暫存的 userData（`HARNESS_USER_DATA_DIR`）預先寫入一個 repo 與幾個 `reviewing` 狀態的任務和報告 JSON（腳本放在暫存資料夾，不進 repo），以 `scripts/e2e/driver.mjs --dir <暫存資料夾>` 啟動建置好的 app，逐項確認並截圖：
-1. 有新增與修改測試的報告：概觀第三格「新增測試 2 修改 1」；「新增的測試」緊接在概觀之後；新增／修改標籤、類型、情境、修改原因都在；輸出提到測試檔的項目顯示「驗證：npm test 通過」，其他項目顯示「驗證：1 / 2 通過 · 略過 1 查看測試結果」；diff 裡 Claude 沒說明的測試檔（含刪除的）列在最後並標「未說明」。
-2. 點測試的檔案 → diff 切到那個測試檔並捲到那一行。
+1. 有新增與修改測試的報告（1440px）：概觀五格一排，第三格「新增測試 2 修改 1 未說明 1」；「新增的測試」緊接在概觀之後；標籤、類型、情境、修改原因都在；輸出提到測試檔或跑測試的指令顯示「驗證：npm test 通過」；diff 裡 Claude 沒說明的測試檔（含刪除的）列在最後並標「未說明」。
+2. 點測試的名稱或檔案 → diff 切到那個測試檔、捲到那一行，焦點在那一行。
 3. 對測試與區塊留言 → 回饋清單顯示「測試 · 名稱」「區塊 · 新增的測試」，點了捲回該測試。
-4. 沒有新增測試的報告：提醒樣式「這次沒有新增測試」與 Claude 說明的原因，概觀「新增測試 0」用提醒顏色。
+4. 沒有新增測試的報告：警示樣式（不是決策的黃色）「這次沒有新增測試」與 Claude 說明的原因，概觀「新增測試 0」用警示顏色。
 5. 舊格式的報告（沒有 tests 欄位）照樣開得起來；diff 裡有新的測試檔時標題是「Claude 沒有說明新增的測試」。
-6. 匯出 HTML 後用瀏覽器打開：區塊完整、沒有按鈕，「查看測試結果」跳到測試結果。
+6. 視窗縮到 1100px、行數「+12345 −6789」：數據格換成 3＋2，沒有數字被切掉；Claude 給 `/tmp/…`（worktree 在 `/private/tmp/…`）的絕對路徑時顯示 repo 裡的路徑、不重複列成未說明；只有 lint／typecheck 時顯示中性的「1 / 2 通過 查看測試結果」。
+7. 匯出 HTML 後用瀏覽器打開：區塊完整、測試名稱是 h3、沒有按鈕，「查看測試結果」跳到測試結果。
 
-**Step 9: Commit**
+**Step 10: Commit**
 
 ```bash
 git add src tests
@@ -21836,6 +22230,19 @@ git commit -m "feat: report added tests and their scenarios first
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 git add docs
 git commit -m "docs: plan the added-tests report section (Task 36)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+審閱後的修正（共用的測試檔判斷、PR 內文不誤稱沒有新增測試、跑測試的指令優先、數據格自動換行、焦點、警示色）另外 commit：
+
+```bash
+git add src tests
+git commit -m "fix: tighten added-tests detection and verdicts after review
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git add docs
+git commit -m "docs: sync Task 36 with the review fixes
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
