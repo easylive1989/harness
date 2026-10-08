@@ -162,6 +162,15 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 報告整理（2026-10-08 總審查後加上）：`submit_report` 進入「整理報告中」的同一步把提交的 `ReportInput` 存成 `task.pendingReport`（之後做好的 commit 也記在裡面），整理完成、進入 `reviewing` 的同一步清掉。整理被中斷（關閉 app）或失敗（commit、diff、驗證指令出錯或逾時）時任務標為「已中斷」或「發生錯誤」並顯示原因，`pendingReport` 留著；「繼續」（`resume`）看到 `pendingReport` 就直接重新整理（commit → diff → 驗證 → 存報告），不送 `[resume]`、不再呼叫 Claude，結果不依賴 Claude 再提交一次；重試時沒有新的變更就沿用上一次的 commit。畫面說明「按「繼續」會直接重新整理報告，不會再呼叫 Claude」。使用者改為繼續和 Claude 對話（主線開新一輪）時放棄 `pendingReport`，由 Claude 重新提交。
 
+### 3.9 移除 repo
+
+（2026-10-08 使用中加上。）側欄的 repo 列在滑鼠移過或鍵盤聚焦時，右側出現「⋯」（`repo 動作`），按下後在 repo 列下方展開「移除 repo」，兩段式確認：「確定要從 Harness 移除 X？它的 N 個任務會一併刪除：停止 Claude，刪除 worktree、分支和對話紀錄，無法復原。repo 資料夾本身不受影響。」（N 是側欄看得到的任務；沒有時只寫最後一句；有 Claude 在執行時加「Claude 正在執行，會先停止。」）。有任務在整理報告時不能移除（「正在整理報告，完成後才能移除。」）。成功後提示「已移除 repo「X」」；正在看它的任務時回到新任務頁。
+
+- `repos:remove(repoId)` → `TaskManager.removeRepo`：這個 repo 的每個任務（含已丟棄、在側欄看不到的）依序在 `exclusive` 裡拒絕等待中的核准、中止主線與分岔的執行、`removeWorktree`（已丟棄的跳過），等這個任務排隊中的事件與寫入結束後刪掉 `tasks/<id>/`，推送 `task_removed`。全部處理完才把 repo 從 `repos.json` 移除並推送 `repos`。
+- 有任務在整理報告或收尾（開 PR、合併、丟棄）時拒絕；移除進行中不能為這個 repo 建立任務。中途失敗就停下並回報原因，repo 留著；已刪除的任務不會回來，再移除一次會接著處理剩下的。
+- repo 資料夾已不存在（或不再是 git repo）時 git 無法清理：跳過 worktree 與分支，照樣刪除任務紀錄、移除 repo，提示說明 worktree 資料夾沒有刪除與位置。
+- 只有移除 repo 會刪除任務的紀錄；單一任務仍只有「丟棄」（隱藏、保留紀錄）。
+
 ## 4. UI 畫面（對應設計畫布）
 
 1. 新任務：選 repo／加入資料夾、需求、base branch、模型
