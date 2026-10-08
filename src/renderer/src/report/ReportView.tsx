@@ -127,25 +127,33 @@ function DecisionSource({
   source: Decision['source']
   onOpenQuestion?: (questionId: string) => void
 }) {
-  if (source.type === 'branch') return <Pill tone="decision">來自分岔</Pill>
-  if (source.type === 'implementation') return <Pill tone="muted">實作中決定</Pill>
-  // 規格回饋、實作中插話或報告回饋中直接給的指示；ref 是 Claude 摘錄的指示
-  if (source.type === 'user') return <UserInstructionPill excerpt={source.ref} />
-  const i = task.questions.findIndex((q) => q.id === source.ref)
-  const label = i >= 0 ? `問題 ${i + 1}` : '問題'
-  // 點了切到釐清階段並捲到那個問題（回看當時的問答）
-  return onOpenQuestion ? (
-    <button
-      type="button"
-      aria-label={`${label}（查看釐清對話）`}
-      onClick={() => onOpenQuestion(source.ref)}
-      className="cursor-pointer"
-    >
-      <Pill className="hover:bg-chip">{label}</Pill>
-    </button>
-  ) : (
-    <Pill>{label}</Pill>
-  )
+  // 每種來源各自一個 case（noImplicitReturns：新增來源類型時這裡會編譯失敗，不會被當成問題）
+  switch (source.type) {
+    case 'branch':
+      return <Pill tone="decision">來自分岔</Pill>
+    case 'implementation':
+      return <Pill tone="muted">實作中決定</Pill>
+    case 'user':
+      // 規格回饋、實作中插話或報告回饋中直接給的指示；ref 是 Claude 摘錄的指示
+      return <UserInstructionPill excerpt={source.ref} />
+    case 'question': {
+      const i = task.questions.findIndex((q) => q.id === source.ref)
+      const label = i >= 0 ? `問題 ${i + 1}` : '問題'
+      // 點了切到釐清階段並捲到那個問題（回看當時的問答）
+      return onOpenQuestion ? (
+        <button
+          type="button"
+          aria-label={`${label}（查看釐清對話）`}
+          onClick={() => onOpenQuestion(source.ref)}
+          className="cursor-pointer"
+        >
+          <Pill className="hover:bg-chip">{label}</Pill>
+        </button>
+      ) : (
+        <Pill>{label}</Pill>
+      )
+    }
+  }
 }
 
 const SEVERITY: Record<Limitation['severity'], { box: string; body: string; tag: string }> = {
