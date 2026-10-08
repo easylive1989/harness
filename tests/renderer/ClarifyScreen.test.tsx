@@ -149,6 +149,110 @@ test('從訊息分岔：主線開始執行後不能送出，並說明原因', as
   expect(newBranchForm()).toHaveTextContent('主線正在執行，等它停下來才能開分岔')
 })
 
+test('從訊息分岔：取消後焦點回到分岔按鈕；建立後焦點移到新分岔的標籤', async () => {
+  const { rerender } = clarify()
+  const trigger = screen.getByRole('button', { name: '從這則訊息分岔' })
+  await userEvent.click(trigger)
+  await userEvent.type(topicInput(), '{Escape}')
+  expect(trigger).toHaveFocus()
+
+  await userEvent.click(trigger)
+  await userEvent.type(topicInput(), '差在哪？')
+  const release = holdNextCall(vi.mocked(call))
+  await userEvent.click(within(newBranchForm()).getByRole('button', { name: '開始討論' }))
+  // 主程序建立分岔時先推送任務更新，IPC 的結果才回來
+  const created = {
+    id: 'b1',
+    title: '差在哪？',
+    status: 'open' as const,
+    running: true,
+    createdAt: ''
+  }
+  rerender(
+    <ClarifyScreen
+      task={makeTask({ branches: [created] })}
+      nav={null}
+      readOnly={false}
+      onOpenStage={() => {}}
+    />
+  )
+  await release({ id: 'b1' })
+  expect(screen.getByRole('button', { name: /差在哪？ · 討論中/ })).toHaveFocus()
+})
+
+test('從訊息分岔：建立中不能取消（取消鈕停用、Esc 沒有作用）', async () => {
+  clarify()
+  await userEvent.click(screen.getByRole('button', { name: '從這則訊息分岔' }))
+  await userEvent.type(topicInput(), '差在哪？')
+  const release = holdNextCall(vi.mocked(call))
+  await userEvent.click(within(newBranchForm()).getByRole('button', { name: '開始討論' }))
+  expect(within(newBranchForm()).getByRole('button', { name: '取消' })).toBeDisabled()
+  await userEvent.type(topicInput(), '{Escape}')
+  expect(newBranchForm()).toBeInTheDocument()
+  await release({ id: 'b3' })
+  expect(useStore.getState().activeBranch.t1).toBe('b3')
+})
+
+test('從訊息分岔：換一則訊息就重新開始（不帶著前一則的問題）', async () => {
+  useStore.setState({
+    timelines: {
+      t1: [
+        ...events,
+        { id: 'e3', ts: '', channel: 'main', kind: 'assistant_text', text: '第二則訊息' }
+      ]
+    }
+  })
+  clarify()
+  const [first, second] = screen.getAllByRole('button', { name: '從這則訊息分岔' })
+  await userEvent.click(first)
+  await userEvent.type(topicInput(), '關於第一則')
+  await userEvent.click(second)
+  expect(within(newBranchForm()).getByText('第二則訊息')).toBeInTheDocument()
+  expect(topicInput()).toHaveValue('')
+  expect(topicInput()).toHaveFocus()
+})
+
+test('從訊息分岔的輸入框開著時，從問題卡片切到分岔（查看分岔）就放棄草稿', async () => {
+  const task = makeTask({
+    questions: [
+      {
+        id: 'q1',
+        text: '要鎖多久？',
+        status: 'open',
+        allowFreeText: true,
+        askedAt: '',
+        options: [{ id: 'a', label: '15 分鐘' }],
+        followups: []
+      }
+    ],
+    branches: [
+      {
+        id: 'b1',
+        title: '鎖定時間',
+        fromQuestionId: 'q1',
+        status: 'open',
+        running: false,
+        createdAt: ''
+      }
+    ]
+  })
+  useStore.setState({
+    activeBranch: {},
+    timelines: {
+      t1: [...events, { id: 'e3', ts: '', channel: 'main', kind: 'question', ref: 'q1' }]
+    }
+  })
+  render(<ClarifyScreen task={task} nav={null} readOnly={false} onOpenStage={() => {}} />)
+  await userEvent.click(screen.getByRole('button', { name: '從這則訊息分岔' }))
+  expect(newBranchForm()).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '查看分岔' }))
+  expect(screen.queryByRole('form', { name: '新分岔' })).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /鎖定時間 · 進行中/ })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+})
+
 test('等反問的回答時只在卡片顯示處理中，不重複顯示', () => {
   const task = makeTask({
     runState: 'running',

@@ -53,7 +53,8 @@ export interface BranchDraft {
   /** 正在建立分岔 */
   pending: boolean
   onSubmit: (question: string) => void
-  onCancel: () => void
+  /** 放棄草稿；refocus（預設）時焦點回到按下的分岔按鈕 */
+  onCancel: (refocus?: boolean) => void
 }
 
 /** 引用的訊息：最多 3 行，長的可以展開 */
@@ -95,9 +96,10 @@ function NewBranchForm({ draft, blocked }: { draft: BranchDraft; blocked: boolea
     if (!q || blocked || draft.pending) return
     draft.onSubmit(q)
   }
-  // 表單裡任何地方（輸入框、展開全文）按 Esc 都取消；選字中的 Esc 是取消組字，不是取消開分岔
+  // 表單裡任何地方（輸入框、展開全文）按 Esc 都取消；選字中的 Esc 是取消組字，不是取消開分岔。
+  // 建立中不能取消：分岔已經在建立，取消也擋不住
   const onKeyDown = (e: KeyboardEvent<HTMLFormElement>) => {
-    if (e.key === 'Escape' && !isComposing(e)) draft.onCancel()
+    if (e.key === 'Escape' && !isComposing(e) && !draft.pending) draft.onCancel()
   }
   return (
     <form
@@ -120,7 +122,7 @@ function NewBranchForm({ draft, blocked }: { draft: BranchDraft; blocked: boolea
         />
       </label>
       <div className="flex gap-2">
-        <Button variant="ghost" onClick={draft.onCancel}>
+        <Button variant="ghost" disabled={draft.pending} onClick={() => draft.onCancel()}>
           取消
         </Button>
         <Button
@@ -242,9 +244,11 @@ export function BranchPanel({
                 key={x.id}
                 type="button"
                 aria-pressed={!drafting && x.id === b?.id}
+                // 建立分岔後焦點移到這裡（ClarifyScreen）
+                data-branch-chip={x.id}
                 onClick={() => {
-                  // 改看既有的分岔：放棄還沒送出的新分岔
-                  if (drafting) draft.onCancel()
+                  // 改看既有的分岔：放棄還沒送出的新分岔（焦點留在這裡）
+                  if (drafting) draft.onCancel(false)
                   setActiveBranch(task.id, x.id)
                 }}
                 className={cx(
@@ -261,7 +265,8 @@ export function BranchPanel({
         )}
       </div>
 
-      {drafting && <NewBranchForm draft={draft} blocked={isBusy(task)} />}
+      {/* key：換一則引用的訊息就重新開始，不帶著前一則的問題 */}
+      {drafting && <NewBranchForm key={draft.excerpt} draft={draft} blocked={isBusy(task)} />}
       {!drafting && b && (
         <>
           <div

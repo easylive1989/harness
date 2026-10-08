@@ -78,7 +78,8 @@ export function Timeline({
   channel: Channel
   events: TimelineEvent[]
   readOnly?: boolean
-  onBranchFrom?: (text: string) => void
+  /** 從 Claude 的訊息分岔：訊息原文與按下的按鈕（取消後焦點回到它） */
+  onBranchFrom?: (text: string, trigger: HTMLElement) => void
   /** 正在開分岔：停用所有「從這則訊息分岔」按鈕，避免重複開 */
   branchPending?: boolean
   onOpenStage?: (stage: 'spec' | 'report') => void
@@ -109,7 +110,7 @@ export function Timeline({
                     aria-label="從這則訊息分岔"
                     title="從這則訊息分岔"
                     disabled={branchPending}
-                    onClick={() => onBranchFrom(e.text ?? '')}
+                    onClick={(ev) => onBranchFrom(e.text ?? '', ev.currentTarget)}
                     className="flex h-7 flex-none cursor-pointer items-center rounded-lg px-2 text-muted opacity-0 group-hover:opacity-100 hover:bg-fill focus-visible:opacity-100 disabled:cursor-default disabled:opacity-40"
                   >
                     <Icons.Branch width={14} height={14} />

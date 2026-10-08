@@ -1,5 +1,6 @@
 // src/renderer/src/screens/ClarifyScreen.tsx
 import { type ReactNode, useEffect, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import type { Task } from '@shared/types'
 import { call } from '../api'
 import { BranchPanel } from '../components/BranchPanel'
@@ -30,6 +31,7 @@ export function ClarifyScreen({
 }) {
   const act = useStore((s) => s.act)
   const setActiveBranch = useStore((s) => s.setActiveBranch)
+  const activeBranch = useStore((s) => s.activeBranch[task.id])
   const events = useTimeline(task.id)
   // 卡片內容（反問回覆等）只改 task 不加事件，所以也看 updatedAt
   const {
@@ -41,8 +43,12 @@ export function ClarifyScreen({
   const busy = isBusy(task)
   // 問題卡片在等反問的回答時自己會顯示等待中，底部就不再重複顯示「處理中」
   const cardWaiting = task.questions.some((q) => awaitingCounterReply(task, q))
-  // 從訊息開分岔：先在分岔面板問使用者想討論什麼，送出問題才建立分岔（取消就什麼都不建立）
-  const [draft, setDraft] = useState<string>()
+  // 從訊息開分岔：先在分岔面板問使用者想討論什麼，送出問題才建立分岔（取消就什麼都不建立）。
+  // 記下引用的訊息、按下的分岔按鈕（取消後焦點回去）與當時顯示的分岔
+  const [draft, setDraft] = useState<{ excerpt: string; trigger: HTMLElement; branch?: string }>()
+  // 草稿期間換了分岔（問題卡片的「升級成分岔」「查看分岔」，或建立完成）：放棄草稿，
+  // 分岔面板才看得到那個分岔（React 文件建議的「render 期間依前一個值調整 state」，不用 effect）
+  if (draft && draft.branch !== activeBranch) setDraft(undefined)
   const [branching, runBranch] = usePending()
   const composerRef = useRef<HTMLInputElement>(null)
   // 跳到指定的問題：等時間軸畫出那張卡片（或已答列）後才捲，同一次指定只捲一次。
@@ -67,9 +73,9 @@ export function ClarifyScreen({
         })
       )
       if (!b) return
-      setActiveBranch(task.id, b.id)
-      // 建立期間換了引用的訊息就保留新的草稿
-      setDraft((cur) => (cur === excerpt ? undefined : cur))
+      // 換到新分岔（上面的檢查會放棄草稿）；畫出來之後把焦點移到新分岔的標籤
+      flushSync(() => setActiveBranch(task.id, b.id))
+      document.querySelector<HTMLElement>(`[data-branch-chip="${b.id}"]`)?.focus()
     })
   return (
     <>
@@ -91,7 +97,11 @@ export function ClarifyScreen({
                 channel="main"
                 events={events}
                 readOnly={readOnly}
-                onBranchFrom={busy ? undefined : setDraft}
+                onBranchFrom={
+                  busy
+                    ? undefined
+                    : (excerpt, trigger) => setDraft({ excerpt, trigger, branch: activeBranch })
+                }
                 branchPending={branching}
                 onOpenStage={onOpenStage}
               />
@@ -125,14 +135,15 @@ export function ClarifyScreen({
         events={events}
         readOnly={readOnly}
         draft={
-          draft === undefined
-            ? undefined
-            : {
-                excerpt: draft,
-                pending: branching,
-                onSubmit: (q) => void createBranch(draft, q),
-                onCancel: () => setDraft(undefined)
-              }
+          draft && {
+            excerpt: draft.excerpt,
+            pending: branching,
+            onSubmit: (q) => void createBranch(draft.excerpt, q),
+            onCancel: (refocus = true) => {
+              setDraft(undefined)
+              if (refocus) draft.trigger.focus()
+            }
+          }
         }
       />
     </>

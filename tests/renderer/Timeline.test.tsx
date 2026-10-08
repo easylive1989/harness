@@ -234,8 +234,10 @@ describe('Timeline', () => {
         onBranchFrom={onBranchFrom}
       />
     )
-    await userEvent.click(screen.getByRole('button', { name: '從這則訊息分岔' }))
-    expect(onBranchFrom).toHaveBeenCalledWith('有幾件事要先確認。')
+    const button = screen.getByRole('button', { name: '從這則訊息分岔' })
+    await userEvent.click(button)
+    // 連同按下的按鈕：取消開分岔後焦點回到它
+    expect(onBranchFrom).toHaveBeenCalledWith('有幾件事要先確認。', button)
   })
 
   test('正在開分岔時停用分岔按鈕', () => {
