@@ -8,10 +8,12 @@ import { APP_EVENT_CHANNEL, type AppEvent } from '@shared/ipc'
 import type { QueryFn } from './agent/agentRun'
 import {
   applyLoginShellPath,
+  claudeEnv,
   createClaudeStatusCache,
   detectClaude,
   execCapture
 } from './claude/detect'
+import { createModelCache, fetchModels, type ModelQueryFn } from './claude/models'
 import { GitService } from './git/gitService'
 import { registerIpc } from './ipc'
 import { BLOCK_CSP, parseBlockUrl, wrapBlockHtml } from './report/blockHtml'
@@ -97,6 +99,16 @@ async function start() {
   // 同時有多次重新偵測（重新檢查、改 claude 路徑、視窗取得焦點）時只採用最後開始的那次
   const claude = createClaudeStatusCache(detect, await detect())
   const claudeStatus = (refresh?: boolean) => claude.status(refresh)
+  // 未登入時查不到，直接用內建清單（不快取，登入後再查）
+  const queryModels = createModelCache(() =>
+    claude.current().loggedIn
+      ? fetchModels(query as unknown as ModelQueryFn, {
+          pathToClaudeCodeExecutable: claude.current().path,
+          env: claudeEnv(),
+          cwd: app.getPath('home')
+        })
+      : Promise.resolve([])
+  )
   const emit = (e: AppEvent) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(APP_EVENT_CHANNEL, e)
   }
@@ -139,6 +151,7 @@ async function start() {
     git,
     tasks: tm,
     claudeStatus,
+    models: queryModels,
     emitRepos: (repos) => emit({ type: 'repos', repos })
   })
 

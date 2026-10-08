@@ -35,16 +35,23 @@ export interface GateContext {
    * 不是使用者拒絕：時間軸上的工具結果標成「已阻擋」並顯示這個原因
    */
   onBlocked?(toolUseId: string | undefined, reason: string): void
+  /**
+   * auto 權限模式：一般的核准（指令、WebFetch…）先交給 Claude Code 的分類器判斷，
+   * 判斷不了才經 canUseTool 問使用者；硬性規則與受保護檔案不受影響
+   */
+  autoMode?: boolean
 }
 
 /** evaluateTool 只需要規則相關的部分（hook 另外會通知擋下） */
 export type GateRules = Pick<
   GateContext,
-  'getPhase' | 'worktreePath' | 'hooksDir' | 'getAllowedPatterns' | 'onBlocked'
+  'getPhase' | 'worktreePath' | 'hooksDir' | 'getAllowedPatterns' | 'onBlocked' | 'autoMode'
 >
 
 export interface Evaluation {
   decision: 'allow' | 'deny' | 'ask'
+  /** ask 時：auto 模式可以交給分類器判斷（受保護檔案的修改一律問使用者，不設） */
+  classifiable?: boolean
   message?: string
   /** Bash 的完整指令（核准後記錄用） */
   command?: string
@@ -229,13 +236,15 @@ export function evaluateTool(
       return allowE()
     return {
       decision: 'ask',
+      classifiable: true,
       message: '需要使用者核准這個指令',
       command,
       suggestedPattern: chained ? undefined : suggestPattern(command)
     }
   }
 
-  if (NEEDS_APPROVAL.has(toolName)) return { decision: 'ask', message: '需要使用者核准' }
+  if (NEEDS_APPROVAL.has(toolName))
+    return { decision: 'ask', classifiable: true, message: '需要使用者核准' }
 
   return denyE(`Harness 不允許使用 ${toolName}`)
 }
@@ -281,6 +290,8 @@ export function createPermissionGate(ctx: GateContext): PermissionGate {
 /**
  * PreToolUse hook：在 SDK 套用專案的 allow 規則之前執行，硬性規則（deny／ask）一定生效。
  * ask 會讓 SDK 轉交 canUseTool 走核准流程。
+ * auto 模式下可交給分類器的 ask 不做決定：SDK 先讓分類器判斷，判斷不了才呼叫 canUseTool
+ * （canUseTool 會再套用一次規則，結果仍是 ask 就問使用者）。
  */
 export function createPreToolUseHook(ctx: GateRules): HookCallback {
   return async (input, toolUseID) => {
@@ -291,6 +302,7 @@ export function createPreToolUseHook(ctx: GateRules): HookCallback {
       ? evaluateTool(input.tool_name, input.tool_input, ctx, { mcpServer: input.mcp_server })
       : denyE('工具參數格式不正確')
     if (e.decision === 'deny') ctx.onBlocked?.(input.tool_use_id ?? toolUseID, e.message ?? '')
+    if (e.decision === 'ask' && e.classifiable && ctx.autoMode) return {}
     return {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',

@@ -330,6 +330,68 @@ describe('TaskManager：建立任務與釐清', () => {
   })
 })
 
+describe('TaskManager：執行選項（模型、effort、權限模式）', () => {
+  test('每輪執行傳入 effort 與 permissionMode', async () => {
+    const { tm, claude } = await setup()
+    const t = await tm.createTask({
+      repoId: 'r1',
+      request: '加上登入失敗鎖定',
+      baseBranch: 'main',
+      model: 'claude-sonnet-5-5',
+      effort: 'high',
+      permissionMode: 'auto'
+    })
+    await tm.whenIdle(t.id)
+    expect(tm.get(t.id)).toMatchObject({ effort: 'high', permissionMode: 'auto' })
+    expect(claude.calls[0].options).toMatchObject({
+      model: 'claude-sonnet-5-5',
+      effort: 'high',
+      permissionMode: 'auto'
+    })
+  })
+
+  test('effort 為 auto 時不傳 effort；沒有欄位的舊任務用手動核准', async () => {
+    const { tm, claude, repo, create } = await setup()
+    const id = await create()
+    expect(tm.get(id)).toMatchObject({ effort: 'auto', permissionMode: 'manual' })
+    expect(claude.calls[0].options.effort).toBeUndefined()
+    expect(claude.calls[0].options.permissionMode).toBe('default')
+
+    // 舊資料：沒有 effort／permissionMode 欄位
+    const { makeTask } = await import('../fixtures/task')
+    await repo.saveTask(makeTask({ id: 'old', mainSessionId: 's9' }))
+    await tm.init()
+    await tm.send('old', 'main', '繼續')
+    await tm.whenIdle('old')
+    expect(claude.calls.at(-1)!.options.effort).toBeUndefined()
+    expect(claude.calls.at(-1)!.options.permissionMode).toBe('default')
+  })
+
+  test('tasks:setRunOptions 在下一輪生效；已結束的任務不能改', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    await tm.setRunOptions(id, { model: 'claude-haiku-5-5', effort: 'low', permissionMode: 'auto' })
+    expect(tm.get(id)).toMatchObject({
+      model: 'claude-haiku-5-5',
+      effort: 'low',
+      permissionMode: 'auto'
+    })
+    await tm.send(id, 'main', '繼續')
+    await tm.whenIdle(id)
+    expect(claude.calls.at(-1)!.options).toMatchObject({
+      model: 'claude-haiku-5-5',
+      effort: 'low',
+      permissionMode: 'auto'
+    })
+    // 只改有給的欄位
+    await tm.setRunOptions(id, { effort: 'auto' })
+    expect(tm.get(id)).toMatchObject({ model: 'claude-haiku-5-5', effort: 'auto' })
+
+    await tm.discard(id)
+    await expect(tm.setRunOptions(id, { effort: 'high' })).rejects.toThrow('任務已結束')
+  })
+})
+
 describe('TaskManager：分岔', () => {
   test('從主線 fork、續接分岔、整理結論並帶回主線', async () => {
     const { tm, claude, create } = await setup()

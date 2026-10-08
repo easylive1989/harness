@@ -4,11 +4,15 @@ import type {
   Channel,
   ClaudeStatus,
   DiffStats,
+  EffortChoice,
   FeedbackItem,
   ModelId,
+  ModelOption,
   PermissionDecision,
+  PermissionModeChoice,
   Report,
   Repo,
+  RunOptions,
   Settings,
   Task,
   TimelineEvent,
@@ -23,12 +27,18 @@ export interface CreateTaskInput {
   images?: ImageInput[]
   baseBranch: string
   model: ModelId
+  /** 沒給時是 auto */
+  effort?: EffortChoice
+  /** 沒給時是 manual */
+  permissionMode?: PermissionModeChoice
   /** 沒給時是 worktree */
   workspace?: WorkspaceMode
 }
 
 export interface IpcApi {
   'claude:status': (refresh?: boolean) => ClaudeStatus
+  /** 登入帳號可用的模型；取不到時是內建清單 */
+  'claude:models': (refresh?: boolean) => ModelOption[]
   'settings:get': () => Settings
   'settings:set': (patch: Partial<Settings>) => Settings
   'repos:list': () => Repo[]
@@ -47,6 +57,8 @@ export interface IpcApi {
     answer: { optionId?: string; text?: string }
   ) => void
   'tasks:counter': (taskId: string, questionId: string, text: string) => void
+  /** 修改任務的模型、effort、權限模式；下一輪執行生效 */
+  'tasks:setRunOptions': (taskId: string, patch: Partial<RunOptions>) => Task
   'tasks:changedFiles': (taskId: string) => DiffStats
   /** 讀取訊息附加的圖片，回傳 data URL */
   'attachments:read': (taskId: string, image: ImageRef) => string

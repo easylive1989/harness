@@ -274,8 +274,10 @@ describe('store.recheckClaude：claude 沒有值', () => {
     await useStore.getState().recheckClaude()
     expect(call).toHaveBeenCalledWith('claude:status', true)
     expect(useStore.getState().claude?.loggedIn).toBe(true)
+    // 剛登入：重新取得可用的模型
+    expect(call).toHaveBeenCalledWith('claude:models', true)
     await useStore.getState().recheckClaude()
-    expect(call).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(call).mock.calls.filter(([ch]) => ch === 'claude:status')).toHaveLength(1)
   })
 
   test('resetStoreInternals 清掉節流', async () => {

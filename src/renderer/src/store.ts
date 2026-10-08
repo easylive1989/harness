@@ -1,7 +1,16 @@
 // src/renderer/src/store.ts
 import { create } from 'zustand'
 import type { AppEvent } from '@shared/ipc'
-import type { ClaudeStatus, FeedbackItem, Repo, Settings, Task, TimelineEvent } from '@shared/types'
+import {
+  type ClaudeStatus,
+  FALLBACK_MODELS,
+  type FeedbackItem,
+  type ModelOption,
+  type Repo,
+  type Settings,
+  type Task,
+  type TimelineEvent
+} from '@shared/types'
 import { call, errorText, onEvent } from './api'
 
 export type View = { kind: 'new' } | { kind: 'task'; taskId: string } | { kind: 'settings' }
@@ -10,6 +19,8 @@ export interface State {
   ready: boolean
   claude?: ClaudeStatus
   settings?: Settings
+  /** 帳號可用的模型；查到之前（或查不到時）是內建清單 */
+  models: ModelOption[]
   repos: Repo[]
   tasks: Record<string, Task>
   timelines: Record<string, TimelineEvent[]>
@@ -41,6 +52,8 @@ export interface State {
   dismissToast(): void
   /** 視窗重新取得焦點時呼叫：Claude Code 未就緒就重新偵測（最多每 5 秒一次） */
   recheckClaude(): Promise<void>
+  /** 向主程序取得可用模型（refresh 時重新查詢）；失敗時保留目前的清單 */
+  loadModels(refresh?: boolean): Promise<void>
 }
 
 /** 視窗取得焦點時重新偵測 Claude Code 的最短間隔 */
@@ -68,6 +81,7 @@ export function resetStoreInternals() {
 
 export const useStore = create<State>((set, get) => ({
   ready: false,
+  models: FALLBACK_MODELS,
   repos: [],
   tasks: {},
   timelines: {},
@@ -99,6 +113,8 @@ export const useStore = create<State>((set, get) => ({
           }
           return { claude, settings, repos, tasks: merged, ready: true }
         })
+        // 查詢要啟動 Claude Code，不擋住初始畫面
+        if (claude.loggedIn) void get().loadModels()
         // StrictMode 會讓 init 跑兩次：只有第一次載入時自動打開進行中的任務
         const active = tasks.find((t) => t.status !== 'discarded' && t.status !== 'done')
         if (!first && active && get().view.kind === 'new')
@@ -225,9 +241,21 @@ export const useStore = create<State>((set, get) => ({
     if (now - lastClaudeRecheck < CLAUDE_RECHECK_MS) return
     lastClaudeRecheck = now
     try {
-      set({ claude: await call('claude:status', true) })
+      const next = await call('claude:status', true)
+      set({ claude: next })
+      // 剛登入：重新取得這個帳號可用的模型
+      if (next.loggedIn) void get().loadModels(true)
     } catch {
       // 背景偵測失敗不打擾使用者；橫幅上的「重新檢查」會顯示錯誤
+    }
+  },
+
+  async loadModels(refresh = false) {
+    try {
+      const models = await call('claude:models', refresh)
+      if (Array.isArray(models) && models.length) set({ models })
+    } catch {
+      // 取不到時沿用目前的清單（內建清單）
     }
   }
 }))

@@ -1,5 +1,6 @@
 // src/renderer/src/screens/TaskScreen.tsx
 import { useState } from 'react'
+import { RunOptionsMenu } from '../components/RunOptionsMenu'
 import { StageNav } from '../components/StageNav'
 import { TaskMenu } from '../components/TaskMenu'
 import { currentStage, type Stage } from '../lib/stage'
@@ -33,6 +34,7 @@ export function TaskScreen({ taskId }: { taskId: string }) {
   // 階段切換與「⋯」選單（丟棄任務）放在每個畫面的標題列右側
   const nav = (
     <div className="ml-auto flex items-center gap-2">
+      <RunOptionsMenu task={task} />
       <StageNav task={task} shown={shown} onSelect={openStage} />
       <TaskMenu task={task} cleared={cleared} onCleared={() => setCleared(true)} />
     </div>

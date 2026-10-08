@@ -5,14 +5,17 @@ import { writeFile } from 'node:fs/promises'
 import { basename } from 'node:path'
 import { type BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import type { CreateTaskInput, IpcApi, IpcChannel } from '@shared/ipc'
-import type { ClaudeStatus, Repo } from '@shared/types'
+import type { ClaudeStatus, ModelOption, Repo } from '@shared/types'
 import type { GitService } from './git/gitService'
 import {
   assertChannel,
+  assertEffort,
   assertId,
   assertImageRef,
   assertImages,
   assertModel,
+  assertPermissionMode,
+  assertRunOptionsPatch,
   assertString,
   assertVersion,
   assertWorkspace,
@@ -29,6 +32,7 @@ export interface IpcDeps {
   git: GitService
   tasks: TaskManager
   claudeStatus: (refresh?: boolean) => Promise<ClaudeStatus>
+  models: (refresh?: boolean) => Promise<ModelOption[]>
   emitRepos: (repos: Repo[]) => void
 }
 
@@ -49,6 +53,7 @@ const MAX_HTML = 50_000_000
 export function registerIpc(d: IpcDeps) {
   const handlers: Handlers = {
     'claude:status': (refresh) => d.claudeStatus(refresh === true),
+    'claude:models': (refresh) => d.models(refresh === true),
     'settings:get': () => d.repo.getSettings(),
     'settings:set': async (raw) => {
       const patch = validateSettingsPatch(raw)
@@ -97,6 +102,9 @@ export function registerIpc(d: IpcDeps) {
         images: assertImages(raw.images),
         baseBranch: assertString(raw.baseBranch, 'base branch', { max: 255 }),
         model: assertModel(raw.model),
+        effort: raw.effort === undefined ? 'auto' : assertEffort(raw.effort),
+        permissionMode:
+          raw.permissionMode === undefined ? 'manual' : assertPermissionMode(raw.permissionMode),
         workspace: raw.workspace === undefined ? 'worktree' : assertWorkspace(raw.workspace)
       }
       await ensureClaudeReady(d.claudeStatus)
@@ -113,6 +121,8 @@ export function registerIpc(d: IpcDeps) {
       d.tasks.answerQuestion(task(taskId), ref(qid, '問題 id'), answer),
     'tasks:counter': (taskId, qid, msg) =>
       d.tasks.counterQuestion(task(taskId), ref(qid, '問題 id'), text(msg)),
+    'tasks:setRunOptions': (taskId, patch) =>
+      d.tasks.setRunOptions(task(taskId), assertRunOptionsPatch(patch)),
     'tasks:changedFiles': (taskId) => d.tasks.changedFiles(task(taskId)),
     'attachments:read': (taskId, image) => d.tasks.readImage(task(taskId), assertImageRef(image)),
     'branch:open': (taskId, input) => {
