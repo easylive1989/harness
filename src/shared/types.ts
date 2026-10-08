@@ -110,6 +110,13 @@ export interface PermissionDecision {
   rememberPattern?: string
 }
 
+/** 已提交、還沒整理完的報告：整理被中斷或失敗時，「繼續」用它直接重新整理（不再呼叫 Claude） */
+export interface PendingReport {
+  input: ReportInput
+  /** 之前的整理已經做好的 commit（重試時沒有新的變更就沿用） */
+  commit?: string
+}
+
 export interface Task {
   id: string
   repoId: string
@@ -132,6 +139,7 @@ export interface Task {
   /** 使用者至少核准過一次的完整指令 */
   approvedCommands: string[]
   reportVersions: number[]
+  pendingReport?: PendingReport
   pendingPermission?: PermissionRequest
   prUrl?: string
   error?: string

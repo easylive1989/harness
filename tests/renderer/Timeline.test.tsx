@@ -13,6 +13,7 @@ import { toolSummary, userTextDisplay } from '@renderer/lib/timeline'
 import { resetStoreInternals, useStore } from '@renderer/store'
 import { BRANCH_RULES, msg } from '@shared/protocol'
 import type { TimelineEvent } from '@shared/types'
+import { sampleReport } from '../fixtures/report'
 import { makeTask } from '../fixtures/task'
 
 let seq = 0
@@ -320,6 +321,28 @@ describe('RunStatus', () => {
     const onResume = vi.fn()
     render(<RunStatus task={makeTask({ runState: 'interrupted' })} onResume={onResume} />)
     expect(screen.getByRole('alert')).toHaveTextContent('上一次執行被中斷了。')
+    await userEvent.click(screen.getByRole('button', { name: '繼續' }))
+    expect(onResume).toHaveBeenCalled()
+  })
+
+  test('報告已提交、整理中斷或失敗：說明「繼續」會直接重新整理，不會再呼叫 Claude', async () => {
+    const onResume = vi.fn()
+    const pendingReport = { input: sampleReport }
+    const { rerender } = render(
+      <RunStatus task={makeTask({ runState: 'interrupted', pendingReport })} onResume={onResume} />
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      '報告還沒整理完就中斷了。 按「繼續」會直接重新整理報告，不會再呼叫 Claude。'
+    )
+    rerender(
+      <RunStatus
+        task={makeTask({ runState: 'error', error: '整理報告失敗：commit 逾時', pendingReport })}
+        onResume={onResume}
+      />
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      '整理報告失敗：commit 逾時 按「繼續」會直接重新整理報告，不會再呼叫 Claude。'
+    )
     await userEvent.click(screen.getByRole('button', { name: '繼續' }))
     expect(onResume).toHaveBeenCalled()
   })

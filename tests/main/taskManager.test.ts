@@ -846,6 +846,139 @@ describe('TaskManager：報告與收尾', () => {
     })
   })
 
+  test('提交的報告先存在任務上（整理中斷或失敗時可重試）；整理完成後清掉', async () => {
+    let release!: () => void
+    const verify = vi.fn<TaskManagerDeps['verify']>(async (_cwd, commands) => {
+      await new Promise<void>((r) => (release = r))
+      return commands.map((command) => ({ command, exitCode: 0, durationMs: 1, outputTail: 'ok' }))
+    })
+    const { tm, claude, repo, id } = await toImplementing({ verify })
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await until(() => verify.mock.calls.length === 1)
+    const saved = (await repo.listTasks()).find((t) => t.id === id)!
+    expect(saved).toMatchObject({
+      runState: 'finalizing',
+      pendingReport: { input: sampleReport, commit: 'abc123' }
+    })
+    release()
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({ status: 'reviewing', reportVersions: [1] })
+    expect(tm.get(id).pendingReport).toBeUndefined()
+  })
+
+  test('關閉 app 時整理被中斷：重新啟動後「繼續」直接重新整理報告，不再呼叫 Claude', async () => {
+    const verify = vi.fn<TaskManagerDeps['verify']>(async (_cwd, commands, _ok, signal) => {
+      await new Promise((r) => signal!.addEventListener('abort', r, { once: true }))
+      return commands.map((command) => ({ command, exitCode: null, durationMs: 1, outputTail: '' }))
+    })
+    const { tm, claude, git, repo, id } = await toImplementing({ verify })
+    // 第一次整理已經 commit 了；重試時沒有新的變更（commitAll 回傳 null）就沿用那個 commit
+    git.commitAll = vi
+      .fn<typeof git.commitAll>()
+      .mockResolvedValueOnce('abc123')
+      .mockResolvedValue(null)
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await until(() => verify.mock.calls.length === 1)
+    await tm.shutdown(3000)
+    expect(tm.get(id)).toMatchObject({ runState: 'interrupted', reportVersions: [] })
+
+    // 重新啟動
+    const claude2 = new FakeClaude()
+    const verify2 = vi.fn<TaskManagerDeps['verify']>(async (_cwd, commands) =>
+      commands.map((command) => ({ command, exitCode: 0, durationMs: 1, outputTail: 'ok' }))
+    )
+    const tm2 = new TaskManager({
+      repo,
+      git,
+      queryFn: claude2.queryFn,
+      createToolServer: claude2.createToolServer,
+      getClaudePath: () => '/bin/claude',
+      emit: () => {},
+      verify: verify2,
+      now: () => '2026-10-07T11:00:00.000Z'
+    })
+    await tm2.init()
+    expect(tm2.get(id)).toMatchObject({
+      runState: 'interrupted',
+      pendingReport: { input: sampleReport, commit: 'abc123' }
+    })
+    await tm2.resume(id)
+    await tm2.whenIdle(id)
+    expect(claude2.calls).toHaveLength(0)
+    expect(verify2).toHaveBeenCalledTimes(1)
+    expect(tm2.get(id)).toMatchObject({
+      status: 'reviewing',
+      runState: 'idle',
+      error: undefined,
+      reportVersions: [1]
+    })
+    expect(tm2.get(id).pendingReport).toBeUndefined()
+    expect(await repo.getReport(id, 1)).toMatchObject({ input: sampleReport, commit: 'abc123' })
+    expect(claude.calls.at(-1)!.prompt).toBe('完成')
+  })
+
+  test('commit 失敗：顯示錯誤、保留報告；「繼續」重試整理，不再呼叫 Claude', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    let fail = true
+    git.commitAll = async () => {
+      if (fail) throw new Error('git commit 失敗：執行逾時（超過 120 秒），已終止')
+      return 'def456'
+    }
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({
+      status: 'implementing',
+      runState: 'error',
+      error: '整理報告失敗：git commit 失敗：執行逾時（超過 120 秒），已終止',
+      pendingReport: { input: sampleReport }
+    })
+    const calls = claude.calls.length
+    fail = false
+    await tm.resume(id)
+    await tm.whenIdle(id)
+    expect(claude.calls).toHaveLength(calls)
+    expect(tm.get(id)).toMatchObject({
+      status: 'reviewing',
+      runState: 'idle',
+      error: undefined,
+      reportVersions: [1]
+    })
+    expect((await tm.getReport(id, 1)).commit).toBe('def456')
+  })
+
+  test('整理失敗後改為繼續和 Claude 對話：放棄待整理的報告，之後的「繼續」照常續接 Claude', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    git.commitAll = async () => {
+      throw new Error('boom')
+    }
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    expect(tm.get(id).pendingReport).toBeDefined()
+    claude.script = async () => {
+      throw new Error('CLI crashed')
+    }
+    await tm.send(id, 'main', '先看一下為什麼失敗')
+    await tm.whenIdle(id)
+    expect(tm.get(id).pendingReport).toBeUndefined()
+    expect(tm.get(id).runState).toBe('error')
+    claude.script = async () => []
+    await tm.resume(id)
+    await tm.whenIdle(id)
+    expect(claude.calls.at(-1)!.prompt).toContain('[resume]')
+  })
+
   test('回饋 → implementing，送出 [report_feedback]；再次提交產生 v2', async () => {
     const { tm, claude, id } = await toImplementing()
     claude.script = async ({ sink }) => {

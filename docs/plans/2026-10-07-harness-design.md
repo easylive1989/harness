@@ -160,6 +160,8 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 寫入使用暫存檔再 rename 確保原子性。app 重啟後，執行中的任務標為「已中斷」，使用者可「繼續」（以 `resume` 重新啟動）。
 
+報告整理（2026-10-08 總審查後加上）：`submit_report` 進入「整理報告中」的同一步把提交的 `ReportInput` 存成 `task.pendingReport`（之後做好的 commit 也記在裡面），整理完成、進入 `reviewing` 的同一步清掉。整理被中斷（關閉 app）或失敗（commit、diff、驗證指令出錯或逾時）時任務標為「已中斷」或「發生錯誤」並顯示原因，`pendingReport` 留著；「繼續」（`resume`）看到 `pendingReport` 就直接重新整理（commit → diff → 驗證 → 存報告），不送 `[resume]`、不再呼叫 Claude，結果不依賴 Claude 再提交一次；重試時沒有新的變更就沿用上一次的 commit。畫面說明「按「繼續」會直接重新整理報告，不會再呼叫 Claude」。使用者改為繼續和 Claude 對話（主線開新一輪）時放棄 `pendingReport`，由 Claude 重新提交。
+
 ## 4. UI 畫面（對應設計畫布）
 
 1. 新任務：選 repo／加入資料夾、需求、base branch、模型

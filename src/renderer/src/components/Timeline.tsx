@@ -235,6 +235,14 @@ export function RunStatus({
         : undefined
   const failed = task.runState === 'interrupted' || task.runState === 'error' || !!task.error
   const canResume = task.runState === 'interrupted' || task.runState === 'error'
+  // 報告已提交、整理被中斷或失敗：「繼續」直接重新整理（主程序的 resume），不會再呼叫 Claude
+  const retryReport = canResume && !!task.pendingReport
+  const message =
+    task.runState === 'interrupted'
+      ? retryReport
+        ? '報告還沒整理完就中斷了。'
+        : '上一次執行被中斷了。'
+      : (task.error ?? '發生錯誤')
   return (
     <>
       <LiveStatus text={!quiet && progress} className="ml-10 text-[13px]" />
@@ -244,7 +252,15 @@ export function RunStatus({
           className="flex items-center gap-3 rounded-xl bg-danger-soft px-3.5 py-3 text-[13px] text-danger"
         >
           <span className="flex-1">
-            {task.runState === 'interrupted' ? '上一次執行被中斷了。' : (task.error ?? '發生錯誤')}
+            {message}
+            {retryReport && (
+              <>
+                {' '}
+                <span className="text-ink-2">
+                  按「繼續」會直接重新整理報告，不會再呼叫 Claude。
+                </span>
+              </>
+            )}
           </span>
           {canResume && (
             <button

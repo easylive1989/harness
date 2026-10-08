@@ -10,6 +10,7 @@ import type {
   BranchConclusion,
   Channel,
   FeedbackItem,
+  PendingReport,
   PermissionDecision,
   PermissionRequest,
   Report,
@@ -506,6 +507,8 @@ export class TaskManager {
       } else {
         x.runState = 'running'
         x.error = undefined
+        // 整理失敗後改為繼續和 Claude 對話：放棄待整理的報告，Claude 之後會重新提交
+        x.pendingReport = undefined
       }
     }).catch(logError('儲存任務失敗'))
     await written
@@ -705,25 +708,7 @@ export class TaskManager {
           if (this.task(taskId).status !== 'implementing')
             throw new Error('只有實作階段可以提交報告')
           if (this.finalizing.has(taskId)) throw new Error('報告已提交，正在整理中')
-          const run = this.runs.get(runKey(taskId, 'main'))
-          const before = this.task(taskId).runState
-          this.finalizing.add(taskId)
-          try {
-            await this.update(taskId, (t) => {
-              t.runState = 'finalizing'
-            })
-          } catch (e) {
-            // 記憶體中已改成 finalizing：還原，不然主線會一直卡在整理中
-            this.finalizing.delete(taskId)
-            this.persist(taskId, (t) => {
-              if (t.runState === 'finalizing') t.runState = before
-            })
-            throw e
-          }
-          const job: Promise<void> = this.finalizeReport(taskId, input, run).finally(() => {
-            if (this.reportJobs.get(taskId) === job) this.reportJobs.delete(taskId)
-          })
-          this.reportJobs.set(taskId, job)
+          await this.startFinalizing(taskId, { input }, this.runs.get(runKey(taskId, 'main')))
         })
     }
   }
@@ -1033,6 +1018,16 @@ export class TaskManager {
 
   async resume(taskId: string) {
     const t = this.task(taskId)
+    // 報告已提交但還沒整理完（關閉 app 時中斷、commit 或驗證指令失敗）：直接重新整理，不再呼叫 Claude
+    if (
+      t.pendingReport &&
+      t.status === 'implementing' &&
+      !this.runs.get(runKey(taskId, 'main'))?.active
+    ) {
+      this.assertCanSend(taskId, 'main')
+      await this.startFinalizing(taskId, t.pendingReport)
+      return
+    }
     // 第一輪還沒拿到 session 就中斷：沒有可續接的對話，重新送出需求
     if (!t.mainSessionId) {
       await this.send(taskId, 'main', t.request, { display: msgDisplay.resume })
@@ -1042,6 +1037,37 @@ export class TaskManager {
   }
 
   // ───────── 報告 ─────────
+
+  /**
+   * 進入「整理報告中」並在背景整理。提交的報告先存在任務上（pendingReport），整理完成才清掉：
+   * 關閉 app 時中斷或 commit／驗證失敗後，resume() 用它直接重新整理，結果不依賴 Claude 再做一次。
+   * run 是提交報告的那段執行（重試時沒有）。
+   */
+  private async startFinalizing(taskId: string, pending: PendingReport, run?: AgentRun) {
+    const before = {
+      runState: this.task(taskId).runState,
+      pendingReport: this.task(taskId).pendingReport
+    }
+    this.finalizing.add(taskId)
+    try {
+      await this.update(taskId, (t) => {
+        t.runState = 'finalizing'
+        t.error = undefined
+        t.pendingReport = pending
+      })
+    } catch (e) {
+      // 記憶體中已改成 finalizing：還原，不然主線會一直卡在整理中
+      this.finalizing.delete(taskId)
+      this.persist(taskId, (t) => {
+        if (t.runState === 'finalizing') Object.assign(t, before)
+      })
+      throw e
+    }
+    const job: Promise<void> = this.finalizeReport(taskId, pending.input, run).finally(() => {
+      if (this.reportJobs.get(taskId) === job) this.reportJobs.delete(taskId)
+    })
+    this.reportJobs.set(taskId, job)
+  }
 
   /** 等提交報告的那段執行結束後：commit、算 diff、實跑驗證指令、存報告 */
   private async finalizeReport(taskId: string, input: ReportInput, run?: AgentRun) {
@@ -1055,9 +1081,14 @@ export class TaskManager {
       assertNotAborted()
       const t = this.task(taskId)
       const version = t.reportVersions.length + 1
+      // 重試時沒有新的變更：沿用上一次整理已經做好的 commit
       const commit =
         (await this.d.git.commitAll(t.worktreePath, `${t.title}（Harness 報告 v${version}）`)) ??
-        undefined
+        t.pendingReport?.commit
+      if (commit !== t.pendingReport?.commit)
+        await this.update(taskId, (x) => {
+          if (x.pendingReport) x.pendingReport.commit = commit
+        })
       const [diff, stats] = await Promise.all([
         this.d.git.diff(t.worktreePath, t.baseBranch),
         this.d.git.diffStats(t.worktreePath, t.baseBranch)
@@ -1097,6 +1128,7 @@ export class TaskManager {
         x.status = next
         x.runState = 'idle'
         x.error = undefined
+        x.pendingReport = undefined
         // 與進入 reviewing 同一步結束「整理中」，中間沒有可以插進其他操作的空檔
         this.finalizing.delete(taskId)
       })
