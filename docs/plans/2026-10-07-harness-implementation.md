@@ -5568,6 +5568,11 @@ describe('TaskManager：建立任務與釐清', () => {
     // canUseTool 與 PreToolUse hook 都要接上（hook 擋住專案 allow 規則的繞過）
     expect(claude.calls[0].options.canUseTool).toBeTypeOf('function')
     expect(claude.calls[0].options.hooks?.PreToolUse?.[0].hooks).toHaveLength(1)
+    // 不載入 claude.ai 帳號上的連接器（Harness 一律拒絕使用，只會增加噪音），其餘環境變數照傳
+    expect(claude.calls[0].options.env).toMatchObject({
+      ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
+      PATH: process.env.PATH
+    })
     expect(claude.calls[0].tools).toEqual([
       'ask_user',
       'propose_spec',
@@ -6163,7 +6168,10 @@ export class TaskManager {
       canUseTool: createPermissionGate(gateCtx),
       // 專案設定的 allow 規則會在 canUseTool 之前生效；硬性規則放在 PreToolUse hook 才不會被繞過
       hooks: { PreToolUse: [{ hooks: [createPreToolUseHook(gateCtx)] }] },
-      pathToClaudeCodeExecutable: this.d.getClaudePath()
+      pathToClaudeCodeExecutable: this.d.getClaudePath(),
+      // claude.ai 帳號上的連接器（Gmail、Notion…）不載入：PermissionGate 一律拒絕，只會佔用 context，
+      // Claude 還會在回覆裡提到它們
+      env: { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: 'false' }
     }
 
     const run = new AgentRun(this.d.queryFn, { options, firstPrompt: prompt }, (e) => {

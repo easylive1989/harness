@@ -457,7 +457,10 @@ export class TaskManager {
       canUseTool: createPermissionGate(gateCtx),
       // 專案設定的 allow 規則會在 canUseTool 之前生效；硬性規則放在 PreToolUse hook 才不會被繞過
       hooks: { PreToolUse: [{ hooks: [createPreToolUseHook(gateCtx)] }] },
-      pathToClaudeCodeExecutable: this.d.getClaudePath()
+      pathToClaudeCodeExecutable: this.d.getClaudePath(),
+      // claude.ai 帳號上的連接器（Gmail、Notion…）不載入：PermissionGate 一律拒絕，只會佔用 context，
+      // Claude 還會在回覆裡提到它們
+      env: { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: 'false' }
     }
 
     const run = new AgentRun(this.d.queryFn, { options, firstPrompt: prompt }, (e) => {

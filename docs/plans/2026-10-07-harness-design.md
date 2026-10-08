@@ -64,9 +64,10 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 - `model`: 任務模型
 - `settingSources: ['project']`
 - `systemPrompt: { type: 'preset', preset: 'claude_code', append: <Harness 階段指示> }`
-- `mcpServers: { harness: HarnessTools }`
+- `mcpServers: { harness: HarnessTools }`（`alwaysLoad: true`：Claude Code 預設把 MCP 工具藏在 tool search 後面，沒先載入 schema 時 Claude 會猜錯參數）
 - `canUseTool: PermissionGate`
 - `pathToClaudeCodeExecutable`: 偵測到的本機 `claude`（沿用其訂閱登入）
+- `env`: `process.env` 加上 `ENABLE_CLAUDEAI_MCP_SERVERS=false`（不載入 claude.ai 帳號上的連接器；PermissionGate 本來就會拒絕它們）
 - `prompt`: AsyncIterable 佇列（串流輸入模式），以支援插話；停止用 `interrupt()`／`AbortController`
 - 續接：`resume: sessionId`；分岔：`resume: mainSessionId, forkSession: true`
 
@@ -93,6 +94,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 ### 3.4 權限（PermissionGate）
 
+- 任何階段：`ToolSearch`（只載入工具 schema）、`TodoWrite`、子代理一律允許。
 - 釐清／規格／分岔階段：允許 `Read`、`Glob`、`Grep`、harness 工具；其他一律 deny（附說明）。
 - 實作階段：
   - `Read`/`Glob`/`Grep`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit`：路徑在 worktree 內自動允許，否則 deny。

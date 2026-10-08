@@ -78,6 +78,11 @@ describe('TaskManager：建立任務與釐清', () => {
     // canUseTool 與 PreToolUse hook 都要接上（hook 擋住專案 allow 規則的繞過）
     expect(claude.calls[0].options.canUseTool).toBeTypeOf('function')
     expect(claude.calls[0].options.hooks?.PreToolUse?.[0].hooks).toHaveLength(1)
+    // 不載入 claude.ai 帳號上的連接器（Harness 一律拒絕使用，只會增加噪音），其餘環境變數照傳
+    expect(claude.calls[0].options.env).toMatchObject({
+      ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
+      PATH: process.env.PATH
+    })
     expect(claude.calls[0].tools).toEqual([
       'ask_user',
       'propose_spec',
