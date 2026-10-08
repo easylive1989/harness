@@ -1,10 +1,12 @@
 // src/renderer/src/screens/NewTaskScreen.tsx
 // 對照 docs/design/B1-NewTask.dc.html
 import { useEffect, useState } from 'react'
-import { MODELS, type ModelId, WORKSPACES, type WorkspaceMode } from '@shared/types'
+import { DEFAULT_MODEL, type RunOptions, WORKSPACES, type WorkspaceMode } from '@shared/types'
 import { call } from '../api'
 import { AttachButton, AttachmentPreview } from '../components/Attachments'
 import { ClaudeBanner } from '../components/ClaudeBanner'
+import { RunOptionFields } from '../components/RunOptionFields'
+import { applyRunOptions } from '../lib/runOptions'
 import { Button, cx, Icons, inputClass, textareaClass } from '../components/ui'
 import { useImageAttachments } from '../lib/useImageAttachments'
 import { useStore } from '../store'
@@ -26,7 +28,22 @@ export function NewTaskScreen() {
     current: string
   }>()
   const [baseChoice, setBaseChoice] = useState<{ repoId: string; value: string }>()
-  const [model, setModel] = useState<ModelId>(defaultModel ?? 'claude-opus-5-5')
+  const defaultEffort = useStore((s) => s.settings?.defaultEffort)
+  const defaultPermissionMode = useStore((s) => s.settings?.defaultPermissionMode)
+  const models = useStore((s) => s.models)
+  // 還沒自己選時跟著設定的預設值；預設值不適用於預設模型時（例如模型不支援）改回 auto／手動
+  const [runChoice, setRunChoice] = useState<RunOptions>()
+  const runOptions =
+    runChoice ??
+    applyRunOptions(
+      models,
+      {
+        model: defaultModel ?? DEFAULT_MODEL,
+        effort: defaultEffort ?? 'auto',
+        permissionMode: defaultPermissionMode ?? 'manual'
+      },
+      {}
+    )
   const defaultWorkspace = useStore((s) => s.settings?.defaultWorkspace)
   const [workspaceChoice, setWorkspace] = useState<WorkspaceMode>()
   // 還沒自己選時跟著設定的預設值（設定可能在畫面開著之後才載入）
@@ -67,7 +84,7 @@ export function NewTaskScreen() {
         request,
         images: attach.images,
         baseBranch: base,
-        model,
+        ...runOptions,
         workspace
       })
     )
@@ -183,21 +200,8 @@ export function NewTaskScreen() {
               ))}
             </select>
           </label>
-          <label className="flex min-w-[200px] flex-1 flex-col gap-2">
-            <span className="text-[13px] font-medium">模型</span>
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value as ModelId)}
-              className={cx(inputClass, 'px-3 text-sm')}
-            >
-              {MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}（{m.hint}）
-                </option>
-              ))}
-            </select>
-          </label>
         </div>
+        <RunOptionFields value={runOptions} onChange={setRunChoice} />
 
         <fieldset className="flex flex-col gap-2.5">
           <legend className="mb-2.5 text-[13px] font-medium">工作方式</legend>

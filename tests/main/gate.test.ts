@@ -446,6 +446,48 @@ describe('PreToolUse hook', () => {
     ).toEqual({})
   })
 
+  test('auto 模式：一般需要核准的操作交給分類器（不做決定），硬性規則與受保護檔案不變', async () => {
+    const { ctx, hook, callHook } = setup(
+      'implement',
+      { allow: true },
+      ['npm test *'],
+      '/wt/t1',
+      '.git/hooks'
+    )
+    ctx.autoMode = true
+    const raw = (tool: string, toolInput: Record<string, unknown>) =>
+      hook(
+        {
+          hook_event_name: 'PreToolUse',
+          tool_name: tool,
+          tool_input: toolInput,
+          tool_use_id: 'u1',
+          session_id: 's1',
+          transcript_path: '',
+          cwd: '/wt/t1'
+        },
+        'u1',
+        { signal: new AbortController().signal }
+      )
+    expect(await raw('Bash', { command: 'npm run build' })).toEqual({})
+    expect(await raw('WebFetch', { url: 'https://example.com' })).toEqual({})
+    // 允許清單裡的照樣直接允許
+    expect(await callHook('Bash', { command: 'npm test -- auth' })).toBe('allow')
+    // 受保護檔案仍一律問使用者
+    expect(await callHook('Write', { file_path: '/wt/t1/.git/hooks/pre-commit' })).toBe('ask')
+    expect(await callHook('Write', { file_path: '/wt/t1/.claude/settings.json' })).toBe('ask')
+    // worktree 外的路徑仍拒絕
+    expect(await callHook('Read', { file_path: '/etc/passwd' })).toBe('deny')
+    expect(ctx.requestApproval).not.toHaveBeenCalled()
+  })
+
+  test('auto 模式：釐清階段的 Bash 與寫檔仍被拒絕', async () => {
+    const { ctx, callHook } = setup('clarify')
+    ctx.autoMode = true
+    expect(await callHook('Bash', { command: 'npm run build' })).toBe('deny')
+    expect(await callHook('Edit', { file_path: '/wt/t1/a.ts' })).toBe('deny')
+  })
+
   test('tool_input 不是物件時拒絕', async () => {
     const { callHook } = setup('implement')
     expect(await callHook('Read', 'oops')).toBe('deny')

@@ -10,9 +10,21 @@ import {
   useRef,
   useState
 } from 'react'
-import { type ClaudeStatus, MODELS, type Settings, WORKSPACES } from '@shared/types'
+import {
+  type ClaudeStatus,
+  type EffortChoice,
+  EFFORTS,
+  effortsFor,
+  findModel,
+  fitRunOptions,
+  PERMISSION_MODES,
+  type Settings,
+  supportsAutoMode,
+  WORKSPACES
+} from '@shared/types'
 import { useShallow } from 'zustand/react/shallow'
 import { call, errorText } from '../api'
+import { modelChoices } from '../lib/runOptions'
 import { Button, cx, Icons, inputClass, Pill } from '../components/ui'
 import { checkNewPattern } from '../lib/allowedCommands'
 import { blockImeSubmit, isComposing } from '../lib/ime'
@@ -314,7 +326,22 @@ function AccountSection({
 }
 
 function ModelSection({ settings, save }: { settings: Settings; save: Save }) {
+  const models = useStore((s) => s.models)
   const model = useInstantSetting('defaultModel', settings.defaultModel, save)
+  const effort = useInstantSetting('defaultEffort', settings.defaultEffort, save)
+  const permissionMode = useInstantSetting(
+    'defaultPermissionMode',
+    settings.defaultPermissionMode,
+    save
+  )
+  const efforts = effortsFor(findModel(models, model.value))
+  // 換模型時把新模型不支援的預設 effort／權限模式改回 auto／手動
+  const pickModel = (id: string) => {
+    model.set(id)
+    const fit = fitRunOptions(findModel(models, id), effort.value, permissionMode.value)
+    if (fit.effort !== effort.value) effort.set(fit.effort)
+    if (fit.permissionMode !== permissionMode.value) permissionMode.set(fit.permissionMode)
+  }
   return (
     <Section id="model" title="模型">
       <div
@@ -323,7 +350,7 @@ function ModelSection({ settings, save }: { settings: Settings; save: Save }) {
         aria-busy={model.saving || undefined}
         className="grid grid-cols-2 gap-2.5"
       >
-        {MODELS.map((m) => {
+        {modelChoices(models, model.value).map((m) => {
           const on = model.value === m.id
           return (
             <label
@@ -337,7 +364,7 @@ function ModelSection({ settings, save }: { settings: Settings; save: Save }) {
                 type="radio"
                 name="defaultModel"
                 checked={on}
-                onChange={() => model.set(m.id)}
+                onChange={() => pickModel(m.id)}
                 className="mt-[5px] accent-brand"
               />
               <span className="flex flex-col">
@@ -350,8 +377,78 @@ function ModelSection({ settings, save }: { settings: Settings; save: Save }) {
           )
         })}
       </div>
-      <span className="text-xs text-muted">每個任務建立時也可以單獨選擇。</span>
+      <label className="flex flex-col gap-1.5 text-[13px]">
+        <span className="font-medium">預設 effort</span>
+        <select
+          value={effort.value}
+          aria-busy={effort.saving || undefined}
+          onChange={(e) => effort.set(e.target.value as EffortChoice)}
+          className={cx(inputClass, 'h-10 rounded-[10px] px-3 text-sm')}
+        >
+          {EFFORTS.filter((e) => efforts.includes(e.id)).map((e) => (
+            <option key={e.id} value={e.id}>
+              {e.label}
+            </option>
+          ))}
+        </select>
+        <span className="text-xs text-muted">
+          Effort 越高，Claude 思考得越深入，但較慢、用量較多；Auto
+          使用模型的預設。只列出這個模型支援的等級。
+        </span>
+      </label>
+      <span className="text-xs text-muted">
+        每個任務建立時也可以單獨選擇，任務進行中也能在標題列調整（下一輪生效）。
+      </span>
     </Section>
+  )
+}
+
+function PermissionModeSetting({ settings, save }: { settings: Settings; save: Save }) {
+  const models = useStore((s) => s.models)
+  const mode = useInstantSetting('defaultPermissionMode', settings.defaultPermissionMode, save)
+  const autoOk = supportsAutoMode(findModel(models, settings.defaultModel))
+  return (
+    <div className="flex flex-col gap-2.5">
+      <span id="default-permission-mode-label" className="text-[13px] font-medium">
+        預設權限模式
+      </span>
+      <div
+        role="radiogroup"
+        aria-labelledby="default-permission-mode-label"
+        aria-busy={mode.saving || undefined}
+        className="grid grid-cols-2 gap-2.5"
+      >
+        {PERMISSION_MODES.map((m) => {
+          const on = mode.value === m.id
+          const off = m.id === 'auto' && !autoOk
+          return (
+            <label
+              key={m.id}
+              className={cx(
+                'flex gap-2.5 rounded-[14px] p-3.5',
+                off ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
+                on ? 'bg-brand-tint shadow-[0_0_0_2px_var(--color-brand)]' : 'bg-fill-2'
+              )}
+            >
+              <input
+                type="radio"
+                name="defaultPermissionMode"
+                checked={on}
+                disabled={off}
+                onChange={() => mode.set(m.id)}
+                className="mt-[5px] accent-brand"
+              />
+              <span className="flex flex-col">
+                <span className="font-medium">{m.label}</span>
+                <span className={cx('text-xs', on ? 'text-brand-muted' : 'text-muted')}>
+                  {off ? '預設模型不支援 auto 模式' : m.hint}
+                </span>
+              </span>
+            </label>
+          )
+        })}
+      </div>
+    </div>
   )
 }
 
@@ -505,6 +602,7 @@ function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
 function PermissionSection({ settings, save }: { settings: Settings; save: Save }) {
   return (
     <Section id="perm" title="實作階段權限">
+      <PermissionModeSetting settings={settings} save={save} />
       <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_var(--color-chip)]">
         <FixedRule title="worktree 內的檔案讀寫自動允許" detail="worktree 以外的檔案一律拒絕" />
         <FixedRule
@@ -516,7 +614,10 @@ function PermissionSection({ settings, save }: { settings: Settings; save: Save 
           }
           detail="這些檔案會改變 git 或 Claude 的行為，即使在 worktree 內也會先詢問。git hooks 包含 .husky、.githooks、lefthook、pre-commit 與 core.hooksPath；Harness 自動 commit 時不執行 git hook"
         />
-        <FixedRule title="shell 指令需要核准" detail="下方清單中的指令不必詢問" />
+        <FixedRule
+          title="shell 指令需要核准"
+          detail="下方清單中的指令不必詢問；auto 模式下先由分類器判斷，判斷不了才詢問"
+        />
         <AllowedCommands list={settings.alwaysAllowedCommands} save={save} />
       </div>
     </Section>

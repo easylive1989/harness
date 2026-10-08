@@ -1,7 +1,7 @@
 // src/renderer/src/components/Sidebar.tsx
 // 對照 docs/design/StyleB.dc.html、B1-NewTask.dc.html 的 <nav>
 import { useState } from 'react'
-import { MODELS, type Task } from '@shared/types'
+import { modelLabel, type Task } from '@shared/types'
 import { call } from '../api'
 import { taskStatusLabel } from '../lib/stage'
 import { useShallow } from 'zustand/react/shallow'
@@ -44,13 +44,14 @@ function TaskItem({ task, active, onClick }: { task: Task; active: boolean; onCl
 }
 
 export function Sidebar() {
-  const { repos, tasks, view, claude, settings } = useStore(
+  const { repos, tasks, view, claude, settings, models } = useStore(
     useShallow((s) => ({
       repos: s.repos,
       tasks: s.tasks,
       view: s.view,
       claude: s.claude,
-      settings: s.settings
+      settings: s.settings,
+      models: s.models
     }))
   )
   const open = useStore((s) => s.open)
@@ -75,7 +76,7 @@ export function Sidebar() {
       setToggled(rest)
     }
   }
-  const model = MODELS.find((m) => m.id === settings?.defaultModel)?.label ?? ''
+  const model = settings ? modelLabel(models, settings.defaultModel) : ''
   return (
     <nav
       aria-label="Repo 與任務"

@@ -1,11 +1,88 @@
 import type { ImageRef } from './images'
 import type { PlannedTest, ReportInput } from './report'
 
-export type ModelId = 'claude-opus-5-5' | 'claude-sonnet-5-5'
-export const MODELS: { id: ModelId; label: string; hint: string }[] = [
+/** 傳給 SDK 的模型 id（完整 id 或 Claude Code 的別名）；可用的模型依帳號由 SDK 回報 */
+export type ModelId = string
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max']
+export interface ModelOption {
+  id: ModelId
+  /** 別名實際對應的完整 id（SDK 的 resolvedModel） */
+  resolvedId?: string
+  label: string
+  hint: string
+  /** 支援的 effort 等級；undefined 表示不知道（不過濾），空陣列表示不支援 effort */
+  efforts?: EffortLevel[]
+  /** 是否支援 auto 權限模式；undefined 表示不知道（允許） */
+  autoMode?: boolean
+}
+/** 取不到 SDK 回報的清單時使用 */
+export const FALLBACK_MODELS: ModelOption[] = [
   { id: 'claude-opus-5-5', label: 'Opus 5.5', hint: '預設，品質最好' },
-  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', hint: '較快，省訂閱額度' }
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', hint: '較快，省訂閱額度' },
+  { id: 'claude-haiku-5-5', label: 'Haiku 5.5', hint: '最快，最省額度' },
+  { id: 'claude-fable-5-1', label: 'Fable 5.1', hint: '最新一代模型' }
 ]
+export const DEFAULT_MODEL: ModelId = 'claude-opus-5-5'
+
+/** auto：不指定，用模型的預設 */
+export type EffortChoice = 'auto' | EffortLevel
+export const EFFORTS: { id: EffortChoice; label: string }[] = [
+  { id: 'auto', label: 'Auto（模型預設）' },
+  { id: 'low', label: 'Low' },
+  { id: 'medium', label: 'Medium' },
+  { id: 'high', label: 'High' },
+  { id: 'xhigh', label: 'Extra high' },
+  { id: 'max', label: 'Max' }
+]
+
+/** manual：需要核准的操作一律問使用者；auto：先交給 Claude Code 的分類器判斷，判斷不了才問 */
+export type PermissionModeChoice = 'manual' | 'auto'
+export const PERMISSION_MODES: { id: PermissionModeChoice; label: string; hint: string }[] = [
+  { id: 'manual', label: '手動核准', hint: '需要核准的指令與操作都由你決定' },
+  {
+    id: 'auto',
+    label: 'Auto',
+    hint: '由 Claude Code 的分類器自動核准或拒絕，判斷不了才問你；Harness 的規則與受保護檔案仍照常把關'
+  }
+]
+
+/** 找到模型的資訊（也比對別名對應的完整 id）；清單裡沒有時回傳 undefined */
+export function findModel(models: ModelOption[], id: ModelId): ModelOption | undefined {
+  return models.find((m) => m.id === id) ?? models.find((m) => m.resolvedId === id)
+}
+
+export function modelLabel(models: ModelOption[], id: ModelId): string {
+  return findModel(models, id)?.label ?? FALLBACK_MODELS.find((m) => m.id === id)?.label ?? id
+}
+
+/** 模型可選的 effort（含 auto） */
+export function effortsFor(model: ModelOption | undefined): EffortChoice[] {
+  const levels = model?.efforts ?? EFFORT_LEVELS
+  return ['auto', ...EFFORT_LEVELS.filter((l) => levels.includes(l))]
+}
+
+export const supportsAutoMode = (model: ModelOption | undefined) => model?.autoMode !== false
+
+/** 換模型後把不支援的 effort／權限模式改回預設 */
+export function fitRunOptions(
+  model: ModelOption | undefined,
+  effort: EffortChoice,
+  permissionMode: PermissionModeChoice
+): { effort: EffortChoice; permissionMode: PermissionModeChoice } {
+  return {
+    effort: effortsFor(model).includes(effort) ? effort : 'auto',
+    permissionMode:
+      permissionMode === 'auto' && !supportsAutoMode(model) ? 'manual' : permissionMode
+  }
+}
+
+/** 任務在執行時可調整的選項；下一輪執行生效 */
+export interface RunOptions {
+  model: ModelId
+  effort: EffortChoice
+  permissionMode: PermissionModeChoice
+}
 
 export type TaskStatus =
   'clarifying' | 'spec_review' | 'implementing' | 'reviewing' | 'done' | 'discarded'
@@ -136,6 +213,10 @@ export interface Task {
   /** Claude 工作的資料夾：worktree 模式是獨立的 worktree，branch 模式是原 repo 資料夾 */
   worktreePath: string
   model: ModelId
+  /** 沒有這個欄位的舊任務是 auto */
+  effort?: EffortChoice
+  /** 沒有這個欄位的舊任務是 manual */
+  permissionMode?: PermissionModeChoice
   status: TaskStatus
   runState: RunState
   mainSessionId?: string
@@ -208,6 +289,8 @@ export const isBranchMode = (t: Pick<Task, 'workspace'>) => t.workspace === 'bra
 
 export interface Settings {
   defaultModel: ModelId
+  defaultEffort: EffortChoice
+  defaultPermissionMode: PermissionModeChoice
   /** 新任務畫面預設的工作方式 */
   defaultWorkspace: WorkspaceMode
   worktreeRoot: string

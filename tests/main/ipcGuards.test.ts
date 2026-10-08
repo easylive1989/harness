@@ -3,10 +3,13 @@ import { describe, expect, test, vi } from 'vitest'
 import type { ClaudeStatus } from '@shared/types'
 import {
   assertChannel,
+  assertEffort,
   assertId,
   assertImageRef,
   assertImages,
   assertModel,
+  assertPermissionMode,
+  assertRunOptionsPatch,
   assertString,
   assertVersion,
   assertWorkspace,
@@ -148,6 +151,12 @@ describe('validateSettingsPatch', () => {
       expect(() => assertWorkspace(v)).toThrow('無效的工作方式')
   })
 
+  test('預設 effort 與權限模式可以儲存', () => {
+    expect(
+      validateSettingsPatch({ defaultEffort: 'xhigh', defaultPermissionMode: 'auto' })
+    ).toEqual({ defaultEffort: 'xhigh', defaultPermissionMode: 'auto' })
+  })
+
   test('claudePath 空字串或 undefined 代表自動偵測', () => {
     expect(validateSettingsPatch({ claudePath: '  ' })).toEqual({ claudePath: undefined })
     expect(validateSettingsPatch({ claudePath: undefined })).toEqual({ claudePath: undefined })
@@ -164,7 +173,9 @@ describe('validateSettingsPatch', () => {
     [{ alwaysAllowedCommands: ['ls', ' '] }, '允許清單'],
     [{ alwaysAllowedCommands: ['ls', 1] }, '允許清單'],
     [{ loadProjectSettings: 'yes' }, '載入專案設定'],
-    [{ defaultModel: 'gpt-4' }, '模型'],
+    [{ defaultModel: '--model x' }, '模型'],
+    [{ defaultEffort: 'huge' }, 'effort'],
+    [{ defaultPermissionMode: 'bypassPermissions' }, '權限模式'],
     [{ defaultWorkspace: 'folder' }, '工作方式']
   ])('拒絕 %j', (patch, msg) => {
     expect(() => validateSettingsPatch(patch)).toThrow(msg)
@@ -214,9 +225,42 @@ describe('assertString', () => {
   })
 })
 
-test('model 必須是支援的模型', () => {
-  expect(assertModel('claude-opus-5-5')).toBe('claude-opus-5-5')
-  for (const m of ['gpt-4', '', 1, undefined]) expect(() => assertModel(m)).toThrow('無效的模型')
+test('model 是格式安全的模型 id（清單依帳號動態取得，不比對寫死的清單）', () => {
+  for (const m of [
+    'claude-opus-5-5',
+    'opus',
+    'claude-sonnet-5-5[1m]',
+    'us.anthropic.claude-haiku-5-5'
+  ])
+    expect(assertModel(m)).toBe(m)
+  for (const m of ['', ' ', '--model', 'a b', 'x;rm', 'a'.repeat(129), 1, undefined])
+    expect(() => assertModel(m)).toThrow('無效的模型')
+})
+
+test('effort 只接受 auto 與 low～max', () => {
+  for (const e of ['auto', 'low', 'medium', 'high', 'xhigh', 'max']) expect(assertEffort(e)).toBe(e)
+  for (const e of ['High', 'ultra', '', undefined, 1])
+    expect(() => assertEffort(e)).toThrow('無效的 effort')
+})
+
+test('權限模式只接受 manual 與 auto', () => {
+  expect(assertPermissionMode('manual')).toBe('manual')
+  expect(assertPermissionMode('auto')).toBe('auto')
+  for (const m of ['default', 'bypassPermissions', 'acceptEdits', 'plan', '', undefined])
+    expect(() => assertPermissionMode(m)).toThrow('無效的權限模式')
+})
+
+test('執行選項的修改只收有給的欄位，任一欄位不合法就拒絕', () => {
+  expect(assertRunOptionsPatch({ effort: 'high' })).toEqual({ effort: 'high' })
+  expect(
+    assertRunOptionsPatch({ model: 'opus', effort: 'auto', permissionMode: 'auto', extra: 1 })
+  ).toEqual({ model: 'opus', effort: 'auto', permissionMode: 'auto' })
+  for (const v of [null, 'x', [], undefined])
+    expect(() => assertRunOptionsPatch(v)).toThrow('無效的執行選項')
+  expect(() => assertRunOptionsPatch({ model: '--x' })).toThrow('無效的模型')
+  expect(() => assertRunOptionsPatch({ permissionMode: 'bypassPermissions' })).toThrow(
+    '無效的權限模式'
+  )
 })
 
 describe('isPathInside', () => {

@@ -1,11 +1,20 @@
 // src/main/store/repository.ts
 import { join } from 'node:path'
 import { type ImageRef, imageExt } from '@shared/images'
-import type { Report, Repo, Settings, Task, TimelineEvent } from '@shared/types'
+import {
+  DEFAULT_MODEL,
+  type Report,
+  type Repo,
+  type Settings,
+  type Task,
+  type TimelineEvent
+} from '@shared/types'
 import type { Store } from './store'
 
 export const defaultSettings = (home: string): Settings => ({
-  defaultModel: 'claude-opus-5-5',
+  defaultModel: DEFAULT_MODEL,
+  defaultEffort: 'auto',
+  defaultPermissionMode: 'manual',
   defaultWorkspace: 'worktree',
   worktreeRoot: join(home, '.harness', 'worktrees'),
   branchPrefix: 'harness/',

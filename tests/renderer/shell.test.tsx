@@ -41,7 +41,9 @@ beforeEach(() => {
       worktreeRoot: '/wt',
       branchPrefix: 'harness/',
       alwaysAllowedCommands: [],
-      loadProjectSettings: false
+      loadProjectSettings: false,
+      defaultEffort: 'auto',
+      defaultPermissionMode: 'manual'
     }
   })
 })

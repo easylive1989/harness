@@ -12,8 +12,12 @@ import {
 import {
   type Channel,
   type ClaudeStatus,
-  MODELS,
+  type EffortChoice,
+  EFFORTS,
   type ModelId,
+  PERMISSION_MODES,
+  type PermissionModeChoice,
+  type RunOptions,
   type Settings,
   WORKSPACES,
   type WorkspaceMode
@@ -83,9 +87,33 @@ export function assertImages(value: unknown): ImageInput[] {
   })
 }
 
+/** 模型清單依帳號動態取得，這裡只檢查格式（完整 id 或 `opus[1m]` 之類的別名） */
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/[\]-]{0,127}$/
+
 export function assertModel(value: unknown): ModelId {
-  if (!MODELS.some((m) => m.id === value)) throw new Error('無效的模型')
-  return value as ModelId
+  if (typeof value !== 'string' || !MODEL_ID.test(value)) throw new Error('無效的模型')
+  return value
+}
+
+export function assertEffort(value: unknown): EffortChoice {
+  if (!EFFORTS.some((e) => e.id === value)) throw new Error('無效的 effort')
+  return value as EffortChoice
+}
+
+export function assertPermissionMode(value: unknown): PermissionModeChoice {
+  if (!PERMISSION_MODES.some((m) => m.id === value)) throw new Error('無效的權限模式')
+  return value as PermissionModeChoice
+}
+
+/** 任務進行中修改的執行選項：只收有給的欄位 */
+export function assertRunOptionsPatch(value: unknown): Partial<RunOptions> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('無效的執行選項')
+  const v = value as Record<string, unknown>
+  const out: Partial<RunOptions> = {}
+  if (v.model !== undefined) out.model = assertModel(v.model)
+  if (v.effort !== undefined) out.effort = assertEffort(v.effort)
+  if (v.permissionMode !== undefined) out.permissionMode = assertPermissionMode(v.permissionMode)
+  return out
 }
 
 export function assertWorkspace(value: unknown): WorkspaceMode {
@@ -116,10 +144,9 @@ export function isValidBranchName(name: string): boolean {
 
 /** 每個已知設定欄位的檢查與整理；未知欄位不寫進 settings.json */
 const SETTINGS_VALIDATORS: { [K in keyof Settings]-?: (v: unknown) => Settings[K] } = {
-  defaultModel: (v) => {
-    if (!MODELS.some((m) => m.id === v)) throw new Error('不支援的模型')
-    return v as ModelId
-  },
+  defaultModel: (v) => assertModel(v),
+  defaultEffort: (v) => assertEffort(v),
+  defaultPermissionMode: (v) => assertPermissionMode(v),
   defaultWorkspace: (v) => assertWorkspace(v),
   worktreeRoot: (v) => {
     const p = nonEmpty(v, 'worktree 位置')

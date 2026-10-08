@@ -16,6 +16,7 @@ import {
   type PermissionDecision,
   type PermissionRequest,
   type Report,
+  type RunOptions,
   type Task,
   type TaskStatus,
   type TimelineEvent,
@@ -382,6 +383,8 @@ export class TaskManager {
       ...(input.workspace === 'branch' ? { workspace: 'branch' as const } : {}),
       worktreePath,
       model: input.model,
+      effort: input.effort ?? 'auto',
+      permissionMode: input.permissionMode ?? 'manual',
       status: 'clarifying',
       runState: 'idle',
       questions: [],
@@ -439,6 +442,16 @@ export class TaskManager {
         data: (await this.d.repo.readImage(taskId, r)).toString('base64')
       }))
     )
+  }
+
+  /** 修改模型、effort、權限模式：進行中的這一輪不變，下一輪開始的執行（含分岔）使用新值 */
+  async setRunOptions(taskId: string, patch: Partial<RunOptions>): Promise<Task> {
+    this.openTask(taskId)
+    return this.update(taskId, (t) => {
+      if (patch.model !== undefined) t.model = patch.model
+      if (patch.effort !== undefined) t.effort = patch.effort
+      if (patch.permissionMode !== undefined) t.permissionMode = patch.permissionMode
+    })
   }
 
   /** 讀取訊息附加的圖片給畫面顯示（data URL） */
@@ -557,7 +570,9 @@ export class TaskManager {
 
     // canUseTool 只會在執行開始後被呼叫，那時 owner.run 已經設好
     const owner: { run?: AgentRun } = {}
+    const autoMode = t.permissionMode === 'auto'
     const gateCtx: GateContext = {
+      autoMode,
       getPhase: () => (branch ? 'branch' : phaseOf(this.task(taskId).status)),
       worktreePath: t.worktreePath,
       hooksDir: hooksDirInside(t.worktreePath, hooksPath),
@@ -582,6 +597,9 @@ export class TaskManager {
     const options: Options = {
       cwd: t.worktreePath,
       model: t.model,
+      ...(t.effort && t.effort !== 'auto' ? { effort: t.effort } : {}),
+      // 明確指定：沒給時 Claude Code 可能依帳號自行選 auto
+      permissionMode: autoMode ? 'auto' : 'default',
       resume,
       forkSession: branch && !branch.sessionId ? true : undefined,
       settingSources: settings.loadProjectSettings ? ['project'] : [],

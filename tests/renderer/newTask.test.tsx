@@ -10,6 +10,7 @@ vi.mock('@renderer/api', () => ({
 import { call } from '@renderer/api'
 import { NewTaskScreen } from '@renderer/screens/NewTaskScreen'
 import { useStore } from '@renderer/store'
+import { FALLBACK_MODELS } from '@shared/types'
 import { makeTask } from '../fixtures/task'
 
 const repos = [
@@ -40,6 +41,7 @@ beforeEach(() => {
     tasks: {},
     timelines: {},
     view: { kind: 'new' },
+    models: FALLBACK_MODELS,
     toast: undefined,
     claude: { found: true, loggedIn: true },
     settings: {
@@ -48,7 +50,9 @@ beforeEach(() => {
       worktreeRoot: '/wt',
       branchPrefix: 'harness/',
       alwaysAllowedCommands: [],
-      loadProjectSettings: false
+      loadProjectSettings: false,
+      defaultEffort: 'auto',
+      defaultPermissionMode: 'manual'
     }
   })
 })
@@ -81,9 +85,71 @@ describe('NewTaskScreen', () => {
       images: [],
       baseBranch: 'trunk',
       model: 'claude-opus-5-5',
+      effort: 'auto',
+      permissionMode: 'manual',
       workspace: 'worktree'
     })
     await waitFor(() => expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 'new1' }))
+  })
+
+  test('effort 只列出所選模型支援的等級；換模型後不支援的值改回 Auto，建立任務帶 effort 與權限模式', async () => {
+    useStore.setState({
+      models: [
+        {
+          id: 'claude-opus-5-5',
+          label: 'Opus 5.5',
+          hint: '',
+          efforts: ['low', 'medium', 'high', 'xhigh', 'max']
+        },
+        {
+          id: 'claude-sonnet-5-5',
+          label: 'Sonnet 5.5',
+          hint: '',
+          efforts: ['low', 'medium', 'high'],
+          autoMode: false
+        }
+      ]
+    })
+    render(<NewTaskScreen />)
+    await waitFor(() => expect(screen.getByLabelText('從哪個分支開始')).toHaveValue('develop'))
+    const effort = () => screen.getByLabelText('Effort')
+    const options = () => Array.from((effort() as HTMLSelectElement).options).map((o) => o.value)
+    await userEvent.selectOptions(screen.getByLabelText('模型'), 'claude-opus-5-5')
+    expect(options()).toEqual(['auto', 'low', 'medium', 'high', 'xhigh', 'max'])
+    await userEvent.selectOptions(effort(), 'xhigh')
+    await userEvent.selectOptions(screen.getByLabelText('權限模式'), 'auto')
+
+    await userEvent.selectOptions(screen.getByLabelText('模型'), 'claude-sonnet-5-5')
+    expect(options()).toEqual(['auto', 'low', 'medium', 'high'])
+    expect(effort()).toHaveValue('auto')
+    // 不支援 auto 模式：改回手動，auto 選項停用
+    expect(screen.getByLabelText('權限模式')).toHaveValue('manual')
+    expect(screen.getByRole('option', { name: /Auto（這個模型不支援）/ })).toBeDisabled()
+
+    await userEvent.selectOptions(effort(), 'high')
+    await userEvent.type(screen.getByLabelText('需求'), '加上登入失敗鎖定')
+    await userEvent.click(start())
+    expect(call).toHaveBeenCalledWith(
+      'tasks:create',
+      expect.objectContaining({
+        model: 'claude-sonnet-5-5',
+        effort: 'high',
+        permissionMode: 'manual'
+      })
+    )
+  })
+
+  test('effort 與權限模式預設用設定的值', async () => {
+    useStore.setState({
+      settings: {
+        ...useStore.getState().settings!,
+        defaultEffort: 'max',
+        defaultPermissionMode: 'auto'
+      }
+    })
+    render(<NewTaskScreen />)
+    expect(screen.getByLabelText('Effort')).toHaveValue('max')
+    expect(screen.getByLabelText('權限模式')).toHaveValue('auto')
   })
 
   test('工作方式預設用設定的值；改選 branch 後建立任務帶 workspace=branch', async () => {

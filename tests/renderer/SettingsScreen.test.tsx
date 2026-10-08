@@ -7,7 +7,7 @@ vi.mock('@renderer/api', () => ({
   onEvent: vi.fn(() => () => {}),
   errorText: (e: unknown) => (e instanceof Error ? e.message : String(e))
 }))
-import type { Settings } from '@shared/types'
+import { FALLBACK_MODELS, type Settings } from '@shared/types'
 import { call } from '@renderer/api'
 import App from '@renderer/App'
 import { SettingsScreen } from '@renderer/screens/SettingsScreen'
@@ -22,7 +22,9 @@ const initial: Settings = {
   worktreeRoot: '/Users/me/.harness/worktrees',
   branchPrefix: 'harness/',
   alwaysAllowedCommands: ['git status', 'git diff', 'ls *'],
-  loadProjectSettings: true
+  loadProjectSettings: true,
+  defaultEffort: 'auto',
+  defaultPermissionMode: 'manual'
 }
 let stored: Settings
 let replies: Record<string, (...args: never[]) => unknown>
@@ -72,6 +74,7 @@ beforeEach(() => {
     tasks: {},
     timelines: {},
     view: { kind: 'settings' },
+    models: FALLBACK_MODELS,
     settingsReturn: undefined,
     toast: undefined,
     claude: {
@@ -202,6 +205,54 @@ describe('SettingsScreen：模型與專案設定', () => {
     expect(radio(/Sonnet 5.5/)).toBeChecked()
     expect(radio(/Sonnet 5.5/)).toHaveFocus()
     expect(screen.getByRole('radiogroup', { name: '模型' })).not.toHaveAttribute('aria-busy')
+  })
+
+  test('模型選項來自帳號可用的清單；選 effort 與權限模式即儲存', async () => {
+    useStore.setState({
+      models: [
+        { id: 'claude-opus-5-5', label: 'Opus 5.5', hint: '品質最好' },
+        { id: 'claude-fable-5-1', label: 'Fable 5.1', hint: '最新' },
+        { id: 'claude-haiku-5-5', label: 'Haiku 5.5', hint: '最快', efforts: [], autoMode: false }
+      ]
+    })
+    render(<SettingsScreen />)
+    const group = screen.getByRole('radiogroup', { name: '模型' })
+    expect(
+      within(group)
+        .getAllByRole('radio')
+        .map((r) => r.closest('label')!.textContent)
+    ).toEqual([
+      expect.stringContaining('Opus 5.5'),
+      expect.stringContaining('Fable 5.1'),
+      expect.stringContaining('Haiku 5.5')
+    ])
+    await userEvent.selectOptions(screen.getByLabelText(/預設 effort/), 'high')
+    await waitFor(() =>
+      expect(call).toHaveBeenCalledWith('settings:set', { defaultEffort: 'high' })
+    )
+    await userEvent.click(radio(/^Auto/))
+    await waitFor(() =>
+      expect(call).toHaveBeenCalledWith('settings:set', { defaultPermissionMode: 'auto' })
+    )
+    // 換成不支援 effort 與 auto 模式的模型：預設值改回 Auto／手動核准
+    await userEvent.click(radio(/Haiku 5.5/))
+    await waitFor(() =>
+      expect(useStore.getState().settings).toMatchObject({
+        defaultModel: 'claude-haiku-5-5',
+        defaultEffort: 'auto',
+        defaultPermissionMode: 'manual'
+      })
+    )
+    expect(screen.getByLabelText(/預設 effort/)).toHaveValue('auto')
+    expect(radio(/^Auto/)).toBeDisabled()
+  })
+
+  test('設定的模型不在清單裡時仍列出來', () => {
+    useStore.setState({
+      settings: { ...initial, defaultModel: 'claude-legacy-4' }
+    })
+    render(<SettingsScreen />)
+    expect(radio(/claude-legacy-4/)).toBeChecked()
   })
 
   test('點選預設工作方式即儲存', async () => {
@@ -582,7 +633,7 @@ describe('SettingsScreen：版面與導覽', () => {
 
     await userEvent.click(navLink('權限'))
     expect(current()).toEqual(['權限'])
-    fireEvent.pointerDown(screen.getByText('每個任務建立時也可以單獨選擇。'))
+    fireEvent.pointerDown(screen.getByText(/每個任務建立時也可以單獨選擇/))
     expect(current()).toEqual(['Worktree 與專案設定'])
   })
 
