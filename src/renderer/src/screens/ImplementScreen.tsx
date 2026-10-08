@@ -382,7 +382,13 @@ export function ImplementScreen({
               )}
 
               {chat.map((e) => (
-                <ChatItem key={e.id} task={task} e={e} readOnly={readOnly} />
+                <ChatItem
+                  // 問題卡片以問題 id 為 key：重新提問時卡片搬到新位置，還沒送出的輸入留著
+                  key={e.kind === 'question' ? `question:${e.ref}` : e.id}
+                  task={task}
+                  e={e}
+                  readOnly={readOnly}
+                />
               ))}
 
               <RunStatus

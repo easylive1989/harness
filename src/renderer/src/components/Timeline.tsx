@@ -120,12 +120,13 @@ export function Timeline({
             )
           case 'question': {
             const q = task.questions.find((x) => x.id === e.ref)
-            // 重新提問過的問題只在最後一次出現的位置畫卡片
+            // 重新提問過的問題只在最後一次出現的位置畫卡片。key 用問題 id：卡片移到最新的位置時
+            // React 搬動同一個元件，還沒送出的選擇、補充說明與反問都留著
             if (!q || !latest.has(e.id)) return null
             return q.status === 'open' ? (
-              <QuestionCard key={e.id} task={task} question={q} readOnly={readOnly} />
+              <QuestionCard key={`question:${q.id}`} task={task} question={q} readOnly={readOnly} />
             ) : (
-              <AnsweredQuestionRow key={e.id} question={q} />
+              <AnsweredQuestionRow key={`question:${q.id}`} question={q} />
             )
           }
           case 'decision': {

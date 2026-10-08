@@ -212,6 +212,34 @@ describe('Timeline', () => {
     ).toBeTruthy()
   })
 
+  test('卡片移到最新的位置時，還沒送出的反問與選擇都留著', async () => {
+    const open = { ...q, status: 'open' as const, answer: undefined, allowFreeText: true }
+    const first = [ev({ id: 'x1', kind: 'question', ref: 'q1' })]
+    const { rerender } = render(
+      <Timeline task={{ ...task, questions: [open] }} channel="main" events={first} />
+    )
+    await userEvent.type(screen.getByRole('textbox', { name: '反問' }), '共用 IP 呢？')
+    await userEvent.click(screen.getByRole('radio', { name: /其他/ }))
+    rerender(
+      <Timeline
+        task={{ ...task, questions: [open] }}
+        channel="main"
+        events={[
+          ...first,
+          ev({ id: 'x2', kind: 'assistant_text', text: '採用分岔的結論，重新送出第一題。' }),
+          ev({ id: 'x3', kind: 'question', ref: 'q1' })
+        ]}
+      />
+    )
+    expect(screen.getByRole('textbox', { name: '反問' })).toHaveValue('共用 IP 呢？')
+    expect(screen.getByRole('radio', { name: /其他/ })).toBeChecked()
+    const card = screen.getByRole('radiogroup').closest('section')!
+    expect(
+      screen.getByText('採用分岔的結論，重新送出第一題。').compareDocumentPosition(card) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
+
   test('開放中的問題顯示成卡片', () => {
     const open = { ...q, status: 'open' as const, answer: undefined }
     render(
