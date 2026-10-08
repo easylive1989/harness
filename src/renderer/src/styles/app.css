@@ -72,3 +72,13 @@
 
 @utility drag { -webkit-app-region: drag; }
 @utility no-drag { -webkit-app-region: no-drag; }
+
+/* 從規格或報告點「問題 N」跳到釐清對話時，短暫標示那個問題（lib/reveal.ts 的 flash，2 秒） */
+@keyframes harness-flash {
+  0%, 50% { outline-color: var(--color-brand); }
+  100% { outline-color: transparent; }
+}
+[data-flash] { outline: 3px solid transparent; outline-offset: 3px; animation: harness-flash 2s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  [data-flash] { animation: none; outline-color: var(--color-brand); }
+}

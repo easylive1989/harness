@@ -23,7 +23,9 @@ const srcDiff = sampleDiff.slice(0, sampleDiff.indexOf('diff --git a/src/auth/lo
 const task = makeTask({ status: 'reviewing', reportVersions: [1] })
 const renderReport = (readOnly = false) => {
   useStore.setState({ tasks: { [task.id]: task } })
-  return render(<ReportScreen task={task} nav={null} readOnly={readOnly} onOpenStage={vi.fn()} />)
+  return render(
+    <ReportScreen task={task} nav={null} readOnly={readOnly} onOpenQuestion={vi.fn()} />
+  )
 }
 const loaded = () => screen.findByRole('heading', { name: '登入流程多了一道鎖定關卡' })
 const section = () => screen.getByRole('region', { name: '新增的測試' })

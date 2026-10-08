@@ -10,7 +10,15 @@ import { currentStage, isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
 
-function SourcePill({ task, source }: { task: Task; source: DecisionSource }) {
+function SourcePill({
+  task,
+  source,
+  onOpenQuestion
+}: {
+  task: Task
+  source: DecisionSource
+  onOpenQuestion?: (id: string) => void
+}) {
   switch (source.type) {
     case 'branch':
       return <Pill tone="decision">分岔</Pill>
@@ -25,7 +33,19 @@ function SourcePill({ task, source }: { task: Task; source: DecisionSource }) {
       return <Pill tone="muted">實作</Pill>
     case 'question': {
       const i = task.questions.findIndex((q) => q.id === source.ref)
-      return <Pill>{i >= 0 ? `問題 ${i + 1}` : '問題'}</Pill>
+      const label = i >= 0 ? `問題 ${i + 1}` : '問題'
+      if (!onOpenQuestion) return <Pill>{label}</Pill>
+      // 點了切到釐清畫面並捲到那個問題（和報告的決策來源一樣）
+      return (
+        <button
+          type="button"
+          aria-label={`${label}（查看釐清對話）`}
+          onClick={() => onOpenQuestion(source.ref)}
+          className="cursor-pointer"
+        >
+          <Pill className="hover:bg-chip">{label}</Pill>
+        </button>
+      )
     }
   }
 }
@@ -34,11 +54,13 @@ function SourcePill({ task, source }: { task: Task; source: DecisionSource }) {
 function ClarifyLog({
   task,
   spec,
-  onOpenClarify
+  onOpenClarify,
+  onOpenQuestion
 }: {
   task: Task
   spec: Spec
   onOpenClarify: () => void
+  onOpenQuestion: (id: string) => void
 }) {
   const answered = task.questions.filter((q) => q.status === 'answered')
   return (
@@ -56,8 +78,14 @@ function ClarifyLog({
             ? q.options.find((o) => o.id === q.answer?.optionId)?.label
             : undefined
           const asked = q.followups.filter((f) => f.role === 'user').length
+          // 點了切到釐清畫面並捲到那個問題
           return (
-            <div key={q.id} className="flex flex-col gap-0.5 rounded-xl bg-fill-2 p-3">
+            <button
+              key={q.id}
+              type="button"
+              onClick={() => onOpenQuestion(q.id)}
+              className="flex cursor-pointer flex-col gap-0.5 rounded-xl bg-fill-2 p-3 text-left hover:bg-fill"
+            >
               <span className="text-muted">
                 問題 {task.questions.indexOf(q) + 1} · {q.text}
               </span>
@@ -65,7 +93,7 @@ function ClarifyLog({
                 {[label, q.answer?.text].filter(Boolean).join('；')}
               </span>
               {asked > 0 && <span className="text-xs text-muted">含 {asked} 次反問</span>}
-            </div>
+            </button>
           )
         })}
         {task.branches.map((b) => {
@@ -100,12 +128,15 @@ export function SpecScreen({
   task,
   nav,
   readOnly,
-  onOpenStage
+  onOpenStage,
+  onOpenQuestion
 }: {
   task: Task
   nav: ReactNode
   readOnly: boolean
   onOpenStage: (s: 'clarify') => void
+  /** 決策來源或釐清紀錄的問題：切到釐清畫面並捲到那個問題 */
+  onOpenQuestion: (id: string) => void
 }) {
   const act = useStore((s) => s.act)
   const decisionsId = useId()
@@ -252,7 +283,7 @@ export function SpecScreen({
                         <span>
                           <InlineCode text={d.text} />
                         </span>
-                        <SourcePill task={task} source={d.source} />
+                        <SourcePill task={task} source={d.source} onOpenQuestion={onOpenQuestion} />
                       </li>
                     ))}
                   </ul>
@@ -357,7 +388,12 @@ export function SpecScreen({
         <PendingPermission task={task} fallbackFocus={() => feedbackRef.current} />
       </main>
 
-      <ClarifyLog task={task} spec={spec} onOpenClarify={() => onOpenStage('clarify')} />
+      <ClarifyLog
+        task={task}
+        spec={spec}
+        onOpenClarify={() => onOpenStage('clarify')}
+        onOpenQuestion={onOpenQuestion}
+      />
     </>
   )
 }

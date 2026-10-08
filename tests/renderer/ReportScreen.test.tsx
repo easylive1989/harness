@@ -36,10 +36,10 @@ const reviewTask = (over: Partial<Task> = {}) =>
     ...over
   })
 
-const renderReport = (task: Task, readOnly = false, onOpenStage = vi.fn()) => {
+const renderReport = (task: Task, readOnly = false, onOpenQuestion = vi.fn()) => {
   useStore.setState({ tasks: { [task.id]: task } })
   return render(
-    <ReportScreen task={task} nav={null} readOnly={readOnly} onOpenStage={onOpenStage} />
+    <ReportScreen task={task} nav={null} readOnly={readOnly} onOpenQuestion={onOpenQuestion} />
   )
 }
 const loaded = () => screen.findByRole('heading', { name: '登入流程多了一道鎖定關卡' })
@@ -284,17 +284,17 @@ test('匯出 HTML：送出自含的 HTML 與安全的檔名', async () => {
   expect(useStore.getState().toast?.text).toBe('已匯出：/Users/me/報告.html')
 })
 
-test('點決策的問題來源打開釐清階段；點架構節點切換到對應檔案', async () => {
-  const onOpenStage = vi.fn()
+test('點決策的問題來源跳到釐清對話裡的那個問題；點架構節點切換到對應檔案', async () => {
+  const onOpenQuestion = vi.fn()
   const report = makeReport()
   report.input.decisions = [
     { ...report.input.decisions[0], id: 'd2', source: { type: 'question', ref: 'q1' } }
   ]
   replies['report:get'] = () => report
-  renderReport(reviewTask(), false, onOpenStage)
+  renderReport(reviewTask(), false, onOpenQuestion)
   await loaded()
   await userEvent.click(screen.getByRole('button', { name: '問題 1（查看釐清對話）' }))
-  expect(onOpenStage).toHaveBeenCalledWith('clarify')
+  expect(onOpenQuestion).toHaveBeenCalledWith('q1')
   const files = screen.getByRole('group', { name: '變更的檔案' })
   expect(within(files).getByRole('button', { name: /lockout\.ts/ })).toHaveAttribute(
     'aria-pressed',

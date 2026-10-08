@@ -6,7 +6,8 @@ import { call, errorText } from '../api'
 import { Button, Spinner } from '../components/ui'
 import { shortTime } from '../lib/format'
 import { usePending } from '../lib/usePending'
-import { anchorTarget, findAnchor, reveal } from '../report/anchors'
+import { reveal } from '../lib/reveal'
+import { anchorTarget, findAnchor } from '../report/anchors'
 import { buildReportHtml, exportFileName } from '../report/exportHtml'
 import { FeedbackPanel } from '../report/FeedbackPanel'
 import { ReportView } from '../report/ReportView'
@@ -16,13 +17,14 @@ export function ReportScreen({
   task,
   nav,
   readOnly,
-  onOpenStage
+  onOpenQuestion
 }: {
   task: Task
   nav: ReactNode
   /** 回看（依回饋修改中、已完成或已丟棄）：不能留言 */
   readOnly: boolean
-  onOpenStage: (s: 'clarify') => void
+  /** 決策來源的「問題 N」：切到釐清畫面並捲到那個問題 */
+  onOpenQuestion: (questionId: string) => void
 }) {
   const act = useStore((s) => s.act)
   const showToast = useStore((s) => s.showToast)
@@ -147,7 +149,7 @@ export function ReportScreen({
             diffFile={diffFocus?.version === version ? diffFocus.path : undefined}
             diffLine={diffFocus?.version === version ? diffFocus.line : undefined}
             onDiffFile={(path, line) => setDiffFocus({ version, path, line })}
-            onOpenQuestion={() => onOpenStage('clarify')}
+            onOpenQuestion={onOpenQuestion}
           />
         ) : failed ? (
           <div className="flex items-center gap-3 rounded-2xl bg-surface p-7 text-[13px] shadow-card">

@@ -13,20 +13,6 @@ export const findAnchor = (anchor: string) =>
     (e) => e.dataset.anchor === anchor
   )
 
-/**
- * 跳到報告上的某個位置：捲過去，焦點也移過去（tabIndex=-1，不會多一個 Tab 停留點），
- * 鍵盤與螢幕閱讀器的使用者從那裡繼續。
- */
-export function reveal(
-  el: HTMLElement | null | undefined,
-  block: ScrollLogicalPosition = 'center'
-) {
-  if (!el) return
-  el.scrollIntoView?.({ behavior: 'smooth', block })
-  if (!el.hasAttribute('tabindex')) el.tabIndex = -1
-  el.focus({ preventScroll: true })
-}
-
 /** 指向 diff 的錨點對應的檔案與行號（路徑本身可能含冒號，所以行號取最後一個冒號之後） */
 export function anchorTarget(anchor: string): { path: string; line?: number } | undefined {
   if (anchor.startsWith('file:')) return { path: anchor.slice('file:'.length) }

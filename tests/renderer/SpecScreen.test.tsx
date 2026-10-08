@@ -75,8 +75,16 @@ const specTask = (over: Partial<Task> = {}) =>
     ...over
   })
 
-const renderSpec = (task: Task, readOnly = false) =>
-  render(<SpecScreen task={task} nav={null} readOnly={readOnly} onOpenStage={() => {}} />)
+const renderSpec = (task: Task, readOnly = false, onOpenQuestion = vi.fn()) =>
+  render(
+    <SpecScreen
+      task={task}
+      nav={null}
+      readOnly={readOnly}
+      onOpenStage={() => {}}
+      onOpenQuestion={onOpenQuestion}
+    />
+  )
 
 beforeEach(() => {
   vi.mocked(call).mockReset()
@@ -196,6 +204,7 @@ test('可切換版本；看舊版本時不能核准；Claude 提出新版時回�
       nav={null}
       readOnly={false}
       onOpenStage={() => {}}
+      onOpenQuestion={() => {}}
     />
   )
   expect(screen.getByRole('heading', { name: '第三版' })).toBeInTheDocument()
@@ -209,9 +218,50 @@ test('唯讀（已核准後回看）時沒有核准列，標示為已核准的�
   expect(screen.getByText(/已核准的規格/)).toBeInTheDocument()
 })
 
+test('點決策的「問題 N」或釐清紀錄裡的問題：跳到釐清對話裡的那個問題', async () => {
+  const onOpenQuestion = vi.fn()
+  renderSpec(specTask(), false, onOpenQuestion)
+  await userEvent.click(screen.getByRole('button', { name: '問題 1（查看釐清對話）' }))
+  expect(onOpenQuestion).toHaveBeenLastCalledWith('q1')
+  onOpenQuestion.mockClear()
+  const aside = screen.getByRole('complementary', { name: '釐清紀錄' })
+  await userEvent.click(within(aside).getByRole('button', { name: /問題 1 · 計數單位/ }))
+  expect(onOpenQuestion).toHaveBeenLastCalledWith('q1')
+})
+
+test('TaskScreen：從規格點「問題 1」→ 切到釐清畫面，捲到那個問題並短暫標示', async () => {
+  useStore.setState({
+    tasks: { t1: specTask() },
+    timelines: {
+      t1: [
+        { id: 'e1', ts: '', channel: 'main', kind: 'user_text', text: '加上登入失敗鎖定' },
+        { id: 'e2', ts: '', channel: 'main', kind: 'question', ref: 'q1' },
+        { id: 'e3', ts: '', channel: 'main', kind: 'question', ref: 'q2' }
+      ]
+    }
+  })
+  render(<TaskScreen taskId="t1" />)
+  await userEvent.click(screen.getByRole('button', { name: '問題 1（查看釐清對話）' }))
+  const nav = screen.getByRole('navigation', { name: '任務階段' })
+  expect(within(nav).getByRole('button', { name: /釐清/ })).toHaveAttribute('aria-pressed', 'true')
+  const row = document.querySelector<HTMLElement>('[data-question="q1"]')!
+  expect(row).toHaveTextContent('共用 IP 也分開算')
+  expect(row).toHaveAttribute('data-flash')
+  expect(row).toHaveFocus()
+  expect(document.querySelector('[data-question="q2"]')).not.toHaveAttribute('data-flash')
+})
+
 test('從釐清紀錄回到釐清對話', async () => {
   const onOpenStage = vi.fn()
-  render(<SpecScreen task={specTask()} nav={null} readOnly={false} onOpenStage={onOpenStage} />)
+  render(
+    <SpecScreen
+      task={specTask()}
+      nav={null}
+      readOnly={false}
+      onOpenStage={onOpenStage}
+      onOpenQuestion={vi.fn()}
+    />
+  )
   await userEvent.click(screen.getByRole('button', { name: '查看釐清對話' }))
   expect(onOpenStage).toHaveBeenCalledWith('clarify')
 })

@@ -90,6 +90,8 @@ export function QuestionCard({
   return (
     <section
       aria-labelledby={titleId}
+      // 規格與報告的「問題 N」跳到這裡（ClarifyScreen 以 data-question 找）
+      data-question={q.id}
       className="ml-10 flex flex-col gap-3.5 rounded-[18px] bg-surface p-5 shadow-focus"
     >
       <div className="flex flex-col gap-0.5">
@@ -268,7 +270,10 @@ export function AnsweredQuestionRow({ question: q }: { question: Question }) {
     ? q.options.find((o) => o.id === q.answer?.optionId)?.label
     : undefined
   return (
-    <div className="ml-10 flex items-center gap-2.5 rounded-xl bg-fill-2 px-4 py-2.5 text-[13px]">
+    <div
+      data-question={q.id}
+      className="ml-10 flex items-center gap-2.5 rounded-xl bg-fill-2 px-4 py-2.5 text-[13px]"
+    >
       <Icons.Check className="flex-none text-brand" strokeWidth={2.5} aria-hidden />
       <span className="text-muted">{q.text}</span>
       <span className="ml-auto text-right font-medium">

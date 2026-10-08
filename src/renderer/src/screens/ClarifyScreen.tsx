@@ -1,5 +1,5 @@
 // src/renderer/src/screens/ClarifyScreen.tsx
-import { type ReactNode, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 import type { Task } from '@shared/types'
 import { call } from '../api'
 import { BranchPanel } from '../components/BranchPanel'
@@ -7,6 +7,7 @@ import { Composer } from '../components/Composer'
 import { PendingPermission } from '../components/PermissionDialog'
 import { RunStatus, Timeline } from '../components/Timeline'
 import { branchSeed, branchTitle } from '../lib/branchDraft'
+import { flash, reveal } from '../lib/reveal'
 import { awaitingCounterReply, isBusy } from '../lib/stage'
 import { useTimeline } from '../lib/timeline'
 import { usePending } from '../lib/usePending'
@@ -17,12 +18,15 @@ export function ClarifyScreen({
   task,
   nav,
   readOnly,
-  onOpenStage
+  onOpenStage,
+  focusQuestion
 }: {
   task: Task
   nav: ReactNode
   readOnly: boolean
   onOpenStage: (s: 'spec' | 'report') => void
+  /** 從規格或報告點「問題 N」：捲到這個問題並短暫標示（每次點擊是新的物件） */
+  focusQuestion?: { id: string }
 }) {
   const act = useStore((s) => s.act)
   const setActiveBranch = useStore((s) => s.setActiveBranch)
@@ -41,6 +45,19 @@ export function ClarifyScreen({
   const [draft, setDraft] = useState<string>()
   const [branching, runBranch] = usePending()
   const composerRef = useRef<HTMLInputElement>(null)
+  // 跳到指定的問題：等時間軸畫出那張卡片（或已答列）後才捲，同一次指定只捲一次。
+  // 排在 useStickToBottom 的 layout effect（捲到底）之後執行
+  const focused = useRef<{ id: string }>(undefined)
+  useEffect(() => {
+    if (!focusQuestion || focused.current === focusQuestion) return
+    const el = [
+      ...(scrollRef.current?.querySelectorAll<HTMLElement>('[data-question]') ?? [])
+    ].find((x) => x.dataset.question === focusQuestion.id)
+    if (!el) return
+    focused.current = focusQuestion
+    reveal(el, 'center')
+    flash(el)
+  }, [focusQuestion, events, scrollRef])
   const createBranch = (excerpt: string, question: string) =>
     runBranch(async () => {
       const b = await act(() =>

@@ -12,7 +12,8 @@ import { InlineCode } from '../components/Markdown'
 import { cx, Icons, Pill } from '../components/ui'
 import { shortTime } from '../lib/format'
 import { useStore } from '../store'
-import { diffAnchor, fileAnchor, findAnchor, reveal } from './anchors'
+import { reveal } from '../lib/reveal'
+import { diffAnchor, fileAnchor, findAnchor } from './anchors'
 import { ArchitectureDiagram } from './ArchitectureDiagram'
 import { BLOCK_DEFAULT_H } from './blocks'
 import { CommentButton, CommentForm, FeedbackNote } from './comments'
@@ -124,7 +125,7 @@ function DecisionSource({
 }: {
   task: Task
   source: Decision['source']
-  onOpenQuestion?: () => void
+  onOpenQuestion?: (questionId: string) => void
 }) {
   if (source.type === 'branch') return <Pill tone="decision">來自分岔</Pill>
   if (source.type === 'implementation') return <Pill tone="muted">實作中決定</Pill>
@@ -137,12 +138,12 @@ function DecisionSource({
     )
   const i = task.questions.findIndex((q) => q.id === source.ref)
   const label = i >= 0 ? `問題 ${i + 1}` : '問題'
-  // 點了打開釐清階段（回看當時的問答）
+  // 點了切到釐清階段並捲到那個問題（回看當時的問答）
   return onOpenQuestion ? (
     <button
       type="button"
       aria-label={`${label}（查看釐清對話）`}
-      onClick={onOpenQuestion}
+      onClick={() => onOpenQuestion(source.ref)}
       className="cursor-pointer"
     >
       <Pill className="hover:bg-chip">{label}</Pill>
@@ -239,7 +240,8 @@ export function ReportView({
   diffFile?: string
   diffLine?: number
   onDiffFile?: (path: string, line?: number) => void
-  onOpenQuestion?: () => void
+  /** 決策來源的「問題 N」：切到釐清畫面並捲到那個問題 */
+  onOpenQuestion?: (questionId: string) => void
 }) {
   const r = report.input
   const [commentOn, setCommentOn] = useState<string>()

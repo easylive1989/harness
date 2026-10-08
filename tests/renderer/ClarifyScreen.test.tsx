@@ -1,7 +1,7 @@
 // tests/renderer/ClarifyScreen.test.tsx
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, expect, test, vi } from 'vitest'
+import { beforeEach, expect, onTestFinished, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
   call: vi.fn(async () => ({ id: 'b1' })),
   onEvent: vi.fn(() => () => {}),
@@ -193,6 +193,64 @@ test('Claude 執行中不能從訊息分岔，但仍可插話', () => {
   )
   expect(screen.queryByRole('button', { name: '從這則訊息分岔' })).not.toBeInTheDocument()
   expect(screen.getByRole('textbox', { name: '訊息' })).toBeEnabled()
+})
+
+test('指定要跳到的問題：捲到那個問題（卡片或已答列）並短暫標示，焦點也移過去', () => {
+  const q = (id: string, status: 'open' | 'answered') => ({
+    id,
+    text: `問題 ${id}`,
+    status,
+    allowFreeText: true,
+    askedAt: '',
+    options: [{ id: 'a', label: '選項' }],
+    answer: status === 'answered' ? { optionId: 'a' } : undefined,
+    followups: []
+  })
+  const task = makeTask({ questions: [q('q1', 'answered'), q('q2', 'open')] })
+  useStore.setState({
+    timelines: {
+      t1: [
+        ...events,
+        { id: 'e3', ts: '', channel: 'main', kind: 'question', ref: 'q1' },
+        { id: 'e4', ts: '', channel: 'main', kind: 'question', ref: 'q2' }
+      ]
+    }
+  })
+  // jsdom 沒有 scrollIntoView：記下被捲到的元素
+  const scrolled: Element[] = []
+  const original = Element.prototype.scrollIntoView
+  Element.prototype.scrollIntoView = function (this: Element) {
+    scrolled.push(this)
+  }
+  onTestFinished(() => {
+    Element.prototype.scrollIntoView = original
+  })
+  const { rerender } = render(
+    <ClarifyScreen
+      task={task}
+      nav={null}
+      readOnly={false}
+      onOpenStage={() => {}}
+      focusQuestion={{ id: 'q1' }}
+    />
+  )
+  const row = document.querySelector<HTMLElement>('[data-question="q1"]')!
+  expect(scrolled).toEqual([row])
+  expect(row).toHaveAttribute('data-flash')
+  expect(row).toHaveFocus()
+  // 同一次跳轉不會因為畫面更新又捲一次；再點一次（新的指定）才會
+  rerender(
+    <ClarifyScreen
+      task={{ ...task, updatedAt: 'x' }}
+      nav={null}
+      readOnly={false}
+      onOpenStage={() => {}}
+      focusQuestion={{ id: 'q2' }}
+    />
+  )
+  const card = document.querySelector<HTMLElement>('[data-question="q2"]')!
+  expect(card.tagName).toBe('SECTION')
+  expect(scrolled).toEqual([row, card])
 })
 
 test('唯讀時沒有輸入框', () => {
