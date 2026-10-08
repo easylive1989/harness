@@ -86,9 +86,11 @@ export function TaskMenu({
         showToast('已清除 worktree')
         return
       }
-      // 丟棄的任務會從側欄消失：回到新任務
+      // 丟棄的任務會從側欄消失：回到新任務。丟棄要等執行停下來、刪除 worktree，
+      // 期間使用者已經換到別的畫面就不拉回來
       showToast(`已丟棄任務「${task.title}」`)
-      void openView({ kind: 'new' })
+      const view = useStore.getState().view
+      if (view.kind === 'task' && view.taskId === task.id) void openView({ kind: 'new' })
     })
 
   const onKeyDown = (e: KeyboardEvent) => {

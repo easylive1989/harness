@@ -1,6 +1,6 @@
 // tests/renderer/TaskMenu.test.tsx
 // 任務標題列的「⋯」選單：任何階段都能丟棄任務；已完成的任務只能清除 worktree
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, test, vi } from 'vitest'
 vi.mock('@renderer/api', () => ({
@@ -122,6 +122,19 @@ test('丟棄進行中停用確定鈕，連點只送一次；選單不會被關�
   expect(menu()).toBeInTheDocument()
   await release()
   await waitFor(() => expect(useStore.getState().view).toEqual({ kind: 'new' }))
+})
+
+test('丟棄完成前已經換到別的畫面：不會被拉回新任務頁', async () => {
+  show()
+  await userEvent.click(menuButton())
+  await userEvent.click(within(menu()).getByRole('button', { name: '丟棄任務' }))
+  const release = holdNextCall(vi.mocked(call))
+  await userEvent.click(within(menu()).getByRole('button', { name: '確定丟棄' }))
+  // 丟棄要等執行停下來、刪除 worktree，期間使用者點了側欄的另一個任務
+  act(() => useStore.setState({ view: { kind: 'task', taskId: 't2' } }))
+  await release()
+  expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 't2' })
+  expect(useStore.getState().toast?.text).toBe('已丟棄任務「登入失敗鎖定」')
 })
 
 test('已完成：只有清除 worktree；清除後提示，不再顯示選單，留在任務上', async () => {
