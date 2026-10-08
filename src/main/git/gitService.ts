@@ -6,6 +6,9 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import type { DiffStats } from '@shared/types'
 
+/** 合併被未提交的變更擋下時，訊息裡最多列出幾個檔案 */
+const MAX_DIRTY_LISTED = 10
+
 export class CommandError extends Error {
   constructor(
     readonly command: string,
@@ -352,12 +355,20 @@ export class GitService {
   async merge(repo: string, branch: string, base: string) {
     await assertRefName(repo, branch)
     await assertRefName(repo, base)
-    if ((await this.git(repo, 'status', '--porcelain')).trim()) {
-      throw new CommandError('git status', '原 repo 有未提交的變更，請先處理後再合併')
+    // 合併前的檢查不是指令失敗：訊息不加「git … 失敗」前綴，直接說要處理什麼
+    const dirty = (await this.git(repo, 'status', '--porcelain')).split('\n').filter(Boolean)
+    if (dirty.length) {
+      const more = dirty.length - MAX_DIRTY_LISTED
+      throw new Error(
+        [
+          '原 repo 有未提交的變更，請先 commit 或還原後再合併：',
+          ...dirty.slice(0, MAX_DIRTY_LISTED),
+          ...(more > 0 ? [`…還有 ${more} 個檔案`] : [])
+        ].join('\n')
+      )
     }
     const current = await this.currentBranch(repo)
-    if (current !== base)
-      throw new CommandError('git rev-parse', `原 repo 目前在 ${current}，請切回 ${base} 再合併`)
+    if (current !== base) throw new Error(`原 repo 目前在 ${current}，請切回 ${base} 再合併`)
     try {
       // 刻意不加 --no-verify：合併是使用者看過報告與 diff 後按的，repo 的 git hooks 照常執行
       await gitRun(

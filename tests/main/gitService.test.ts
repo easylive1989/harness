@@ -233,12 +233,30 @@ describe('GitService', () => {
     expect(await git.branches(repo)).toEqual(['main'])
   })
 
+  test('未提交的檔案太多時只列出前 10 個', async () => {
+    await git.createWorktree(repo, wt, 'harness/t1', 'main')
+    for (let i = 0; i < 12; i++)
+      await writeFile(join(repo, `f${String(i).padStart(2, '0')}.txt`), 'x')
+    const err = await git.merge(repo, 'harness/t1', 'main').catch((e: Error) => e)
+    const lines = (err as Error).message.split('\n')
+    expect(lines.slice(1, 11)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `?? f${String(i).padStart(2, '0')}.txt`)
+    )
+    expect(lines.at(-1)).toBe('…還有 2 個檔案')
+  })
+
   test('merge 前檢查原 repo 狀態', async () => {
     await git.createWorktree(repo, wt, 'harness/t1', 'main')
     await writeFile(join(wt, 'c.txt'), 'c\n')
     await git.commitAll(wt, 'add c')
     await writeFile(join(repo, 'dirty.txt'), 'x')
-    await expect(git.merge(repo, 'harness/t1', 'main')).rejects.toThrow('未提交的變更')
+    await writeFile(join(repo, 'a.txt'), 'changed\n')
+    const err = await git.merge(repo, 'harness/t1', 'main').catch((e: Error) => e)
+    // 不帶「git status 失敗」前綴，並列出是哪些檔案
+    expect((err as Error).message).toBe(
+      '原 repo 有未提交的變更，請先 commit 或還原後再合併：\n M a.txt\n?? dirty.txt'
+    )
+    sh(repo, 'checkout', '--', 'a.txt')
     sh(repo, 'clean', '-fq')
     await git.merge(repo, 'harness/t1', 'main')
     expect(sh(repo, 'log', '--oneline')).toContain('Merge harness/t1')
