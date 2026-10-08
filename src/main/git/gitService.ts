@@ -210,6 +210,62 @@ export class GitService {
     })
   }
 
+  /** 沒有未提交的變更（含未追蹤檔案；.gitignore 忽略的不算） */
+  async isClean(repo: string): Promise<boolean> {
+    return !(await this.git(repo, 'status', '--porcelain')).trim()
+  }
+
+  /** branch 模式：在原 repo 資料夾從 base 建立並切換到新分支 */
+  async createBranch(repo: string, branch: string, base: string) {
+    await assertRefName(repo, branch)
+    await assertRefName(repo, base)
+    await gitRun(repo, ['checkout', '-b', branch, '--end-of-options', base], {
+      timeoutMs: this.timeouts.commit
+    })
+  }
+
+  async checkout(repo: string, branch: string) {
+    await assertRefName(repo, branch)
+    await gitRun(repo, ['checkout', '--end-of-options', branch], {
+      timeoutMs: this.timeouts.commit
+    })
+  }
+
+  /**
+   * branch 模式丟棄任務：放棄未提交的變更（含未追蹤檔案，.gitignore 忽略的保留）、切回 base、刪除任務分支。
+   * 建立任務時原 repo 一定是乾淨的，所以未提交的變更都是任務期間產生的。
+   * 原 repo 已經不在任務分支上（使用者自己切走了）時不動工作目錄，只刪分支。
+   */
+  async discardBranch(repo: string, branch: string, base: string) {
+    await assertRefName(repo, branch)
+    await assertRefName(repo, base)
+    if ((await this.currentBranch(repo)) === branch) {
+      await this.git(repo, 'reset', '--hard', '-q')
+      await this.git(repo, 'clean', '-fdq')
+      await this.checkout(repo, base)
+    }
+    await this.deleteBranch(repo, branch)
+  }
+
+  /** 刪除本機分支；分支本來就不存在時不算失敗 */
+  async deleteBranch(repo: string, branch: string) {
+    await assertRefName(repo, branch)
+    try {
+      await this.git(repo, 'branch', '-D', '--end-of-options', branch)
+    } catch (e) {
+      const exists = await this.git(
+        repo,
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        `refs/heads/${branch}`
+      )
+        .then(() => true)
+        .catch(() => false)
+      if (exists) throw e
+    }
+  }
+
   /**
    * commit worktree 裡的所有變更（提交報告時由 app 自動執行）。不執行任何 git hook：
    * hook（.husky/、.githooks/、lefthook、pre-commit、core.hooksPath 指向的資料夾）是 worktree 裡
@@ -331,20 +387,7 @@ export class GitService {
       await this.git(repo, 'worktree', 'prune').catch(() => undefined)
       if (existsSync(wt)) throw e
     }
-    try {
-      await this.git(repo, 'branch', '-D', '--end-of-options', branch)
-    } catch (e) {
-      const exists = await this.git(
-        repo,
-        'rev-parse',
-        '--verify',
-        '--quiet',
-        `refs/heads/${branch}`
-      )
-        .then(() => true)
-        .catch(() => false)
-      if (exists) throw e
-    }
+    await this.deleteBranch(repo, branch)
   }
 
   async pushAndOpenPr(
@@ -386,6 +429,11 @@ export type GitLike = Pick<
   | 'currentBranch'
   | 'branchInfo'
   | 'createWorktree'
+  | 'isClean'
+  | 'createBranch'
+  | 'checkout'
+  | 'discardBranch'
+  | 'deleteBranch'
   | 'commitAll'
   | 'hooksPath'
   | 'diff'

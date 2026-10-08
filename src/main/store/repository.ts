@@ -6,6 +6,7 @@ import type { Store } from './store'
 
 export const defaultSettings = (home: string): Settings => ({
   defaultModel: 'claude-opus-5-5',
+  defaultWorkspace: 'worktree',
   worktreeRoot: join(home, '.harness', 'worktrees'),
   branchPrefix: 'harness/',
   // git diff / git log 帶任意參數可用 --output 寫到 worktree 外，所以只允許不帶參數的版本

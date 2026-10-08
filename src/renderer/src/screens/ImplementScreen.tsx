@@ -1,7 +1,13 @@
 // src/renderer/src/screens/ImplementScreen.tsx
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { msgDisplay } from '@shared/protocol'
-import type { DiffStats, PlanStep, Task, TimelineEvent } from '@shared/types'
+import {
+  type DiffStats,
+  isBranchMode,
+  type PlanStep,
+  type Task,
+  type TimelineEvent
+} from '@shared/types'
 import { call } from '../api'
 import { MessageImages } from '../components/Attachments'
 import { Composer, StopButton } from '../components/Composer'
@@ -458,7 +464,9 @@ export function ImplementScreen({
         </div>
         <div className="h-px flex-none bg-line-soft" />
         <div className="flex flex-col gap-1.5 text-[13px]">
-          <span className="font-bold">Worktree</span>
+          <span className="font-bold">
+            {isBranchMode(task) ? `原 repo（分支 ${task.branch}）` : 'Worktree'}
+          </span>
           <span className="font-mono text-[11px] break-all text-ink-2">{task.worktreePath}</span>
           <Button
             size="sm"

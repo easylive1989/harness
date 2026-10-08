@@ -10,7 +10,7 @@ import {
   useRef,
   useState
 } from 'react'
-import { type ClaudeStatus, MODELS, type Settings } from '@shared/types'
+import { type ClaudeStatus, MODELS, type Settings, WORKSPACES } from '@shared/types'
 import { useShallow } from 'zustand/react/shallow'
 import { call, errorText } from '../api'
 import { Button, cx, Icons, inputClass, Pill } from '../components/ui'
@@ -525,8 +525,48 @@ function PermissionSection({ settings, save }: { settings: Settings; save: Save 
 
 function WorkspaceSection({ settings, save }: { settings: Settings; save: Save }) {
   const loadProject = useInstantSetting('loadProjectSettings', settings.loadProjectSettings, save)
+  const workspace = useInstantSetting('defaultWorkspace', settings.defaultWorkspace, save)
   return (
     <Section id="workspace" title="Worktree 與專案設定">
+      <div className="flex flex-col gap-2.5">
+        <span id="default-workspace-label" className="text-[13px] font-medium">
+          預設工作方式
+        </span>
+        <div
+          role="radiogroup"
+          aria-labelledby="default-workspace-label"
+          aria-busy={workspace.saving || undefined}
+          className="grid grid-cols-2 gap-2.5"
+        >
+          {WORKSPACES.map((w) => {
+            const on = workspace.value === w.id
+            return (
+              <label
+                key={w.id}
+                className={cx(
+                  'flex cursor-pointer gap-2.5 rounded-[14px] p-3.5',
+                  on ? 'bg-brand-tint shadow-[0_0_0_2px_var(--color-brand)]' : 'bg-fill-2'
+                )}
+              >
+                <input
+                  type="radio"
+                  name="defaultWorkspace"
+                  checked={on}
+                  onChange={() => workspace.set(w.id)}
+                  className="mt-[5px] accent-brand"
+                />
+                <span className="flex flex-col">
+                  <span className="font-medium">{w.label}</span>
+                  <span className={cx('text-xs', on ? 'text-brand-muted' : 'text-muted')}>
+                    {w.hint}
+                  </span>
+                </span>
+              </label>
+            )
+          })}
+        </div>
+        <span className="text-xs text-muted">新任務畫面預設選這個，建立任務時仍可改選。</span>
+      </div>
       <TextSetting
         label="Worktree 存放位置"
         saved={settings.worktreeRoot}

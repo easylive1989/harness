@@ -4,7 +4,7 @@
 // 這是每個畫面唯一的丟棄入口（報告頁的收尾面板只留開 PR 與合併）。
 import { type KeyboardEvent, useEffect, useId, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
-import type { Task } from '@shared/types'
+import { isBranchMode, type Task } from '@shared/types'
 import { call, errorText } from '../api'
 import { isComposing } from '../lib/ime'
 import { usePending } from '../lib/usePending'
@@ -86,7 +86,10 @@ export function TaskMenu({
     task.runState === 'running' ||
     task.runState === 'waiting_permission' ||
     task.branches.some((b) => b.running)
-  const label = done ? '清除 worktree' : '丟棄任務'
+  // branch 模式沒有 worktree：已完成的任務只剩本機分支可以刪
+  const branchMode = isBranchMode(task)
+  const cleanup = branchMode ? '刪除本機分支' : '清除 worktree'
+  const label = done ? cleanup : '丟棄任務'
 
   const discard = () =>
     run(async () => {
@@ -94,7 +97,7 @@ export function TaskMenu({
       try {
         await call('finish:discard', task.id)
       } catch (e) {
-        setFailure(`${done ? '清除 worktree 失敗' : '丟棄失敗'}：${errorText(e)}`)
+        setFailure(`${done ? `${cleanup}失敗` : '丟棄失敗'}：${errorText(e)}`)
         return
       }
       setOpen(false)
@@ -106,7 +109,7 @@ export function TaskMenu({
         )
         flushSync(() => onCleared?.())
         stage?.focus()
-        showToast('已清除 worktree')
+        showToast(branchMode ? '已刪除本機分支' : '已清除 worktree')
         return
       }
       // 丟棄的任務會從側欄消失：回到新任務。丟棄要等執行停下來、刪除 worktree，
@@ -151,8 +154,10 @@ export function TaskMenu({
             <div className="flex flex-col gap-2.5 rounded-lg bg-danger-soft p-3">
               <span className="text-danger">
                 {done
-                  ? `確定要刪除 worktree 與本機分支 ${task.branch}？已開的 PR 或已合併的內容不受影響。`
-                  : `確定要丟棄這個任務？worktree 與分支 ${task.branch} 都會刪除，無法復原。`}
+                  ? `確定要刪除${branchMode ? '' : ' worktree 與'}本機分支 ${task.branch}？已開的 PR 或已合併的內容不受影響。`
+                  : branchMode
+                    ? `確定要丟棄這個任務？原 repo 未提交的變更會清除、切回 ${task.baseBranch}，分支 ${task.branch} 會刪除，無法復原。`
+                    : `確定要丟棄這個任務？worktree 與分支 ${task.branch} 都會刪除，無法復原。`}
                 {!done && running && ' Claude 正在執行，會先停止。'}
               </span>
               <div className="flex gap-2">

@@ -15,6 +15,7 @@ import {
   assertModel,
   assertString,
   assertVersion,
+  assertWorkspace,
   ensureClaudeReady,
   isPathInside,
   validateSettingsPatch
@@ -95,7 +96,8 @@ export function registerIpc(d: IpcDeps) {
         request: text(raw.request, '需求'),
         images: assertImages(raw.images),
         baseBranch: assertString(raw.baseBranch, 'base branch', { max: 255 }),
-        model: assertModel(raw.model)
+        model: assertModel(raw.model),
+        workspace: raw.workspace === undefined ? 'worktree' : assertWorkspace(raw.workspace)
       }
       await ensureClaudeReady(d.claudeStatus)
       return d.tasks.createTask(input)

@@ -131,6 +131,9 @@ export interface Task {
   requestImages?: ImageRef[]
   baseBranch: string
   branch: string
+  /** 工作方式；沒有這個欄位的舊任務是 worktree */
+  workspace?: WorkspaceMode
+  /** Claude 工作的資料夾：worktree 模式是獨立的 worktree，branch 模式是原 repo 資料夾 */
   worktreePath: string
   model: ModelId
   status: TaskStatus
@@ -188,8 +191,25 @@ export interface TimelineEvent {
   images?: ImageRef[]
 }
 
+/**
+ * 任務的工作方式：worktree 建立獨立的 git worktree；branch 直接在原 repo 資料夾 checkout 新分支
+ * （原 repo 必須沒有未提交變更，同一個 repo 一次只能有一個進行中的 branch 任務）
+ */
+export type WorkspaceMode = 'worktree' | 'branch'
+export const WORKSPACES: { id: WorkspaceMode; label: string; hint: string }[] = [
+  { id: 'worktree', label: 'Worktree', hint: '建立獨立資料夾，不影響原 repo，可同時進行多個任務' },
+  {
+    id: 'branch',
+    label: 'Branch',
+    hint: '直接在原 repo 資料夾開新分支；原 repo 必須沒有未提交的變更，一次一個任務'
+  }
+]
+export const isBranchMode = (t: Pick<Task, 'workspace'>) => t.workspace === 'branch'
+
 export interface Settings {
   defaultModel: ModelId
+  /** 新任務畫面預設的工作方式 */
+  defaultWorkspace: WorkspaceMode
   worktreeRoot: string
   branchPrefix: string
   alwaysAllowedCommands: string[]

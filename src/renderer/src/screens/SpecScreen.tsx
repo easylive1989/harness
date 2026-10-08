@@ -1,6 +1,6 @@
 // src/renderer/src/screens/SpecScreen.tsx
 import { type FormEvent, type ReactNode, useId, useRef, useState } from 'react'
-import type { DecisionSource, Spec, Task } from '@shared/types'
+import { type DecisionSource, isBranchMode, type Spec, type Task } from '@shared/types'
 import { call } from '../api'
 import { InlineCode } from '../components/Markdown'
 import { PendingPermission } from '../components/PermissionDialog'
@@ -417,7 +417,7 @@ export function SpecScreen({
                   </span>
                 ) : (
                   <>
-                    核准後 Claude 會在 worktree{' '}
+                    核准後 Claude 會在{isBranchMode(task) ? '原 repo' : ' worktree'}{' '}
                     <code className="break-all">{task.worktreePath}</code>
                     （分支 <code>{task.branch}</code>）中修改程式碼。
                   </>

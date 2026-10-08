@@ -1,7 +1,7 @@
 // src/renderer/src/screens/NewTaskScreen.tsx
 // 對照 docs/design/B1-NewTask.dc.html
 import { useEffect, useState } from 'react'
-import { MODELS, type ModelId } from '@shared/types'
+import { MODELS, type ModelId, WORKSPACES, type WorkspaceMode } from '@shared/types'
 import { call } from '../api'
 import { AttachButton, AttachmentPreview } from '../components/Attachments'
 import { ClaudeBanner } from '../components/ClaudeBanner'
@@ -27,6 +27,10 @@ export function NewTaskScreen() {
   }>()
   const [baseChoice, setBaseChoice] = useState<{ repoId: string; value: string }>()
   const [model, setModel] = useState<ModelId>(defaultModel ?? 'claude-opus-5-5')
+  const defaultWorkspace = useStore((s) => s.settings?.defaultWorkspace)
+  const [workspaceChoice, setWorkspace] = useState<WorkspaceMode>()
+  // 還沒自己選時跟著設定的預設值（設定可能在畫面開著之後才載入）
+  const workspace = workspaceChoice ?? defaultWorkspace ?? 'worktree'
   const [busy, setBusy] = useState(false)
   const attach = useImageAttachments()
 
@@ -63,7 +67,8 @@ export function NewTaskScreen() {
         request,
         images: attach.images,
         baseBranch: base,
-        model
+        model,
+        workspace
       })
     )
     setBusy(false)
@@ -194,11 +199,44 @@ export function NewTaskScreen() {
           </label>
         </div>
 
+        <fieldset className="flex flex-col gap-2.5">
+          <legend className="mb-2.5 text-[13px] font-medium">工作方式</legend>
+          <div className="grid grid-cols-2 gap-2.5">
+            {WORKSPACES.map((w) => {
+              const on = workspace === w.id
+              return (
+                <label
+                  key={w.id}
+                  className={cx(
+                    'flex cursor-pointer gap-2.5 rounded-[14px] p-3.5',
+                    on ? 'bg-brand-tint shadow-[0_0_0_2px_var(--color-brand)]' : 'bg-fill-2'
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="workspace"
+                    checked={on}
+                    onChange={() => setWorkspace(w.id)}
+                    className="mt-[5px] accent-brand"
+                  />
+                  <span className="flex flex-col">
+                    <span className="font-medium">{w.label}</span>
+                    <span className={cx('text-xs', on ? 'text-brand-muted' : 'text-muted')}>
+                      {w.hint}
+                    </span>
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+        </fieldset>
+
         <div className="flex items-center gap-3 rounded-xl bg-fill-2 px-3.5 py-3 text-[13px] text-ink-2">
           <Icons.Info className="flex-none text-brand" />
           <span>
-            Harness 會建立獨立的 git worktree。釐清階段 Claude 只會讀檔案；規格經你核准後，才會在
-            worktree 裡改程式碼。
+            {workspace === 'branch'
+              ? `Harness 會在原 repo 資料夾切換到新分支。釐清階段 Claude 只會讀檔案；規格經你核准後，才會在原 repo 裡改程式碼。合併、丟棄或開 PR 後會切回 ${base || '基準分支'}。`
+              : 'Harness 會建立獨立的 git worktree。釐清階段 Claude 只會讀檔案；規格經你核准後，才會在 worktree 裡改程式碼。'}
           </span>
         </div>
 
