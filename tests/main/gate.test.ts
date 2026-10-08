@@ -291,6 +291,28 @@ describe('PermissionGate', () => {
     expect(hooksDirInside(root, undefined)).toBeUndefined()
   })
 
+  test('WebFetch／WebSearch 在釐清、規格、分岔與實作階段都要使用者核准（刻意的：查文件不改檔案）', async () => {
+    for (const phase of ['clarify', 'branch', 'implement'] as const) {
+      const { ctx, call, callHook } = setup(phase)
+      for (const [tool, input] of [
+        ['WebFetch', { url: 'https://docs.example/api', prompt: '找參數' }],
+        ['WebSearch', { query: 'node test runner mock timers' }]
+      ] as const) {
+        expect(evaluateTool(tool, input, ctx).decision, `${phase} ${tool}`).toBe('ask')
+        expect(await callHook(tool, input), `${phase} ${tool}`).toBe('ask')
+        expect(await call(tool, input)).toMatchObject({ behavior: 'allow' })
+      }
+      expect(ctx.requestApproval).toHaveBeenCalledTimes(2)
+      // 核准後不記住樣式（只有指令可以記住）
+      expect(ctx.onApproved).toHaveBeenCalledWith(undefined, undefined)
+    }
+    const closed = setup('closed')
+    expect(evaluateTool('WebFetch', { url: 'https://x.dev' }, closed.ctx).decision).toBe('deny')
+    // 使用者拒絕
+    const denied = setup('clarify', { allow: false } as never)
+    expect(await denied.call('WebSearch', { query: 'x' })).toMatchObject({ behavior: 'deny' })
+  })
+
   test('符合允許樣式的指令直接允許', async () => {
     const { call, ctx } = setup('implement', { allow: true }, ['npm test *'])
     expect((await call('Bash', { command: 'npm test -- auth' })).behavior).toBe('allow')

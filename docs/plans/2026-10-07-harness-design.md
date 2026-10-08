@@ -99,7 +99,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 ### 3.4 權限（PermissionGate）
 
 - 任何階段：`ToolSearch`（只載入工具 schema）、`TodoWrite`、子代理一律允許。
-- 釐清／規格／分岔階段：允許 `Read`、`Glob`、`Grep`、harness 工具；其他一律 deny（附說明）。
+- 釐清／規格／分岔階段：允許 `Read`、`Glob`、`Grep`、harness 工具；`WebFetch`／`WebSearch` 和實作階段一樣需核准（刻意的：釐清時查文件、找資料常常需要，而且不會改動任何檔案；分岔提出的請求在核准對話框標出分岔名稱）；其他一律 deny（附說明）。
 - 實作階段：
   - `Read`/`Glob`/`Grep`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit`：路徑在 worktree 內自動允許，否則 deny。
   - `Bash`：符合全域永遠允許清單或本任務允許清單 → allow；否則推送核准請求到 UI，等待使用者「允許／拒絕並說明」，可勾選加入本任務允許清單（以指令前綴樣式比對，如 `npm test *`）。
