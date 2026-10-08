@@ -44,6 +44,20 @@ test('匯出的 HTML 自含、轉義所有報告文字、沒有互動控制', as
   expect(doc.body.textContent).toContain('獨立計數邏輯')
   expect(doc.body.textContent).toContain('登入前先檢查鎖定')
 
+  // 新增的測試排在概觀之後，情境與驗證結果都在；「查看測試結果」是頁內連結
+  const sections = [...doc.querySelectorAll('section[aria-label]')].map((s) =>
+    s.getAttribute('aria-label')
+  )
+  expect(sections.slice(0, 2)).toEqual(['概觀', '新增的測試'])
+  const tests = doc.querySelector('section[aria-label="新增的測試"]')!
+  expect(tests.textContent).toContain('連續失敗 5 次後鎖定帳號')
+  expect(tests.textContent).toContain('src/auth/lockout.test.ts:3')
+  expect(tests.textContent).toContain('同一帳號連續輸錯密碼 5 次 → 第 6 次登入 → 回 423')
+  expect(tests.textContent).toContain('登入前多了鎖定檢查')
+  expect(tests.textContent).toContain('驗證：1 / 2 通過')
+  expect(tests.querySelector('a')?.getAttribute('href')).toBe('#report-tests')
+  expect(doc.getElementById('report-tests')).not.toBeNull()
+
   const frames = doc.querySelectorAll('iframe')
   expect(frames).toHaveLength(1)
   const frame = frames[0]

@@ -1,10 +1,17 @@
 // src/renderer/src/report/anchors.ts
-// 回饋錨點（主程序原樣轉給 Claude）：section:<id>、decision:<id>、block:<id>、
+// 回饋錨點（主程序原樣轉給 Claude）：section:<id>、test:<id>、decision:<id>、block:<id>、
 // file:<路徑>（整個檔案）、diff:<路徑>:<新檔行號>
 import type { FeedbackItem } from '@shared/types'
 
 export const diffAnchor = (path: string, line: number) => `diff:${path}:${line}`
 export const fileAnchor = (path: string) => `file:${path}`
+export const testAnchor = (id: string) => `test:${id}`
+
+/** 畫面上標著這個錨點的元素（以 dataset 比對：錨點裡的路徑可能有引號等字元，不放進選擇器） */
+export const findAnchor = (anchor: string) =>
+  [...document.querySelectorAll<HTMLElement>('[data-anchor]')].find(
+    (e) => e.dataset.anchor === anchor
+  )
 
 /** 指向 diff 的錨點對應的檔案與行號（路徑本身可能含冒號，所以行號取最後一個冒號之後） */
 export function anchorTarget(anchor: string): { path: string; line?: number } | undefined {
@@ -19,6 +26,7 @@ export function anchorTarget(anchor: string): { path: string; line?: number } | 
 const KIND: Record<string, string> = {
   diff: '程式碼',
   file: '檔案',
+  test: '測試',
   decision: '決策',
   block: '視覺化',
   section: '區塊'

@@ -4,6 +4,26 @@ import type { Report } from '@shared/types'
 
 export const sampleReport: ReportInput = {
   overview: { headline: '登入流程多了一道鎖定關卡', summary: '在 IP 限流之後加入 lockoutGuard。' },
+  tests: [
+    {
+      id: 't1',
+      file: 'src/auth/lockout.test.ts',
+      name: '連續失敗 5 次後鎖定帳號',
+      kind: 'unit',
+      change: 'added',
+      scenario: '同一帳號連續輸錯密碼 5 次 → 第 6 次登入 → 回 423，而且不再檢查密碼',
+      line: 3
+    },
+    {
+      id: 't2',
+      file: 'src/auth/login.test.ts',
+      name: '錯誤密碼回 401',
+      kind: 'integration',
+      change: 'modified',
+      scenario: '帳號沒有被鎖定時輸錯密碼 → 登入 → 仍然回 401',
+      why: '登入前多了鎖定檢查，測試要先準備一個沒有被鎖定的帳號'
+    }
+  ],
   architecture: {
     before: {
       nodes: [
@@ -47,7 +67,10 @@ export const sampleReport: ReportInput = {
   custom_blocks: [{ id: 'state-machine', title: '鎖定狀態機', html: '<div>正常 → 鎖定</div>' }]
 }
 
-/** 兩個檔案的 diff：新增 lockout.ts（4 行）、login.ts 改一行加一行 */
+/**
+ * 四個檔案的 diff：新增 lockout.ts（4 行）、login.ts 改一行加一行，
+ * 新增測試檔 lockout.test.ts（5 行）、既有測試檔 login.test.ts 加一行
+ */
 export const sampleDiff = `diff --git a/src/auth/lockout.ts b/src/auth/lockout.ts
 new file mode 100644
 index 0000000..1111111
@@ -68,6 +91,26 @@ index 2222222..3333333 100644
 +  await lockoutGuard(user)
 +  check(user)
    return user
+diff --git a/src/auth/lockout.test.ts b/src/auth/lockout.test.ts
+new file mode 100644
+index 0000000..4444444
+--- /dev/null
++++ b/src/auth/lockout.test.ts
+@@ -0,0 +1,5 @@
++import { test } from 'vitest'
++
++test('連續失敗 5 次後鎖定帳號', async () => {
++  // 失敗 5 次後，第 6 次回 423
++})
+diff --git a/src/auth/login.test.ts b/src/auth/login.test.ts
+index 5555555..6666666 100644
+--- a/src/auth/login.test.ts
++++ b/src/auth/login.test.ts
+@@ -1,3 +1,4 @@
+ test('錯誤密碼回 401', async () => {
++  await unlock('alice')
+   expect((await login('alice', 'x')).status).toBe(401)
+ })
 `
 
 /** 畫面測試用的完整報告：file_notes 對應 sampleDiff 的行號 */
@@ -88,12 +131,14 @@ export function makeReport(over: Partial<Report> = {}): Report {
     },
     diff: sampleDiff,
     stats: {
-      files: 2,
-      additions: 6,
+      files: 4,
+      additions: 12,
       deletions: 1,
       perFile: [
         { path: 'src/auth/lockout.ts', additions: 4, deletions: 0 },
-        { path: 'src/auth/login.ts', additions: 2, deletions: 1 }
+        { path: 'src/auth/login.ts', additions: 2, deletions: 1 },
+        { path: 'src/auth/lockout.test.ts', additions: 5, deletions: 0 },
+        { path: 'src/auth/login.test.ts', additions: 1, deletions: 0 }
       ]
     },
     verification: [

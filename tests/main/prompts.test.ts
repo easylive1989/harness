@@ -19,6 +19,11 @@ test('提示涵蓋所有工具與訊息格式', () => {
     'conclude_branch',
     'diff:檔案路徑:行號',
     'file:檔案路徑',
+    'test:測試 id',
+    'section:tests',
+    'tests：最優先',
+    '在什麼情況下 → 做什麼 → 預期什麼',
+    'tests_note',
     '高度由內容決定，不要使用 vh 或 100% 高度',
     '繁體中文'
   ]) {

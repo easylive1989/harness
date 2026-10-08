@@ -13,6 +13,49 @@ describe('ReportInputSchema', () => {
     const r = ReportInputSchema.parse({ overview, architecture, decisions })
     expect(r.limitations).toEqual([])
     expect(r.custom_blocks).toEqual([])
+    // 舊格式（沒有 tests）也能解析
+    expect(r.tests).toEqual([])
+    expect(r.tests_note).toBeUndefined()
+  })
+
+  test('測試的類型預設單元、狀態預設新增；行號與修改原因選填', () => {
+    const r = ReportInputSchema.parse({
+      ...sampleReport,
+      tests: [
+        { id: 't1', file: 'a.test.ts', name: '空白輸入', scenario: '輸入空白 → 送出 → 顯示錯誤' }
+      ],
+      tests_note: '只改文件'
+    })
+    expect(r.tests).toEqual([
+      {
+        id: 't1',
+        file: 'a.test.ts',
+        name: '空白輸入',
+        kind: 'unit',
+        change: 'added',
+        scenario: '輸入空白 → 送出 → 顯示錯誤'
+      }
+    ])
+    expect(r.tests_note).toBe('只改文件')
+  })
+
+  test('測試一定要有情境說明，行號要是正整數', () => {
+    const empty = structuredClone(sampleReport)
+    empty.tests[0].scenario = ''
+    expect(ReportInputSchema.safeParse(empty).success).toBe(false)
+    const badLine = structuredClone(sampleReport)
+    badLine.tests[0].line = 0
+    expect(ReportInputSchema.safeParse(badLine).success).toBe(false)
+    const badKind = { ...sampleReport, tests: [{ ...sampleReport.tests[0], kind: 'smoke' }] }
+    expect(ReportInputSchema.safeParse(badKind).success).toBe(false)
+  })
+
+  test('測試 id 重複時失敗', () => {
+    const bad = structuredClone(sampleReport)
+    bad.tests.push({ ...bad.tests[0], name: '另一個' })
+    const r = ReportInputSchema.safeParse(bad)
+    expect(r.success).toBe(false)
+    expect(r.error?.issues.some((i) => i.path.join('.') === 'tests.2.id')).toBe(true)
   })
 
   test('edge 參照不存在的節點時失敗', () => {

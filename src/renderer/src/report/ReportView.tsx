@@ -1,6 +1,7 @@
 // src/renderer/src/report/ReportView.tsx
 // 對照 docs/design/B5-Report.dc.html 的 <main>；isStatic 給匯出 HTML 用，不含任何互動控制
 import { type ReactNode, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { layoutGraph } from '@shared/layout'
 import { wrapBlockHtml } from '@shared/blockHtml'
 import type { ReportInput } from '@shared/report'
@@ -9,11 +10,14 @@ import { InlineCode } from '../components/Markdown'
 import { cx, Icons, Pill } from '../components/ui'
 import { shortTime } from '../lib/format'
 import { useStore } from '../store'
+import { diffAnchor, fileAnchor, findAnchor } from './anchors'
 import { ArchitectureDiagram } from './ArchitectureDiagram'
 import { BLOCK_DEFAULT_H } from './blocks'
 import { CommentButton, CommentForm, FeedbackNote } from './comments'
 import { CustomBlockFrame } from './CustomBlockFrame'
 import { DiffView } from './DiffView'
+import { runState } from './testItems'
+import { TestsSection } from './TestsSection'
 
 type Decision = ReportInput['decisions'][number]
 type Limitation = ReportInput['limitations'][number]
@@ -152,7 +156,7 @@ const SEVERITY_LABEL: Record<Limitation['severity'], string> = {
 const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} 秒`
 
 function VerificationRow({ v }: { v: VerificationResult }) {
-  const state = v.skipped ? 'skipped' : v.exitCode === 0 ? 'passed' : 'failed'
+  const state = runState(v)
   const status = v.skipped
     ? v.skipped
     : v.exitCode === 0
@@ -224,7 +228,7 @@ export function ReportView({
   /** diff 選取的檔案與要捲到的行（由 ReportScreen 控制） */
   diffFile?: string
   diffLine?: number
-  onDiffFile?: (path: string) => void
+  onDiffFile?: (path: string, line?: number) => void
   onOpenQuestion?: () => void
 }) {
   const r = report.input
@@ -243,6 +247,8 @@ export function ReportView({
   const passed = ran.filter((v) => v.exitCode === 0).length
   const skipped = report.verification.length - ran.length
   const allPassed = ran.length > 0 && passed === ran.length
+  const addedTests = r.tests.filter((t) => t.change === 'added').length
+  const modifiedTests = r.tests.length - addedTests
 
   const button = (anchor: string, label: string, aria = `對「${label}」留言`) =>
     commentable && <CommentButton label={aria} onClick={() => setCommentOn(anchor)} />
@@ -260,6 +266,15 @@ export function ReportView({
     onDiffFile?.(path)
     document.getElementById('report-diff')?.scrollIntoView?.({ behavior: 'smooth' })
   }
+  /** 從「新增的測試」跳到 diff：先畫出選到的檔案（與行），再捲到那一行；找不到那一行就捲到檔頭 */
+  const jumpToTest = (path: string, line?: number) => {
+    flushSync(() => onDiffFile?.(path, line))
+    const atLine = line === undefined ? undefined : findAnchor(diffAnchor(path, line))
+    const target = atLine ?? findAnchor(fileAnchor(path))
+    target?.scrollIntoView?.({ behavior: 'smooth', block: atLine ? 'center' : 'start' })
+  }
+  const showResults = () =>
+    document.getElementById('report-tests')?.scrollIntoView?.({ behavior: 'smooth' })
 
   return (
     <div className="flex flex-col gap-3">
@@ -280,11 +295,24 @@ export function ReportView({
             <InlineCode text={r.overview.summary} />
           </span>
         </div>
-        <div className="grid grid-cols-4 gap-2.5">
+        <div className="grid grid-cols-5 gap-2.5">
           <Stat label="變更檔案">{report.stats.files}</Stat>
           <Stat label="行數">
             <span className="text-ok">+{report.stats.additions}</span>{' '}
             <span className="text-lg text-danger">−{report.stats.deletions}</span>
+          </Stat>
+          {/* 沒有新增測試時用提醒的顏色 */}
+          <Stat
+            label="新增測試"
+            className={addedTests ? undefined : 'bg-decision'}
+            labelClass={addedTests ? undefined : 'text-decision-ink'}
+          >
+            {addedTests}
+            {modifiedTests > 0 && (
+              <span className="ml-1.5 inline-block text-xs font-normal whitespace-nowrap text-muted">
+                修改 {modifiedTests}
+              </span>
+            )}
           </Stat>
           <Stat
             label="驗證"
@@ -295,7 +323,10 @@ export function ReportView({
               {ran.length ? `${passed} / ${ran.length} 通過` : '未執行'}
             </span>
             {skipped > 0 && (
-              <span className="ml-1.5 text-xs font-normal text-muted">略過 {skipped}</span>
+              // 五格並排時可能放不下：整段換到下一行，不在字中間斷開
+              <span className="ml-1.5 inline-block text-xs font-normal whitespace-nowrap text-muted">
+                略過 {skipped}
+              </span>
             )}
           </Stat>
           <Stat label="決策" className="bg-decision" labelClass="text-decision-ink">
@@ -303,6 +334,29 @@ export function ReportView({
           </Stat>
         </div>
       </section>
+
+      <Section
+        id="new-tests"
+        anchor={anchorAttr('section:tests')}
+        title="新增的測試"
+        end={button('section:tests', '新增的測試')}
+        subtitle="情境由 Claude 說明；驗證是 Harness 實際執行指令的整體結果，不是逐個測試的結果。"
+      >
+        {slot('section:tests', '新增的測試')}
+        <TestsSection
+          tests={r.tests}
+          note={r.tests_note}
+          diff={report.diff}
+          root={task.worktreePath}
+          runs={report.verification}
+          isStatic={isStatic}
+          anchorAttr={anchorAttr}
+          button={button}
+          slot={slot}
+          onJump={jumpToTest}
+          onShowResults={showResults}
+        />
+      </Section>
 
       <Section
         id="arch"

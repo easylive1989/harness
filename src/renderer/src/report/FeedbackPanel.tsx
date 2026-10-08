@@ -93,7 +93,7 @@ export function FeedbackPanel({
           <div className="flex flex-col gap-2 text-[13px]">
             {items.length === 0 && (
               <span className="text-muted">
-                在報告的區塊、決策或程式碼行號上按「留言」，留下的意見會先列在這裡，一起送出。
+                在報告的區塊、測試、決策或程式碼行號上按「留言」，留下的意見會先列在這裡，一起送出。
               </span>
             )}
             {items.map((f) => (

@@ -23,9 +23,27 @@ export const DecisionSourceSchema = z.object({
   ref: z.string()
 })
 
-/** submit_report 工具使用的 raw shape */
+/** 本次新增或修改的一個測試：情境用白話說明（在什麼情況下 → 做什麼 → 預期什麼） */
+export const TestNoteSchema = z.object({
+  id: z.string().min(1),
+  /** 相對於 repo 根目錄的路徑 */
+  file: z.string().min(1),
+  name: z.string().min(1),
+  kind: z.enum(['unit', 'integration', 'e2e', 'other']).default('unit'),
+  change: z.enum(['added', 'modified']).default('added'),
+  scenario: z.string().min(1),
+  /** 修改既有測試的原因 */
+  why: z.string().optional(),
+  /** 測試在新版檔案的行號 */
+  line: z.number().int().positive().optional()
+})
+
+/** submit_report 工具使用的 raw shape（tests 放在前面：報告最優先呈現新增的測試） */
 export const ReportInputShape = {
   overview: z.object({ headline: z.string().min(1), summary: z.string().min(1) }),
+  tests: z.array(TestNoteSchema).default([]),
+  /** 沒有新增測試時的原因 */
+  tests_note: z.string().optional(),
   architecture: z.object({ before: GraphSchema, after: GraphSchema }),
   decisions: z.array(
     z.object({
@@ -94,6 +112,13 @@ export const ReportInputSchema = z.object(ReportInputShape).superRefine((r, ctx)
       }
     })
   }
+  const testIds = new Set<string>()
+  r.tests.forEach((t, i) => {
+    if (testIds.has(t.id)) {
+      ctx.addIssue({ code: 'custom', path: ['tests', i, 'id'], message: `測試 id 重複：${t.id}` })
+    }
+    testIds.add(t.id)
+  })
   const blockIds = new Set<string>()
   r.custom_blocks.forEach((b, i) => {
     if (blockIds.has(b.id)) {
@@ -108,3 +133,4 @@ export const ReportInputSchema = z.object(ReportInputShape).superRefine((r, ctx)
 })
 
 export type ReportInput = z.infer<typeof ReportInputSchema>
+export type TestNote = ReportInput['tests'][number]

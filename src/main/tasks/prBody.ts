@@ -1,10 +1,23 @@
 // src/main/tasks/prBody.ts
 import type { Report } from '@shared/types'
 
-/** PR 內文：報告摘要、決策、限制、後續工作與驗證結果 */
+/** PR 內文：報告摘要、新增的測試（最優先）、決策、限制、後續工作與驗證結果 */
 export function prBody(r: Report): string {
   const i = r.input
   const lines = ['## 摘要', i.overview.summary, '']
+  const added = i.tests.filter((t) => t.change === 'added')
+  const modified = i.tests.filter((t) => t.change === 'modified')
+  lines.push('## 新增的測試')
+  if (!added.length)
+    lines.push(i.tests_note ? `這次沒有新增測試：${i.tests_note}` : '這次沒有新增測試。')
+  lines.push(
+    ...added.map((t) => `- **${t.name}**（\`${t.file}\`）：${t.scenario}`),
+    ...modified.map(
+      (t) =>
+        `- 修改：**${t.name}**（\`${t.file}\`）：${t.scenario}${t.why ? `（為什麼改：${t.why}）` : ''}`
+    ),
+    ''
+  )
   if (i.decisions.length) {
     lines.push(
       '## 決策',

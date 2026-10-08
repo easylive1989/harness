@@ -111,6 +111,7 @@ export class Repository {
       null
     )
     if (!r) throw new Error(`找不到報告 v${version}`)
-    return r
+    // 舊版報告沒有 tests（之後才加的欄位）：補上預設值，畫面與 PR 內文都不必再判斷
+    return { ...r, input: { ...r.input, tests: r.input.tests ?? [] } }
   }
 }

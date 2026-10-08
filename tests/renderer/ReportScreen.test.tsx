@@ -67,8 +67,8 @@ test('讀取最新版本報告並顯示各區塊', async () => {
   await loaded()
   expect(call).toHaveBeenCalledWith('report:get', 't1', 2)
   const overview = screen.getByRole('region', { name: '概觀' })
-  expect(within(overview).getByText('變更檔案').nextSibling).toHaveTextContent('2')
-  expect(within(overview).getByText('行數').nextSibling).toHaveTextContent('+6 −1')
+  expect(within(overview).getByText('變更檔案').nextSibling).toHaveTextContent('4')
+  expect(within(overview).getByText('行數').nextSibling).toHaveTextContent('+12 −1')
   // 略過的指令不算在分母
   expect(within(overview).getByText('驗證').nextSibling).toHaveTextContent('1 / 2 通過')
   expect(within(overview).getByText('決策').nextSibling).toHaveTextContent('1')

@@ -121,7 +121,12 @@ test('切換檔案；檔案標籤附增刪行數；刪除的行顯示舊檔行�
     within(files)
       .getAllByRole('button')
       .map((b) => b.textContent)
-  ).toEqual(['src/auth/lockout.ts +4', 'src/auth/login.ts +2 −1'])
+  ).toEqual([
+    'src/auth/lockout.ts +4',
+    'src/auth/login.ts +2 −1',
+    'src/auth/lockout.test.ts +5',
+    'src/auth/login.test.ts +1'
+  ])
   expect(screen.getByText(/獨立計數邏輯/)).toBeInTheDocument()
   await userEvent.click(within(files).getByRole('button', { name: /login\.ts/ }))
   expect(within(files).getByRole('button', { name: /login\.ts/ })).toHaveAttribute(

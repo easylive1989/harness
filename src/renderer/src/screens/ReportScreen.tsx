@@ -6,7 +6,7 @@ import { call, errorText } from '../api'
 import { Button, Spinner } from '../components/ui'
 import { shortTime } from '../lib/format'
 import { usePending } from '../lib/usePending'
-import { anchorTarget } from '../report/anchors'
+import { anchorTarget, findAnchor } from '../report/anchors'
 import { buildReportHtml, exportFileName } from '../report/exportHtml'
 import { FeedbackPanel } from '../report/FeedbackPanel'
 import { ReportView } from '../report/ReportView'
@@ -88,10 +88,7 @@ export function ReportScreen({
       const target = anchorTarget(anchor)
       if (target) setDiffFocus({ version: latest, ...target })
     })
-    const el = [...document.querySelectorAll<HTMLElement>('[data-anchor]')].find(
-      (e) => e.dataset.anchor === anchor
-    )
-    el?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+    findAnchor(anchor)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
   }
 
   return (
@@ -149,7 +146,7 @@ export function ReportScreen({
             canComment={canComment}
             diffFile={diffFocus?.version === version ? diffFocus.path : undefined}
             diffLine={diffFocus?.version === version ? diffFocus.line : undefined}
-            onDiffFile={(path) => setDiffFocus({ version, path })}
+            onDiffFile={(path, line) => setDiffFocus({ version, path, line })}
             onOpenQuestion={() => onOpenStage('clarify')}
           />
         ) : failed ? (
