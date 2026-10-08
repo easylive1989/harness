@@ -311,7 +311,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Step 1: 寫入型別（無邏輯，不需測試；由後續測試覆蓋）**
 
 ```ts
-import type { ReportInput } from './report'
+import type { PlannedTest, ReportInput } from './report'
 
 export type ModelId = 'claude-opus-5-5' | 'claude-sonnet-5-5'
 export const MODELS: { id: ModelId; label: string; hint: string }[] = [
@@ -353,6 +353,10 @@ export interface Spec {
   inScope: string[]
   outOfScope: string[]
   decisions: { id: string; text: string; source: DecisionSource }[]
+  /** 預計新增或修改的測試；這個欄位加上之前的規格沒有（undefined），報告也就不對照 */
+  tests?: PlannedTest[]
+  /** 不新增測試的原因（tests 是空陣列時） */
+  testsNote?: string
   steps: string[]
   acceptance: string[]
   createdAt: string
@@ -463,6 +467,8 @@ export interface Report {
   version: number
   taskId: string
   input: ReportInput
+  /** 整理報告時規格的預計測試（報告自己帶著，舊版本與匯出的 HTML 都能對照）；舊規格沒有 */
+  plannedTests?: PlannedTest[]
   diff: string
   stats: DiffStats
   verification: VerificationResult[]
@@ -491,6 +497,7 @@ import type { ReportInput } from '@shared/report'
 
 export const sampleReport: ReportInput = {
   overview: { headline: '登入流程多了一道鎖定關卡', summary: '在 IP 限流之後加入 lockoutGuard。' },
+  planned_skipped: [],
   tests: [
     {
       id: 't1',
@@ -560,7 +567,12 @@ export const sampleReport: ReportInput = {
 ```ts
 // tests/shared/report.test.ts
 import { describe, expect, test } from 'vitest'
-import { DecisionSourceSchema, ReportInputSchema } from '@shared/report'
+import {
+  DecisionSourceSchema,
+  PlannedTestSchema,
+  plannedTestsProblem,
+  ReportInputSchema
+} from '@shared/report'
 import { sampleReport } from '../fixtures/report'
 
 describe('ReportInputSchema', () => {
@@ -576,6 +588,7 @@ describe('ReportInputSchema', () => {
     // 舊格式（沒有 tests）也能解析
     expect(r.tests).toEqual([])
     expect(r.tests_note).toBeUndefined()
+    expect(r.planned_skipped).toEqual([])
   })
 
   test('測試的類型預設單元、狀態預設新增；行號與修改原因選填', () => {
@@ -681,6 +694,85 @@ describe('ReportInputSchema', () => {
     expect(r.error?.issues.some((i) => i.path.join('.') === 'custom_blocks.1.id')).toBe(true)
   })
 })
+
+describe('規格的預計測試', () => {
+  const planned = [
+    PlannedTestSchema.parse({ id: 'p1', name: '鎖定帳號', scenario: '輸錯 5 次 → 登入 → 423' }),
+    PlannedTestSchema.parse({
+      id: 'p2',
+      name: '解鎖',
+      kind: 'integration',
+      scenario: '鎖定 15 分鐘後 → 登入 → 成功',
+      file: 'src/auth/lockout.test.ts'
+    })
+  ]
+  const withTests = (tests: object[], skipped: object[] = []) =>
+    ReportInputSchema.parse({ ...sampleReport, tests, planned_skipped: skipped })
+  const t = (id: string, planned?: string) => ({
+    id,
+    file: 'a.test.ts',
+    name: id,
+    scenario: '情境',
+    ...(planned ? { planned } : {})
+  })
+
+  test('預計測試的類型預設單元、狀態預設新增，檔案選填', () => {
+    expect(planned[0]).toEqual({
+      id: 'p1',
+      name: '鎖定帳號',
+      kind: 'unit',
+      change: 'added',
+      scenario: '輸錯 5 次 → 登入 → 423'
+    })
+  })
+
+  test('每個預計測試都有對應的測試或列在 planned_skipped 時沒有問題；規格外多加的測試不用對應', () => {
+    expect(plannedTestsProblem(planned, withTests([t('t1', 'p1'), t('t2', 'p2'), t('t3')]))).toBe(
+      undefined
+    )
+    expect(
+      plannedTestsProblem(
+        planned,
+        withTests([t('t1', 'p1')], [{ id: 'p2', reason: '改成手動驗證' }])
+      )
+    ).toBe(undefined)
+  })
+
+  test('預計測試沒有對應、也沒說明原因：列出是哪幾個', () => {
+    expect(plannedTestsProblem(planned, withTests([t('t1', 'p1')]))).toBe(
+      '這些預計測試沒有對應的測試，也沒有在 planned_skipped 說明原因：p2（解鎖）'
+    )
+  })
+
+  test('對應到規格裡沒有的預計測試、或同一個預計測試又有測試又列在 planned_skipped', () => {
+    const r = withTests(
+      [t('t1', 'p1'), t('t2', 'p9'), t('t3', 'p2')],
+      [
+        { id: 'p2', reason: '不做' },
+        { id: 'p7', reason: '不做' }
+      ]
+    )
+    expect(plannedTestsProblem(planned, r)).toBe(
+      [
+        '規格裡沒有這些預計測試：p9、p7',
+        '這些預計測試已經有對應的測試，不要再列在 planned_skipped：p2'
+      ].join('\n')
+    )
+  })
+
+  test('舊規格沒有預計測試（undefined）時不檢查；規格說明不新增測試（空陣列）時不能對應', () => {
+    expect(plannedTestsProblem(undefined, withTests([t('t1', 'p1')]))).toBe(undefined)
+    expect(plannedTestsProblem([], withTests([t('t1')]))).toBe(undefined)
+    expect(plannedTestsProblem([], withTests([t('t1', 'p1')]))).toBe('規格裡沒有這些預計測試：p1')
+  })
+
+  test('planned_skipped 一定要有原因', () => {
+    expect(
+      ReportInputSchema.safeParse({ ...sampleReport, planned_skipped: [{ id: 'p1', reason: '' }] })
+        .success
+    ).toBe(false)
+  })
+})
 ```
 
 **Step 3: 確認失敗**
@@ -719,19 +811,36 @@ export const DecisionSourceSchema = z.object({
   ref: z.string()
 })
 
+const TestKindSchema = z.enum(['unit', 'integration', 'e2e', 'other']).default('unit')
+const TestChangeSchema = z.enum(['added', 'modified']).default('added')
+
+/** 規格裡預計新增或修改的一個測試（id 用 p1、p2…）；報告的測試以 planned 對應回來 */
+export const PlannedTestSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  kind: TestKindSchema,
+  change: TestChangeSchema,
+  scenario: z.string().min(1),
+  /** 預計的測試檔（相對於 repo 根目錄），規格階段不一定知道 */
+  file: z.string().optional()
+})
+export type PlannedTest = z.infer<typeof PlannedTestSchema>
+
 /** 本次新增或修改的一個測試：情境用白話說明（在什麼情況下 → 做什麼 → 預期什麼） */
 export const TestNoteSchema = z.object({
   id: z.string().min(1),
   /** 相對於 repo 根目錄的路徑 */
   file: z.string().min(1),
   name: z.string().min(1),
-  kind: z.enum(['unit', 'integration', 'e2e', 'other']).default('unit'),
-  change: z.enum(['added', 'modified']).default('added'),
+  kind: TestKindSchema,
+  change: TestChangeSchema,
   scenario: z.string().min(1),
   /** 修改既有測試的原因 */
   why: z.string().optional(),
   /** 測試在新版檔案的行號 */
-  line: z.number().int().positive().optional()
+  line: z.number().int().positive().optional(),
+  /** 對應的規格預計測試 id（規格外多加的測試沒有） */
+  planned: z.string().optional()
 })
 
 /** submit_report 工具使用的 raw shape（tests 放在前面：報告最優先呈現新增的測試） */
@@ -740,6 +849,10 @@ export const ReportInputShape = {
   tests: z.array(TestNoteSchema).default([]),
   /** 沒有新增測試時的原因 */
   tests_note: z.string().optional(),
+  /** 規格預計、但這次沒有加入的測試與原因 */
+  planned_skipped: z
+    .array(z.object({ id: z.string().min(1), reason: z.string().min(1) }))
+    .default([]),
   architecture: z.object({ before: GraphSchema, after: GraphSchema }),
   decisions: z.array(
     z.object({
@@ -830,6 +943,48 @@ export const ReportInputSchema = z.object(ReportInputShape).superRefine((r, ctx)
 
 export type ReportInput = z.infer<typeof ReportInputSchema>
 export type TestNote = ReportInput['tests'][number]
+
+/** 規格的預計測試在報告裡的狀況：有對應測試的（已加入）與沒有的（附 planned_skipped 的原因） */
+export function plannedCoverage(
+  planned: PlannedTest[],
+  r: Pick<ReportInput, 'tests' | 'planned_skipped'>
+) {
+  const linked = new Set(r.tests.map((t) => t.planned))
+  return {
+    added: planned.filter((p) => linked.has(p.id)),
+    skipped: planned
+      .filter((p) => !linked.has(p.id))
+      .map((p) => ({ test: p, reason: r.planned_skipped.find((s) => s.id === p.id)?.reason }))
+  }
+}
+
+/**
+ * 報告和規格的預計測試對不上的地方（每個預計測試都要有對應的測試或列在 planned_skipped，
+ * 不能對應到規格裡沒有的預計測試）；沒有問題時回傳 undefined。
+ * planned 是規格的預計測試：舊規格沒有這個欄位（undefined）時不檢查
+ */
+export function plannedTestsProblem(
+  planned: PlannedTest[] | undefined,
+  r: ReportInput
+): string | undefined {
+  if (!planned) return undefined
+  const ids = new Set(planned.map((p) => p.id))
+  const linked = r.tests.flatMap((t) => (t.planned ? [t.planned] : []))
+  const skipped = r.planned_skipped.map((s) => s.id)
+  const problems: string[] = []
+  const unknown = [...new Set([...linked, ...skipped].filter((id) => !ids.has(id)))]
+  if (unknown.length) problems.push(`規格裡沒有這些預計測試：${unknown.join('、')}`)
+  const covered = new Set([...linked, ...skipped])
+  const missing = planned.filter((p) => !covered.has(p.id))
+  if (missing.length)
+    problems.push(
+      `這些預計測試沒有對應的測試，也沒有在 planned_skipped 說明原因：${missing.map((p) => `${p.id}（${p.name}）`).join('、')}`
+    )
+  const both = skipped.filter((id) => ids.has(id) && linked.includes(id))
+  if (both.length)
+    problems.push(`這些預計測試已經有對應的測試，不要再列在 planned_skipped：${both.join('、')}`)
+  return problems.length ? problems.join('\n') : undefined
+}
 ```
 
 **Step 5: 確認通過**
@@ -1918,9 +2073,10 @@ describe('Repository', () => {
     await expect(repo.getReport('a', 2)).rejects.toThrow('v2')
   })
 
-  test('舊版報告（沒有 tests 欄位）讀出來時補上空的測試清單', async () => {
+  test('舊版報告（沒有 tests、planned_skipped 欄位）讀出來時補上空陣列', async () => {
     const input: Partial<typeof sampleReport> = { ...sampleReport }
     delete input.tests
+    delete input.planned_skipped
     await mkdir(join(root, 'tasks/a/reports'), { recursive: true })
     await writeFile(
       join(root, 'tasks/a/reports/v1.json'),
@@ -1936,6 +2092,7 @@ describe('Repository', () => {
     )
     const r = await repo.getReport('a', 1)
     expect(r.input.tests).toEqual([])
+    expect(r.input.planned_skipped).toEqual([])
     expect(r.input.decisions).toEqual(sampleReport.decisions)
   })
 })
@@ -2063,8 +2220,15 @@ export class Repository {
       null
     )
     if (!r) throw new Error(`找不到報告 v${version}`)
-    // 開發期間資料的相容：較早的報告沒有 tests（之後才加的欄位），補上預設值，畫面與 PR 內文都不必再判斷
-    return { ...r, input: { ...r.input, tests: r.input.tests ?? [] } }
+    // 開發期間資料的相容：較早的報告沒有 tests、planned_skipped（之後才加的欄位），補上預設值，畫面與 PR 內文都不必再判斷
+    return {
+      ...r,
+      input: {
+        ...r.input,
+        tests: r.input.tests ?? [],
+        planned_skipped: r.input.planned_skipped ?? []
+      }
+    }
   }
 }
 ```
@@ -4752,6 +4916,24 @@ function sink(over: Partial<ToolSink> = {}): ToolSink {
   }
 }
 const textOf = (r: { content: { text: string }[] }) => r.content.map((c) => c.text).join('')
+const specArgs = {
+  title: 't',
+  summary: 's',
+  in_scope: [],
+  out_of_scope: [],
+  decisions: [],
+  tests: [
+    {
+      id: 'p1',
+      name: '鎖定帳號',
+      kind: 'unit' as const,
+      change: 'added' as const,
+      scenario: '輸錯 5 次 → 登入 → 423'
+    }
+  ],
+  steps: ['a'],
+  acceptance: ['b']
+}
 
 describe('harness tool handlers', () => {
   test('ask_user 呼叫 sink 並要求結束這一輪', async () => {
@@ -4787,15 +4969,7 @@ describe('harness tool handlers', () => {
         throw new Error('無法在 implementing 狀態執行 SPEC_PROPOSED')
       })
     })
-    const r = await createToolHandlers(s).propose_spec({
-      title: 't',
-      summary: 's',
-      in_scope: [],
-      out_of_scope: [],
-      decisions: [],
-      steps: ['a'],
-      acceptance: ['b']
-    })
+    const r = await createToolHandlers(s).propose_spec(specArgs)
     expect(r.isError).toBe(true)
     expect(textOf(r)).toContain('implementing')
     expect(log).toHaveBeenCalled()
@@ -4815,6 +4989,46 @@ describe('harness tool handlers', () => {
     expect(r.isError).toBe(true)
     expect(textOf(r)).toContain('字串錯誤')
     log.mockRestore()
+  })
+
+  describe('propose_spec 驗證', () => {
+    test('沒有預計測試也沒有說明原因時拒絕，不呼叫 sink', async () => {
+      const s = sink()
+      const r = await createToolHandlers(s).propose_spec({ ...specArgs, tests: [] })
+      expect(r.isError).toBe(true)
+      expect(textOf(r)).toContain('請修正後重新呼叫 propose_spec')
+      expect(textOf(r)).toContain('tests_note')
+      expect(s.proposeSpec).not.toHaveBeenCalled()
+    })
+
+    test('只有空白的 tests_note 不算說明', async () => {
+      const r = await createToolHandlers(sink()).propose_spec({
+        ...specArgs,
+        tests: [],
+        tests_note: '  '
+      })
+      expect(r.isError).toBe(true)
+    })
+
+    test('沒有預計測試、但說明了原因時可以通過', async () => {
+      const s = sink()
+      const r = await createToolHandlers(s).propose_spec({
+        ...specArgs,
+        tests: [],
+        tests_note: '只改 README'
+      })
+      expect(r.isError).toBeFalsy()
+      expect(s.proposeSpec).toHaveBeenCalled()
+    })
+
+    test('預計測試 id 重複時拒絕', async () => {
+      const r = await createToolHandlers(sink()).propose_spec({
+        ...specArgs,
+        tests: [specArgs.tests[0], { ...specArgs.tests[0], name: '另一個' }]
+      })
+      expect(r.isError).toBe(true)
+      expect(textOf(r)).toContain('預計測試 id 重複：p1')
+    })
   })
 
   describe('ask_user 驗證', () => {
@@ -4882,6 +5096,7 @@ import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 import {
   DecisionSourceSchema,
+  PlannedTestSchema,
   type ReportInput,
   ReportInputSchema,
   ReportInputShape
@@ -4912,6 +5127,8 @@ export const proposeSpecShape = {
   in_scope: z.array(z.string()),
   out_of_scope: z.array(z.string()).default([]),
   decisions: z.array(z.object({ id: z.string(), text: z.string(), source: DecisionSourceSchema })),
+  tests: z.array(PlannedTestSchema).default([]).describe('預計新增或修改的測試（id 用 p1、p2…）'),
+  tests_note: z.string().optional().describe('不需要新增或修改測試時的原因（tests 留空時必填）'),
   steps: z.array(z.string()).min(1),
   acceptance: z.array(z.string()).min(1)
 }
@@ -4970,10 +5187,14 @@ type Result = { content: { type: 'text'; text: string }[]; isError?: boolean }
 const ok = (text: string): Result => ({ content: [{ type: 'text', text }] })
 const fail = (text: string): Result => ({ content: [{ type: 'text', text }], isError: true })
 
+/** sink 拒絕工具參數時丟出：訊息原樣交給 Claude 修正（不是 Harness 自己出錯） */
+export class ToolInputError extends Error {}
+
 async function guard(fn: () => Promise<Result>): Promise<Result> {
   try {
     return await fn()
   } catch (e) {
+    if (e instanceof ToolInputError) return fail(e.message)
     console.error('[harness tools] handler failed', e)
     return fail(`Harness 無法處理：${e instanceof Error ? e.message : String(e)}`)
   }
@@ -4993,6 +5214,15 @@ function askUserProblem(a: AskUserArgs): string | undefined {
   return undefined
 }
 
+function proposeSpecProblem(a: ProposeSpecArgs): string | undefined {
+  const ids = a.tests.map((t) => t.id)
+  const dup = ids.find((x, i) => ids.indexOf(x) !== i)
+  if (dup) return `預計測試 id 重複：${dup}`
+  if (!a.tests.length && !a.tests_note?.trim())
+    return '列出預計新增或修改的測試（tests）；不需要測試時 tests 留空，並在 tests_note 說明原因'
+  return undefined
+}
+
 export function createToolHandlers(sink: ToolSink) {
   return {
     ask_user: (a: AskUserArgs) =>
@@ -5006,6 +5236,8 @@ export function createToolHandlers(sink: ToolSink) {
       }),
     propose_spec: (a: ProposeSpecArgs) =>
       guard(async () => {
+        const problem = proposeSpecProblem(a)
+        if (problem) return fail(`規格格式有誤，請修正後重新呼叫 propose_spec：${problem}`)
         await sink.proposeSpec(a)
         return ok(
           '規格草稿已交給使用者審閱，介面會顯示完整內容。請結束這一輪，不要在文字中重述規格，等待 [spec_approved] 或 [spec_feedback …]。'
@@ -5197,6 +5429,7 @@ export const MAIN_SYSTEM_APPEND = `
   - [counter_question question_id=…] 問題 → 一定要先輸出文字回答這個反問（簡短即可；回答反問時可以引用選項，這不算重述；只有文字回答會顯示在使用者的反問下面，不要只把回答寫進 ask_user 的 context），再用同一個 question_id 再呼叫一次 ask_user（依反問更新選項、說明或建議），然後結束這一輪。
   - [branch_conclusion branch=…] → 使用者在分岔討論中做出的決策，直接採納；之後的規格中 source 用 {type:"branch", ref:分岔 id}。
 - 對需求有足夠把握（約 95%）時，呼叫 mcp__harness__propose_spec。decisions 的 source 指出來源：question（ref=question_id）、branch（ref=分岔 id），或使用者在 [spec_feedback] 或訊息中直接給的指示 {type:"user", ref:指示的簡短摘錄}（介面上顯示「你的指示」）。
+- propose_spec 的 tests：列出這次預計新增或修改的每一個測試，id 用 p1、p2…；name、kind、change、scenario 的寫法和 submit_report 的 tests 相同，知道測試檔就填 file。這次不需要新增或修改測試時 tests 留空，並在 tests_note 說明原因。
 - 收到 [spec_feedback] 時修正並重新呼叫 propose_spec；若需要再問，繼續用 ask_user。
 
 ### 實作階段（收到 [spec_approved] 之後）
@@ -5207,8 +5440,16 @@ export const MAIN_SYSTEM_APPEND = `
 - 不要自己 git commit，Harness 會處理。
 - 完成後執行專案既有的測試、型別檢查、lint（若有），然後呼叫 mcp__harness__submit_report。
 
+### 測試的分類（kind）
+規格的預計測試與報告的測試都用同樣的標準：
+- unit：只測一個函式或模組，外部依賴（檔案系統、資料庫、網路、子程序、其他服務）都換成假的。
+- integration：多個模組一起測，或碰到真的檔案系統、資料庫、網路、子程序。
+- e2e：透過真實的介面或完整執行的 app 操作。
+- other：以上都不是（例如型別層級的測試、效能量測）。
+
 ### submit_report 的寫法
 - tests：最優先，使用者會先看這一段。列出本次新增或修改的每一個測試：id（t1、t2…）、file（相對於 repo 根目錄的路徑）、name（測試名稱）、kind（unit／integration／e2e／other）、change（added／modified）、scenario（用白話說明情境：在什麼情況下 → 做什麼 → 預期什麼）、line（測試在新版檔案的行號，選填）。修改既有測試時用 why 說明為什麼改。只有在沒有新增也沒有修改任何測試時 tests 才留空；沒有新增測試時在 tests_note 說明原因（修改的測試仍要列出）。
+- tests 的 planned 填這個測試對應的規格預計測試 id（規格外多加的測試不填）；規格預計但這次沒有加入的測試列在 planned_skipped（id 與原因）：每個預計測試都要有對應的測試，或列在 planned_skipped，否則 Harness 會退回報告。
 - architecture：before 與 after 各 3–10 個節點（模組、檔案群或外部服務），status 標 added / modified / unchanged，files 列相關路徑；edges 表示呼叫或資料流向。
 - decisions：每個關鍵決策寫出選擇、捨棄的方案與原因；source 指回釐清的問題或分岔；使用者在規格回饋、實作中插話或 [report_feedback] 中直接要求而做的決定用 {type:"user", ref:指示的簡短摘錄}；實作中自己做的決定用 implementation。
 - limitations：已知限制與風險；followups：刻意延後的事項。
@@ -6248,6 +6489,7 @@ import { BUILTIN_TOOLS } from '../../src/main/permissions/gate'
 import { Repository } from '../../src/main/store/repository'
 import { Store } from '../../src/main/store/store'
 import { TaskManager, type TaskManagerDeps } from '../../src/main/tasks/taskManager'
+import { ToolInputError } from '../../src/main/tools/harnessTools'
 import { sampleReport } from '../fixtures/report'
 import { assistantText, FakeClaude, fakeGit, until } from './fakeClaude'
 
@@ -6505,7 +6747,7 @@ import { join } from 'node:path'
 import type { Options } from '@anthropic-ai/claude-agent-sdk'
 import type { AppEvent, CreateTaskInput } from '@shared/ipc'
 import { IMPLEMENT_START_REF, msg, msgDisplay } from '@shared/protocol'
-import type { ReportInput } from '@shared/report'
+import { plannedTestsProblem, type ReportInput } from '@shared/report'
 import type {
   Branch,
   BranchConclusion,
@@ -6534,7 +6776,12 @@ import {
   hooksDirInside
 } from '../permissions/gate'
 import type { Repository } from '../store/repository'
-import { type HarnessToolName, type ToolSink, TURN_ENDING_TOOLS } from '../tools/harnessTools'
+import {
+  type HarnessToolName,
+  ToolInputError,
+  type ToolSink,
+  TURN_ENDING_TOOLS
+} from '../tools/harnessTools'
 import { prBody } from './prBody'
 import { phaseOf, type TaskEventType, transition } from './stateMachine'
 
@@ -7203,6 +7450,8 @@ export class TaskManager {
               inScope: a.in_scope,
               outOfScope: a.out_of_scope,
               decisions: a.decisions,
+              tests: a.tests,
+              testsNote: a.tests_note?.trim() || undefined,
               steps: a.steps,
               acceptance: a.acceptance,
               createdAt: this.now()
@@ -7237,6 +7486,12 @@ export class TaskManager {
           if (this.task(taskId).status !== 'implementing')
             throw new Error('只有實作階段可以提交報告')
           if (this.finalizing.has(taskId)) throw new Error('報告已提交，正在整理中')
+          // 每個預計測試都要有對應的測試或說明原因：對不上就退回給 Claude 補齊
+          const problem = plannedTestsProblem(this.task(taskId).specs.at(-1)?.tests, input)
+          if (problem)
+            throw new ToolInputError(
+              `報告和規格的預計測試對不上，請修正後重新呼叫 submit_report：\n${problem}`
+            )
           await this.startFinalizing(taskId, { input }, this.runs.get(runKey(taskId, 'main')))
         })
     }
@@ -7594,6 +7849,8 @@ const spec = {
   in_scope: ['a'],
   out_of_scope: [],
   decisions: [],
+  tests: [],
+  tests_note: '示範用的規格，不新增測試',
   steps: ['實作'],
   acceptance: ['測試通過']
 }
@@ -8121,12 +8378,40 @@ test('Claude 給的文字壓成一行；code span 裡的反引號會跳脫', () 
   expect(body).toContain('（原因：多台 機器共享）')
   expect(body).toContain('- ✅ `` echo `x` ``')
 })
+
+test('規格有預計測試時：先寫已加入幾個，再列出沒有加入的測試與原因', () => {
+  const p = (id: string, name: string) => ({
+    id,
+    name,
+    kind: 'unit' as const,
+    change: 'added' as const,
+    scenario: '情境'
+  })
+  const input = {
+    ...sampleReport,
+    tests: [{ ...sampleReport.tests[0], planned: 'p1' }, sampleReport.tests[1]],
+    planned_skipped: [{ id: 'p2', reason: '改成手動\n驗證' }]
+  }
+  const body = prBody({ ...report(input), plannedTests: [p('p1', '鎖定'), p('p2', '解鎖')] })
+  expect(body).toContain(
+    '## 新增的測試\n規格預計 2 個測試：已加入 1 個，1 個沒有加入。\n- 沒有加入：**解鎖**（P2）：改成手動 驗證\n- **連續失敗 5 次後鎖定帳號**'
+  )
+  const all = prBody({
+    ...report({ ...input, planned_skipped: [] }),
+    plannedTests: [p('p1', '鎖定')]
+  })
+  expect(all).toContain('## 新增的測試\n規格預計 1 個測試：都已加入。\n- **連續失敗')
+  // 舊規格沒有預計測試、或規格說明不新增測試：不寫這一行
+  expect(prBody(report())).not.toContain('規格預計')
+  expect(prBody({ ...report(), plannedTests: [] })).not.toContain('規格預計')
+})
 ```
 
 **Step 2: prBody 實作**
 
 ```ts
 // src/main/tasks/prBody.ts
+import { plannedCoverage } from '@shared/report'
 import { addedTestFiles, resolveTestPath } from '@shared/testFiles'
 import type { Report } from '@shared/types'
 
@@ -8152,6 +8437,20 @@ function testLines(r: Report): string[] {
   const undocumented = files.filter((f) => !described.has(f))
   const list = (paths: string[]) => paths.map(code).join('、')
   const lines = ['## 新增的測試']
+  // 規格的預計測試：先說做到幾個，再列出沒做到的與原因
+  if (r.plannedTests?.length) {
+    const c = plannedCoverage(r.plannedTests, i)
+    const n = r.plannedTests.length
+    lines.push(
+      c.skipped.length
+        ? `規格預計 ${n} 個測試：已加入 ${c.added.length} 個，${c.skipped.length} 個沒有加入。`
+        : `規格預計 ${n} 個測試：都已加入。`,
+      ...c.skipped.map(
+        (s) =>
+          `- 沒有加入：**${oneLine(s.test.name)}**（${s.test.id.toUpperCase()}）：${s.reason ? oneLine(s.reason) : '沒有說明原因'}`
+      )
+    )
+  }
   if (!added.length) {
     if (undocumented.length) {
       lines.push(`Claude 沒有說明新增的測試：${list(undocumented)}`)
@@ -8882,10 +9181,12 @@ describe('TaskManager：審查補強', () => {
       )
       // 驗證被中止的結果不完整：不存報告，下次啟動可「繼續」重新整理
       assertNotAborted()
+      const planned = this.task(taskId).specs.at(-1)?.tests
       const report: Report = {
         version,
         taskId,
         input,
+        ...(planned ? { plannedTests: planned } : {}),
         diff,
         stats,
         verification,
@@ -15839,6 +16140,60 @@ test('送出修改意見期間又改了內容就保留', async () => {
   await release()
   expect(input).toHaveValue('上限改 10 次，還有鎖 30 分鐘')
 })
+
+test('預計新增的測試：在範圍之後列出編號、名稱、新增或修改、類型、情境與預計的測試檔', () => {
+  renderSpec(
+    specTask({
+      specs: [
+        spec(1, {
+          tests: [
+            {
+              id: 'p1',
+              name: '連續失敗 5 次後鎖定',
+              kind: 'unit',
+              change: 'added',
+              scenario: '輸錯 5 次 → 第 6 次登入 → 回 `429`',
+              file: 'src/auth/lockout.test.ts'
+            },
+            {
+              id: 'p2',
+              name: '錯誤密碼回 401',
+              kind: 'integration',
+              change: 'modified',
+              scenario: '沒被鎖定時輸錯 → 登入 → 401'
+            }
+          ]
+        })
+      ]
+    })
+  )
+  const list = screen.getByRole('list', { name: '預計新增的測試' })
+  const rows = within(list).getAllByRole('listitem')
+  expect(rows).toHaveLength(2)
+  expect(rows[0]).toHaveTextContent('P1')
+  expect(rows[0]).toHaveTextContent('連續失敗 5 次後鎖定')
+  expect(rows[0]).toHaveTextContent('新增')
+  expect(rows[0]).toHaveTextContent('單元')
+  expect(rows[0]).toHaveTextContent('情境輸錯 5 次 → 第 6 次登入 → 回 429')
+  expect(within(rows[0]).getByText('429').tagName).toBe('CODE')
+  expect(rows[0]).toHaveTextContent('src/auth/lockout.test.ts')
+  expect(rows[1]).toHaveTextContent('修改')
+  expect(rows[1]).toHaveTextContent('整合')
+  // 放在包含／不包含之後、決策之前
+  const headings = screen.getAllByText(/^(包含|預計新增的測試|決策)$/).map((e) => e.textContent)
+  expect(headings).toEqual(['包含', '預計新增的測試', '決策'])
+})
+
+test('規格說明不新增測試時顯示原因；舊規格沒有這個欄位時不顯示這一段', () => {
+  const { unmount } = renderSpec(
+    specTask({ specs: [spec(1, { tests: [], testsNote: '只改 README' })] })
+  )
+  expect(screen.getByText('預計新增的測試')).toBeInTheDocument()
+  expect(screen.getByText('這次不新增測試：只改 README')).toBeInTheDocument()
+  unmount()
+  renderSpec(specTask())
+  expect(screen.queryByText('預計新增的測試')).not.toBeInTheDocument()
+})
 ```
 
 **Step 2: 確認失敗** — `npx vitest run tests/renderer/SpecScreen.test.tsx` → FAIL（模組不存在）
@@ -15869,8 +16224,55 @@ import { InlineCode } from '../components/Markdown'
 import { Button, cx, inputClass, LiveStatus, Pill, UserInstructionPill } from '../components/ui'
 import { blockImeSubmit } from '../lib/ime'
 import { currentStage, isBusy } from '../lib/stage'
+import { TEST_CHANGE_LABEL, TEST_KIND_LABEL } from '../lib/testLabels'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
+
+/** 規格的「預計新增的測試」：報告會對照這些編號；舊規格沒有這個欄位時不顯示 */
+function PlannedTests({ spec }: { spec: Spec }) {
+  const titleId = useId()
+  if (!spec.tests) return null
+  return (
+    <div className="flex flex-col gap-2.5">
+      <span id={titleId} className="text-[15px] font-bold">
+        預計新增的測試
+      </span>
+      {spec.tests.length ? (
+        <ul aria-labelledby={titleId} className="m-0 flex list-none flex-col gap-2 p-0">
+          {spec.tests.map((t) => (
+            <li
+              key={t.id}
+              className="flex flex-col gap-1.5 rounded-[14px] px-4 py-3 shadow-[0_0_0_1px_var(--color-chip)]"
+            >
+              <div className="flex items-start gap-3">
+                <span className="mt-0.5 font-mono text-xs text-muted">{t.id.toUpperCase()}</span>
+                <span className="min-w-0 flex-1 text-sm font-bold">
+                  <InlineCode text={t.name} />
+                </span>
+                <span className="flex flex-none items-center gap-1">
+                  <Pill tone={t.change === 'added' ? 'brand' : 'review'}>
+                    {TEST_CHANGE_LABEL[t.change]}
+                  </Pill>
+                  <Pill tone="muted">{TEST_KIND_LABEL[t.kind]}</Pill>
+                </span>
+              </div>
+              <div className="text-[13px]">
+                <span className="mr-2 font-medium text-brand">情境</span>
+                <InlineCode text={t.scenario} />
+              </div>
+              {t.file && <span className="font-mono text-xs break-all text-muted">{t.file}</span>}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <span className="text-[13px] text-ink-2">
+          這次不新增測試：
+          <InlineCode text={spec.testsNote ?? 'Claude 沒有說明原因'} />
+        </span>
+      )}
+    </div>
+  )
+}
 
 function SourcePill({
   task,
@@ -16112,6 +16514,8 @@ export function SpecScreen({
                 )}
               </div>
             </div>
+
+            <PlannedTests spec={spec} />
 
             {spec.decisions.length > 0 && (
               <div className="flex flex-col gap-2.5">
@@ -20736,6 +21140,8 @@ export function ReportView({
         <TestsSection
           tests={r.tests}
           note={r.tests_note}
+          planned={report.plannedTests}
+          plannedSkipped={r.planned_skipped}
           files={diffFiles}
           undocumented={undocumented}
           root={task.worktreePath}
@@ -23793,6 +24199,55 @@ test('只能看時沒有留言按鈕，但仍可以跳到 diff', async () => {
   await userEvent.click(within(section()).getByRole('button', { name: '錯誤密碼回 401' }))
   expect(pressed()).toMatch(/^src\/auth\/login\.test\.ts/)
 })
+
+test('規格有預計測試：最上面寫已加入幾個，列出沒加入的與原因；每個測試標規格編號或「規格外」', async () => {
+  const planned = (id: string, name: string) => ({
+    id,
+    name,
+    kind: 'unit' as const,
+    change: 'added' as const,
+    scenario: '情境'
+  })
+  const base = makeReport()
+  report = makeReport({
+    plannedTests: [planned('p1', '鎖定帳號'), planned('p2', '鎖定 15 分鐘後解鎖')],
+    input: {
+      ...base.input,
+      tests: [{ ...base.input.tests[0], planned: 'p1' }, base.input.tests[1]],
+      planned_skipped: [{ id: 'p2', reason: '改成 `TTL` 由 Redis 處理，手動驗證' }]
+    }
+  })
+  renderReport()
+  await loaded()
+  const summary = within(section()).getByRole('group', { name: '規格的預計測試' })
+  expect(summary).toHaveTextContent('規格預計 2 個測試：已加入 1 個，1 個沒有加入')
+  expect(summary).toHaveTextContent(
+    'P2鎖定 15 分鐘後解鎖沒有加入：改成 TTL 由 Redis 處理，手動驗證'
+  )
+  expect(within(summary).getByText('TTL').tagName).toBe('CODE')
+  expect(within(item('連續失敗 5 次後鎖定帳號')).getByText('規格 P1')).toBeInTheDocument()
+  expect(within(item('錯誤密碼回 401')).getByText('規格外')).toBeInTheDocument()
+})
+
+test('預計測試都加入時摘要說都已加入；舊報告沒有預計測試時不顯示摘要與規格標籤', async () => {
+  const base = makeReport()
+  report = makeReport({
+    plannedTests: [{ id: 'p1', name: '鎖定帳號', kind: 'unit', change: 'added', scenario: '情境' }],
+    input: { ...base.input, tests: [{ ...base.input.tests[0], planned: 'p1' }] }
+  })
+  const { unmount } = renderReport()
+  await loaded()
+  expect(within(section()).getByRole('group', { name: '規格的預計測試' })).toHaveTextContent(
+    '規格預計 1 個測試：都已加入'
+  )
+  unmount()
+  resetStoreInternals()
+  report = makeReport()
+  renderReport()
+  await loaded()
+  expect(within(section()).queryByRole('group', { name: '規格的預計測試' })).not.toBeInTheDocument()
+  expect(within(section()).queryByText(/^規格/)).not.toBeInTheDocument()
+})
 ```
 
 **Step 2: 確認失敗**
@@ -23987,20 +24442,15 @@ export function testVerdict(file: string, runs: VerificationResult[]): TestVerdi
 // 以及 Harness 從 diff 偵測到、Claude 沒說明的測試檔。外框（標題、留言）由 ReportView 的 Section 提供。
 import { type ReactNode, useId } from 'react'
 import type { DiffFile } from '@shared/diff'
-import type { TestNote } from '@shared/report'
+import { type PlannedTest, plannedCoverage, type ReportInput, type TestNote } from '@shared/report'
 import { resolveTestPath } from '@shared/testFiles'
 import type { VerificationResult } from '@shared/types'
 import { InlineCode } from '../components/Markdown'
 import { cx, Icons, Pill } from '../components/ui'
+import { TEST_CHANGE_LABEL, TEST_KIND_LABEL } from '../lib/testLabels'
 import { testAnchor } from './anchors'
 import { type RunState, runState, testVerdict } from './testItems'
 
-const KIND_LABEL: Record<TestNote['kind'], string> = {
-  unit: '單元',
-  integration: '整合',
-  e2e: '端對端',
-  other: '其他'
-}
 const FILE_STATUS: Record<DiffFile['status'], string> = {
   added: '新增',
   modified: '修改',
@@ -24089,9 +24539,53 @@ function TestVerification({
   )
 }
 
+/** 規格的預計測試做到幾個；沒加入的列出來，附 Claude 說明的原因 */
+function PlannedSummary({
+  planned,
+  coverage
+}: {
+  planned: PlannedTest[]
+  coverage: ReturnType<typeof plannedCoverage>
+}) {
+  const { added, skipped } = coverage
+  return (
+    <div
+      role="group"
+      aria-label="規格的預計測試"
+      className={cx(
+        'flex flex-col gap-2 rounded-xl px-3.5 py-3 text-[13px]',
+        skipped.length ? 'bg-warn-soft' : 'bg-fill-2'
+      )}
+    >
+      <span className={cx('font-medium', skipped.length ? 'text-warn' : 'text-ink-2')}>
+        {skipped.length
+          ? `規格預計 ${planned.length} 個測試：已加入 ${added.length} 個，${skipped.length} 個沒有加入`
+          : `規格預計 ${planned.length} 個測試：都已加入`}
+      </span>
+      {skipped.length > 0 && (
+        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+          {skipped.map(({ test: p, reason }) => (
+            <li key={p.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <span className="font-mono text-xs text-muted">{p.id.toUpperCase()}</span>
+              <span className="font-medium">
+                <InlineCode text={p.name} />
+              </span>
+              <span className="text-ink-2">
+                沒有加入：
+                <InlineCode text={reason ?? 'Claude 沒有說明原因'} />
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 /** Claude 說明的一個測試：名稱（標題，可以點：跳到 diff 裡的測試檔與行）、檔案、標籤、情境、修改原因、驗證 */
 function TestItem({
   test: t,
+  plannedLabel,
   path,
   inDiff,
   runs,
@@ -24103,6 +24597,8 @@ function TestItem({
   onShowResults
 }: {
   test: TestNote
+  /** 「規格 P1」或「規格外」；規格沒有預計測試時不標 */
+  plannedLabel?: string
   path: string
   inDiff: boolean
   runs: VerificationResult[]
@@ -24145,10 +24641,11 @@ function TestItem({
           </span>
         </div>
         <span className="flex flex-none items-center gap-1">
+          {plannedLabel && <Pill tone={t.planned ? 'decision' : 'neutral'}>{plannedLabel}</Pill>}
           <Pill tone={t.change === 'added' ? 'brand' : 'review'}>
-            {t.change === 'added' ? '新增' : '修改'}
+            {TEST_CHANGE_LABEL[t.change]}
           </Pill>
-          <Pill tone="muted">{KIND_LABEL[t.kind]}</Pill>
+          <Pill tone="muted">{TEST_KIND_LABEL[t.kind]}</Pill>
           {button(anchor, t.name, `對測試「${t.name}」留言`)}
         </span>
       </div>
@@ -24171,6 +24668,8 @@ function TestItem({
 export function TestsSection({
   tests,
   note,
+  planned,
+  plannedSkipped,
   files,
   undocumented,
   root,
@@ -24185,6 +24684,9 @@ export function TestsSection({
   tests: TestNote[]
   /** 沒有新增測試的原因（Claude 說明） */
   note?: string
+  /** 整理報告時規格的預計測試（舊報告沒有）與 Claude 說明沒加入的原因 */
+  planned?: PlannedTest[]
+  plannedSkipped: ReportInput['planned_skipped']
   /** diff 裡的檔案與其中 Claude 沒說明的測試檔（ReportView 算好，概觀的數據也用） */
   files: DiffFile[]
   undocumented: DiffFile[]
@@ -24207,9 +24709,19 @@ export function TestsSection({
   ]
   const hasAdded = ordered.some((t) => t.change === 'added')
   const undocumentedAdded = undocumented.some((f) => f.status === 'added')
+  // 規格說明不新增測試（空陣列）或舊報告：不顯示對照
+  const hasPlanned = !!planned?.length
+  const label = (t: TestNote) =>
+    !hasPlanned ? undefined : t.planned ? `規格 ${t.planned.toUpperCase()}` : '規格外'
 
   return (
     <div className="flex flex-col gap-3">
+      {hasPlanned && (
+        <PlannedSummary
+          planned={planned}
+          coverage={plannedCoverage(planned, { tests, planned_skipped: plannedSkipped })}
+        />
+      )}
       {!hasAdded && (
         <div className="flex gap-2.5 rounded-xl bg-warn-soft px-3.5 py-3 text-[13px]">
           <Icons.Info className="mt-[3px] flex-none text-warn" />
@@ -24235,6 +24747,7 @@ export function TestsSection({
           <TestItem
             key={t.id}
             test={t}
+            plannedLabel={label(t)}
             path={path}
             inDiff={paths.includes(path)}
             runs={runs}
@@ -26101,6 +26614,97 @@ describe('TaskManager：移除 repo', () => {
     await expect(tm.removeRepo('r1')).rejects.toThrow('找不到 repo')
   })
 })
+
+describe('TaskManager：規格的預計測試', () => {
+  const p1 = {
+    id: 'p1',
+    name: '連續失敗 5 次後鎖定',
+    kind: 'unit' as const,
+    change: 'added' as const,
+    scenario: '輸錯 5 次 → 第 6 次登入 → 423'
+  }
+  const p2 = { ...p1, id: 'p2', name: '鎖定 15 分鐘後解鎖', scenario: '15 分鐘後 → 登入 → 成功' }
+  const linked = { ...sampleReport, tests: [{ ...sampleReport.tests[0], planned: 'p1' }] }
+
+  test('規格記下預計測試；報告缺少對應時拒絕並把原因交給 Claude，補齊後整理報告、存下預計測試', async () => {
+    const { tm, claude, repo, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec({ ...spec, tests: [p1, p2], tests_note: '  ' })
+    }
+    const id = await create()
+    expect(tm.get(id).specs[0]).toMatchObject({ tests: [p1, p2] })
+    expect(tm.get(id).specs[0].testsNote).toBeUndefined()
+    claude.script = async () => []
+    await tm.approveSpec(id)
+    await tm.whenIdle(id)
+
+    let rejected: unknown
+    claude.script = async ({ sink }) => {
+      try {
+        await sink.submitReport(linked)
+      } catch (e) {
+        rejected = e
+      }
+      await sink.submitReport({
+        ...linked,
+        planned_skipped: [{ id: 'p2', reason: '改成手動驗證' }]
+      })
+    }
+    await tm.send(id, 'main', '完成了嗎？')
+    await tm.whenIdle(id)
+    expect(rejected).toBeInstanceOf(ToolInputError)
+    expect((rejected as Error).message).toBe(
+      '報告和規格的預計測試對不上，請修正後重新呼叫 submit_report：\n' +
+        '這些預計測試沒有對應的測試，也沒有在 planned_skipped 說明原因：p2（鎖定 15 分鐘後解鎖）'
+    )
+    expect(tm.get(id)).toMatchObject({ status: 'reviewing', reportVersions: [1] })
+    const r = await repo.getReport(id, 1)
+    expect(r.plannedTests).toEqual([p1, p2])
+    expect(r.input.planned_skipped).toEqual([{ id: 'p2', reason: '改成手動驗證' }])
+  })
+
+  test('規格說明不新增測試時記下原因', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec({ ...spec, tests: [], tests_note: ' 只改 README ' })
+    }
+    const id = await create()
+    expect(tm.get(id).specs[0]).toMatchObject({ tests: [], testsNote: '只改 README' })
+  })
+
+  test('舊規格沒有預計測試：報告不檢查對應，也不存預計測試', async () => {
+    const { tm, claude, repo } = await setup()
+    const { makeTask } = await import('../fixtures/task')
+    await repo.saveTask(
+      makeTask({
+        id: 'old',
+        status: 'implementing',
+        mainSessionId: 'sess-old',
+        specs: [
+          {
+            version: 1,
+            title: '帳號鎖定',
+            summary: 's',
+            inScope: [],
+            outOfScope: [],
+            decisions: [],
+            steps: ['實作'],
+            acceptance: ['測試通過'],
+            createdAt: 'x'
+          }
+        ]
+      })
+    )
+    await tm.init()
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(linked)
+    }
+    await tm.send('old', 'main', '完成')
+    await tm.whenIdle('old')
+    expect(tm.get('old')).toMatchObject({ status: 'reviewing', reportVersions: [1] })
+    expect((await repo.getReport('old', 1)).plannedTests).toBeUndefined()
+  })
+})
 ```
 
 `tests/renderer/RepoMenu.test.tsx`：
@@ -26474,6 +27078,273 @@ git commit -m "feat: remove a repo from the sidebar, deleting its tasks
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 git add docs/plans/2026-10-07-harness-implementation.md
 git commit -m "docs: record removing a repo in the plan (Task 41)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 42：規格列出預計新增的測試，報告對照
+
+使用中加上（設計 §3.3、§3.6）：規格多一段「預計新增的測試」（必填，沒有時說明原因）；報告的每個測試標出對應的規格預計測試，沒做到的要說明原因，Harness 在提交報告時檢查、在報告與 PR 內文呈現對照。測試的類型（kind）在系統提示寫明判斷標準，規格與報告共用。程式一個 commit，本計畫的紀錄另一個 docs commit。
+
+PR #1（附加圖片，由 Harness 任務開出）合併時沒有同步本計畫的程式碼區塊；本 Task 只更新自己改到的部分，`taskManager.ts`、`repository.ts`、`store.ts`、`ipc.ts` 等檔案與圖片相關的部分以 repo 裡的程式碼為準。
+
+**Files:**
+- Create: `src/renderer/src/lib/testLabels.ts`（`TEST_KIND_LABEL`、`TEST_CHANGE_LABEL`，規格與報告共用）
+- Modify（程式碼區塊已更新為最終版本）：
+  - Task 4：`src/shared/report.ts`（`PlannedTestSchema`、`TestNote.planned`、`planned_skipped`、`plannedCoverage`、`plannedTestsProblem`）、`tests/shared/report.test.ts`、`tests/fixtures/report.ts`（`planned_skipped: []`）
+  - Task 10：`src/main/store/repository.ts`（舊報告補 `planned_skipped: []`）、`tests/main/repository.test.ts`
+  - Task 18：`src/main/tools/harnessTools.ts`（`propose_spec` 的 `tests`／`tests_note` 與 `proposeSpecProblem`；`ToolInputError`：guard 把訊息原樣交給 Claude）
+  - Task 19：`src/main/agent/prompts.ts`（規格的 `tests`、報告的 `planned`／`planned_skipped`、「測試的分類（kind）」）
+  - Task 21、24：`src/main/tasks/taskManager.ts`（`proposeSpec` 存 `tests`／`testsNote`；`submitReport` 用 `plannedTestsProblem` 檢查，不符合丟 `ToolInputError`；`finalizeReport` 把規格的預計測試存成 `Report.plannedTests`）、`tests/main/taskManager.test.ts`（`spec` fixture 加上 `tests: []` 與 `tests_note`）
+  - Task 24：`src/main/tasks/prBody.ts`、`tests/main/prBody.test.ts`
+  - Task 31：`src/renderer/src/screens/SpecScreen.tsx`（`PlannedTests`，放在包含／不包含之後）、`tests/renderer/SpecScreen.test.tsx`
+  - Task 36：`src/renderer/src/report/TestsSection.tsx`（`PlannedSummary`、「規格 P1／規格外」標籤）、`tests/renderer/TestsSection.test.tsx`；Task 33：`src/renderer/src/report/ReportView.tsx`
+  - `src/shared/types.ts`：`Spec.tests?`、`Spec.testsNote?`、`Report.plannedTests?`（舊資料沒有，都是選填）
+- Modify: `docs/plans/2026-10-07-harness-design.md`（§3.3 的 `propose_spec`、§3.6）
+
+**行為重點：**
+- `PlannedTestSchema`：`id`、`name`、`kind`（預設 unit）、`change`（預設 added）、`scenario`、`file?`。`propose_spec` 的 `tests` 預設空陣列；`tests` 空且 `tests_note` 只有空白或沒給時退回（「列出預計新增或修改的測試（tests）；不需要測試時 tests 留空，並在 tests_note 說明原因」），id 重複也退回。`tests_note` 存成去掉前後空白的 `testsNote`。
+- `plannedTestsProblem(planned, input)`：`planned` 是 undefined（舊規格）時不檢查；否則依序回報「規格裡沒有這些預計測試」「這些預計測試沒有對應的測試，也沒有在 planned_skipped 說明原因：p2（名稱）」「這些預計測試已經有對應的測試，不要再列在 planned_skipped」。`submitReport` 用最新一版規格檢查，不符合時丟 `ToolInputError`（「報告和規格的預計測試對不上，請修正後重新呼叫 submit_report：\n…」），報告不會進入整理。
+- 報告：`plannedTests` 有內容時，「新增的測試」最上面是 `role="group"`「規格的預計測試」：有沒加入的時警示樣式「規格預計 N 個測試：已加入 X 個，Y 個沒有加入」並列出編號、名稱、「沒有加入：原因」；都做到時「規格預計 N 個測試：都已加入」。每個測試標「規格 P1」（decision 色）或「規格外」。`plannedTests` 是空陣列（規格說明不新增測試）或沒有時都不顯示。PR 內文同樣先寫這一行並以「- 沒有加入：**名稱**（P2）：原因」列出。
+
+**Step 1: 寫失敗測試**
+
+`tests/shared/report.test.ts`、`tests/main/prBody.test.ts`、`tests/main/repository.test.ts`、`tests/renderer/SpecScreen.test.tsx`、`tests/renderer/TestsSection.test.tsx` 的程式碼見上面列出的區塊。
+
+`tests/main/harnessTools.test.ts`：import 加上 `ToolInputError`；檔頭加上 `specArgs`，「propose_spec 成功時…」與「sink 丟錯時轉成 isError…」改用它（處理函式在實際執行時收到的是套用過 schema 預設值的參數，`tests` 一定存在）：
+
+```ts
+const specArgs = {
+  title: 't',
+  summary: 's',
+  in_scope: [],
+  out_of_scope: [],
+  decisions: [],
+  tests: [
+    {
+      id: 'p1',
+      name: '鎖定帳號',
+      kind: 'unit' as const,
+      change: 'added' as const,
+      scenario: '輸錯 5 次 → 登入 → 423'
+    }
+  ],
+  steps: ['a'],
+  acceptance: ['b']
+}
+```
+
+新增：
+
+```ts
+  test('sink 以 ToolInputError 拒絕時，原因原樣交給 Claude 修正', async () => {
+    const s = sink({
+      submitReport: vi.fn(async () => {
+        throw new ToolInputError('報告和規格的預計測試對不上：p2')
+      })
+    })
+    const r = await createToolHandlers(s).submit_report(sampleReport)
+    expect(r.isError).toBe(true)
+    expect(textOf(r)).toBe('報告和規格的預計測試對不上：p2')
+  })
+
+  describe('propose_spec 驗證', () => {
+    test('沒有預計測試也沒有說明原因時拒絕，不呼叫 sink', async () => {
+      const s = sink()
+      const r = await createToolHandlers(s).propose_spec({ ...specArgs, tests: [] })
+      expect(r.isError).toBe(true)
+      expect(textOf(r)).toContain('請修正後重新呼叫 propose_spec')
+      expect(textOf(r)).toContain('tests_note')
+      expect(s.proposeSpec).not.toHaveBeenCalled()
+    })
+
+    test('只有空白的 tests_note 不算說明', async () => {
+      const r = await createToolHandlers(sink()).propose_spec({
+        ...specArgs,
+        tests: [],
+        tests_note: '  '
+      })
+      expect(r.isError).toBe(true)
+    })
+
+    test('沒有預計測試、但說明了原因時可以通過', async () => {
+      const s = sink()
+      const r = await createToolHandlers(s).propose_spec({
+        ...specArgs,
+        tests: [],
+        tests_note: '只改 README'
+      })
+      expect(r.isError).toBeFalsy()
+      expect(s.proposeSpec).toHaveBeenCalled()
+    })
+
+    test('預計測試 id 重複時拒絕', async () => {
+      const r = await createToolHandlers(sink()).propose_spec({
+        ...specArgs,
+        tests: [specArgs.tests[0], { ...specArgs.tests[0], name: '另一個' }]
+      })
+      expect(r.isError).toBe(true)
+      expect(textOf(r)).toContain('預計測試 id 重複：p1')
+    })
+  })
+```
+
+`tests/main/prompts.test.ts` 最後加上：
+
+```ts
+test('規格列出預計測試（沒有時說明原因），報告的測試對應回規格，沒做到的說明原因', () => {
+  const lines = MAIN_SYSTEM_APPEND.split('\n')
+  const spec = lines.find((l) => l.includes('propose_spec 的 tests'))
+  expect(spec).toContain('id 用 p1、p2…')
+  expect(spec).toContain('tests 留空，並在 tests_note 說明原因')
+  const report = lines.find((l) => l.includes('planned_skipped'))
+  expect(report).toContain('planned 填這個測試對應的規格預計測試 id')
+  expect(report).toContain('每個預計測試都要有對應的測試，或列在 planned_skipped')
+})
+
+test('測試的分類（kind）有判斷標準，規格與報告共用', () => {
+  for (const s of [
+    '### 測試的分類（kind）',
+    '- unit：只測一個函式或模組',
+    '- integration：',
+    '- e2e：',
+    '- other：'
+  ])
+    expect(MAIN_SYSTEM_APPEND).toContain(s)
+})
+```
+
+`tests/main/taskManager.test.ts`：import 加上 `ToolInputError`，最後加上：
+
+```ts
+describe('TaskManager：規格的預計測試', () => {
+  const p1 = {
+    id: 'p1',
+    name: '連續失敗 5 次後鎖定',
+    kind: 'unit' as const,
+    change: 'added' as const,
+    scenario: '輸錯 5 次 → 第 6 次登入 → 423'
+  }
+  const p2 = { ...p1, id: 'p2', name: '鎖定 15 分鐘後解鎖', scenario: '15 分鐘後 → 登入 → 成功' }
+  const linked = { ...sampleReport, tests: [{ ...sampleReport.tests[0], planned: 'p1' }] }
+
+  test('規格記下預計測試；報告缺少對應時拒絕並把原因交給 Claude，補齊後整理報告、存下預計測試', async () => {
+    const { tm, claude, repo, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec({ ...spec, tests: [p1, p2], tests_note: '  ' })
+    }
+    const id = await create()
+    expect(tm.get(id).specs[0]).toMatchObject({ tests: [p1, p2] })
+    expect(tm.get(id).specs[0].testsNote).toBeUndefined()
+    claude.script = async () => []
+    await tm.approveSpec(id)
+    await tm.whenIdle(id)
+
+    let rejected: unknown
+    claude.script = async ({ sink }) => {
+      try {
+        await sink.submitReport(linked)
+      } catch (e) {
+        rejected = e
+      }
+      await sink.submitReport({
+        ...linked,
+        planned_skipped: [{ id: 'p2', reason: '改成手動驗證' }]
+      })
+    }
+    await tm.send(id, 'main', '完成了嗎？')
+    await tm.whenIdle(id)
+    expect(rejected).toBeInstanceOf(ToolInputError)
+    expect((rejected as Error).message).toBe(
+      '報告和規格的預計測試對不上，請修正後重新呼叫 submit_report：\n' +
+        '這些預計測試沒有對應的測試，也沒有在 planned_skipped 說明原因：p2（鎖定 15 分鐘後解鎖）'
+    )
+    expect(tm.get(id)).toMatchObject({ status: 'reviewing', reportVersions: [1] })
+    const r = await repo.getReport(id, 1)
+    expect(r.plannedTests).toEqual([p1, p2])
+    expect(r.input.planned_skipped).toEqual([{ id: 'p2', reason: '改成手動驗證' }])
+  })
+
+  test('規格說明不新增測試時記下原因', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec({ ...spec, tests: [], tests_note: ' 只改 README ' })
+    }
+    const id = await create()
+    expect(tm.get(id).specs[0]).toMatchObject({ tests: [], testsNote: '只改 README' })
+  })
+
+  test('舊規格沒有預計測試：報告不檢查對應，也不存預計測試', async () => {
+    const { tm, claude, repo } = await setup()
+    const { makeTask } = await import('../fixtures/task')
+    await repo.saveTask(
+      makeTask({
+        id: 'old',
+        status: 'implementing',
+        mainSessionId: 'sess-old',
+        specs: [
+          {
+            version: 1,
+            title: '帳號鎖定',
+            summary: 's',
+            inScope: [],
+            outOfScope: [],
+            decisions: [],
+            steps: ['實作'],
+            acceptance: ['測試通過'],
+            createdAt: 'x'
+          }
+        ]
+      })
+    )
+    await tm.init()
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(linked)
+    }
+    await tm.send('old', 'main', '完成')
+    await tm.whenIdle('old')
+    expect(tm.get('old')).toMatchObject({ status: 'reviewing', reportVersions: [1] })
+    expect((await repo.getReport('old', 1)).plannedTests).toBeUndefined()
+  })
+})
+```
+
+**Step 2: 確認失敗** — 新的測試都失敗（`PlannedTestSchema`、`ToolInputError` 不存在、規格沒存 `tests`、畫面沒有這些段落）；「舊規格沒有預計測試」與 repository 的相容測試在改動前就是現在的行為，相容測試在改 `getReport` 前會失敗。
+
+**Step 3: 實作** — `src/renderer/src/lib/testLabels.ts`：
+
+```ts
+// src/renderer/src/lib/testLabels.ts
+// 測試的類型與新增／修改的標籤：規格的預計測試與報告的測試共用
+import type { TestNote } from '@shared/report'
+
+export const TEST_KIND_LABEL: Record<TestNote['kind'], string> = {
+  unit: '單元',
+  integration: '整合',
+  e2e: '端對端',
+  other: '其他'
+}
+
+export const TEST_CHANGE_LABEL: Record<TestNote['change'], string> = {
+  added: '新增',
+  modified: '修改'
+}
+```
+
+其餘見上面列出的區塊。
+
+**Step 4: 確認通過** — `npm test`（53 個檔案、800 個測試）、`npm run typecheck`、`npm run lint`、`npx electron-vite build` 通過。以 `scripts/e2e/driver.mjs` 啟動建置好的 app（不呼叫 Claude），放一個規格待核准的任務（3 個預計測試）與一個帶 `plannedTests` 的報告：規格頁在「包含／不包含」之後列出 P1–P3；報告最上面顯示「規格預計 3 個測試：已加入 2 個，1 個沒有加入」與 P2 的原因，測試標「規格 P1」「規格 P3」「規格外」。
+
+**Commit**
+
+```bash
+git commit -m "feat: list planned tests in the spec and check them against the report
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git add docs/plans/2026-10-07-harness-implementation.md
+git commit -m "docs: record planned tests in the plan (Task 42)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
