@@ -7994,6 +7994,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - 只接受主視窗 main frame 送來的 IPC（`e.senderFrame === win.webContents.mainFrame`）；session 的權限請求與檢查一律拒絕。
 - `shell:showInFolder` 只能打開已加入的 repo 或任務 worktree 裡的路徑；`report:saveHtml` 的預設路徑只取檔名。
 - 啟動失敗（例如資料夾無法讀取）時顯示錯誤對話框並結束。
+- 環境變數 `HARNESS_USER_DATA_DIR` 有值時，在模組最上方（任何地方讀 userData 之前）以 `app.setPath('userData', …)` 改用該資料夾；供 Task 35 的手動端對端驗證（`scripts/e2e/`）隔離資料，不碰使用者真正的 userData。不另寫單元測試。
 - Claude Code 未登入時 `tasks:create` 以偵測的錯誤訊息拒絕（快取狀態未登入時先重新偵測一次）。
 - `ipc.ts` 只做對應與檢查；可測的邏輯放 `ipcGuards.ts`／`blockHtml.ts`（tests/main 不 import electron）。
 - `harness-block://report/<taskId>/<version>/<blockId>`：先用 `parseBlockUrl` 檢查格式（blockId 規則與 `@shared/report` 一致，最長 64），不符就 404；回應帶 CSP header，HTML 內也有同樣的 CSP meta 與轉義過的 `<title>`。
@@ -8895,6 +8896,10 @@ import { Store } from './store/store'
 import { TaskManager } from './tasks/taskManager'
 import { createHarnessServer } from './tools/harnessTools'
 import { runVerification } from './verify/verifyRunner'
+
+// 手動端對端驗證（scripts/e2e）用：把 userData 指到暫存資料夾，不碰使用者真正的資料。
+// 必須在任何地方讀取 userData 之前設定
+if (process.env.HARNESS_USER_DATA_DIR) app.setPath('userData', process.env.HARNESS_USER_DATA_DIR)
 
 // 自訂區塊用獨立的 scheme：iframe 不和 renderer 同源，也拿不到 preload 的 bridge
 protocol.registerSchemesAsPrivileged([

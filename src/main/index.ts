@@ -21,6 +21,10 @@ import { TaskManager } from './tasks/taskManager'
 import { createHarnessServer } from './tools/harnessTools'
 import { runVerification } from './verify/verifyRunner'
 
+// 手動端對端驗證（scripts/e2e）用：把 userData 指到暫存資料夾，不碰使用者真正的資料。
+// 必須在任何地方讀取 userData 之前設定
+if (process.env.HARNESS_USER_DATA_DIR) app.setPath('userData', process.env.HARNESS_USER_DATA_DIR)
+
 // 自訂區塊用獨立的 scheme：iframe 不和 renderer 同源，也拿不到 preload 的 bridge
 protocol.registerSchemesAsPrivileged([
   { scheme: 'harness-block', privileges: { standard: true, secure: true } }
