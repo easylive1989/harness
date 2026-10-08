@@ -70,7 +70,7 @@ export function startsImplementation(e: Pick<TimelineEvent, 'kind' | 'ref'>): bo
 }
 
 /**
- * 加上 ref 標記之前寫入的實作起點，只能比對顯示文字。
+ * 加上 ref 標記之前寫入的實作起點，只能比對顯示文字（開發期間建立的任務資料的相容）。
  * 只在整份時間軸都沒有標記時使用（新時間軸裡沒有 ref 的 user_text 是使用者自己打的字）。
  */
 export function legacyImplementStart(e: Pick<TimelineEvent, 'kind' | 'text' | 'ref'>): boolean {

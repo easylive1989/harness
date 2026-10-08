@@ -116,7 +116,7 @@ export function userTextDisplay(text: string): string {
 /**
  * 這一段實作的主線事件：最後一個實作起點（核准規格或送出報告回饋）之後（不含那則訊息）。
  * 還沒有起點（例如剛核准、訊息還沒寫進時間軸）時是空的，不會顯示釐清階段的對話。
- * 起點看 user_text 的 ref；整份時間軸都沒有標記（加上標記之前的任務）才比對顯示文字。
+ * 起點看 user_text 的 ref；整份時間軸都沒有標記（開發期間、加上標記之前的任務）才比對顯示文字。
  */
 export function implementEvents(events: TimelineEvent[]): TimelineEvent[] {
   const main = events.filter((e) => e.channel === 'main')

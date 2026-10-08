@@ -252,7 +252,7 @@ export function ImplementScreen({
   const done = task.plan.filter((s) => s.status === 'done').length
   const runningIdx = task.plan.findIndex((s) => s.status === 'running')
 
-  // 等待核准的請求以 toolUseId 對應時間軸上的工具呼叫；舊資料沒有 id 時找最近一個相同的呼叫
+  // 等待核准的請求以 toolUseId 對應時間軸上的工具呼叫；沒有 id 的（開發期間的舊資料）找最近一個相同的呼叫
   const p = task.pendingPermission
   const allTools = events.filter(isToolCall)
   const waitingTool = p?.toolUseId ? allTools.findLast((e) => e.tool.id === p.toolUseId) : undefined

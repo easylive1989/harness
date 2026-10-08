@@ -4,8 +4,6 @@
   "description": "Claude 驅動的需求釐清與實作桌面工具",
   "type": "module",
   "main": "./out/main/index.js",
-  "author": "example.com",
-  "homepage": "https://electron-vite.org",
   "scripts": {
     "format": "prettier --write .",
     "lint": "eslint --cache .",

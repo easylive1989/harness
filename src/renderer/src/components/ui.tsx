@@ -2,7 +2,7 @@
 // 共用的 UI 元件與樣式常數。這裡同時匯出 cx／TONE_TEXT／Icons 等非元件，
 // 改這個檔時 Vite 會整頁重新載入而不是 fast refresh，換來各畫面只需一個 import 來源。
 /* eslint-disable react-refresh/only-export-components */
-import type { ComponentProps, HTMLAttributes, ReactNode, SVGProps } from 'react'
+import type { ComponentProps, ReactNode, SVGProps } from 'react'
 import { extendTailwindMerge } from 'tailwind-merge'
 
 // 讓呼叫端傳入的 className 能覆蓋元件預設的 class（例如 Button 的 h-11 被 h-[42px] 取代）。
@@ -41,10 +41,6 @@ export function Button({
       {...p}
     />
   )
-}
-
-export function Panel({ className, ...p }: HTMLAttributes<HTMLElement>) {
-  return <section className={cx('rounded-2xl bg-surface shadow-card', className)} {...p} />
 }
 
 export type Tone =

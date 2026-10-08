@@ -37,7 +37,7 @@ export function branchSeed(excerpt: string, question: string): string {
   return `${SEED_HEAD}${take(excerpt.trim(), EXCERPT_MAX)}${SEED_QUESTION}${question.trim()}`
 }
 
-/** 分岔面板顯示開場訊息時拆回引用與問題；不是這個格式（例如舊的分岔）回傳 undefined */
+/** 分岔面板顯示開場訊息時拆回引用與問題；不是這個格式（例如開發期間建立的舊分岔）回傳 undefined */
 export function parseBranchSeed(text: string): { excerpt: string; question: string } | undefined {
   if (!text.startsWith(SEED_HEAD)) return undefined
   // 問題來自單行輸入框，不會含有分隔用的換行：取最後一個分隔
