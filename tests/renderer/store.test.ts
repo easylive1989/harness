@@ -266,3 +266,29 @@ describe('store.recheckClaude：claude 沒有值', () => {
     expect(call).toHaveBeenCalledTimes(2)
   })
 })
+
+describe('從訊息開分岔的草稿', () => {
+  test('每按一次分岔按鈕 seq 都遞增（再按同一則也是）；放棄後清掉', () => {
+    useStore.setState({ branchDrafts: {}, activeBranch: {} })
+    const { startBranchDraft, cancelBranchDraft } = useStore.getState()
+    startBranchDraft('t1', '有幾件事要先確認。')
+    const first = useStore.getState().branchDrafts.t1!
+    startBranchDraft('t1', '有幾件事要先確認。')
+    const second = useStore.getState().branchDrafts.t1!
+    expect(second.excerpt).toBe('有幾件事要先確認。')
+    expect(second.seq).toBeGreaterThan(first.seq)
+    cancelBranchDraft('t1')
+    expect(useStore.getState().branchDrafts.t1).toBeUndefined()
+  })
+
+  test('切到任何分岔（即使是已經在看的那個）都會放棄草稿；只影響那個任務', () => {
+    useStore.setState({ branchDrafts: {}, activeBranch: { t1: 'b1' } })
+    const { startBranchDraft, setActiveBranch } = useStore.getState()
+    startBranchDraft('t1', 'A')
+    startBranchDraft('t2', 'B')
+    setActiveBranch('t1', 'b1')
+    expect(useStore.getState().branchDrafts.t1).toBeUndefined()
+    expect(useStore.getState().branchDrafts.t2?.excerpt).toBe('B')
+    expect(useStore.getState().activeBranch.t1).toBe('b1')
+  })
+})

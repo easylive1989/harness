@@ -17,6 +17,11 @@ export interface State {
   /** 打開設定前的畫面：設定頁的「返回」回到這裡 */
   settingsReturn?: View
   activeBranch: Record<string, string | undefined>
+  /**
+   * 從 Claude 訊息開分岔的草稿（引用的訊息原文），以任務為鍵；送出問題前不會建立任何東西。
+   * seq 每按一次分岔按鈕就遞增：再按同一則訊息也會把焦點移回問題輸入框
+   */
+  branchDrafts: Record<string, { excerpt: string; seq: number } | undefined>
   feedback: Record<string, FeedbackItem[]>
   /** id 每次遞增：同樣的錯誤再出現一次也會重新計時 */
   toast?: { id: number; text: string }
@@ -25,7 +30,10 @@ export interface State {
   apply(e: AppEvent): void
   open(view: View): Promise<void>
   act<T>(fn: () => Promise<T>): Promise<T | undefined>
+  /** 切到某個分岔（即使是已經在看的那個）：一併放棄這個任務的分岔草稿 */
   setActiveBranch(taskId: string, branchId?: string): void
+  startBranchDraft(taskId: string, excerpt: string): void
+  cancelBranchDraft(taskId: string): void
   addFeedback(taskId: string, item: FeedbackItem): void
   removeFeedback(taskId: string, anchor: string): void
   clearFeedback(taskId: string): void
@@ -41,6 +49,7 @@ export const CLAUDE_RECHECK_MS = 5000
 // 上次因視窗取得焦點而重新偵測的時間（節流用）
 let lastClaudeRecheck = -Infinity
 let toastSeq = 0
+let draftSeq = 0
 /** 正在讀取時間軸的任務 → 讀取期間收到的即時事件（快照回來後併進去） */
 const loadingTimelines = new Map<string, TimelineEvent[]>()
 /** 每份時間軸已有的事件 id（以陣列本身為鍵，直接 setState 換掉陣列時會自動重建） */
@@ -64,6 +73,7 @@ export const useStore = create<State>((set, get) => ({
   timelines: {},
   view: { kind: 'new' },
   activeBranch: {},
+  branchDrafts: {},
   feedback: {},
 
   init() {
@@ -167,7 +177,16 @@ export const useStore = create<State>((set, get) => ({
   },
 
   setActiveBranch: (taskId, branchId) =>
-    set((s) => ({ activeBranch: { ...s.activeBranch, [taskId]: branchId } })),
+    set((s) => ({
+      activeBranch: { ...s.activeBranch, [taskId]: branchId },
+      branchDrafts: { ...s.branchDrafts, [taskId]: undefined }
+    })),
+  startBranchDraft: (taskId, excerpt) =>
+    set((s) => ({ branchDrafts: { ...s.branchDrafts, [taskId]: { excerpt, seq: ++draftSeq } } })),
+  cancelBranchDraft: (taskId) =>
+    set((s) =>
+      s.branchDrafts[taskId] ? { branchDrafts: { ...s.branchDrafts, [taskId]: undefined } } : {}
+    ),
   addFeedback: (taskId, item) =>
     set((s) => ({
       feedback: {

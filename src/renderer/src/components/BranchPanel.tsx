@@ -50,11 +50,13 @@ function BranchInput({ disabled, onSend }: { disabled: boolean; onSend: (text: s
 export interface BranchDraft {
   /** 引用的 Claude 訊息（原文） */
   excerpt: string
+  /** 每按一次分岔按鈕就變：再按同一則訊息時把焦點移回問題輸入框 */
+  seq: number
   /** 正在建立分岔 */
   pending: boolean
   onSubmit: (question: string) => void
-  /** 放棄草稿；refocus（預設）時焦點回到按下的分岔按鈕 */
-  onCancel: (refocus?: boolean) => void
+  /** 放棄草稿（焦點回到按下的分岔按鈕） */
+  onCancel: () => void
 }
 
 /** 引用的訊息：最多 3 行，長的可以展開 */
@@ -86,10 +88,10 @@ function Quote({ text, toggle = true }: { text: string; toggle?: boolean }) {
 function NewBranchForm({ draft, blocked }: { draft: BranchDraft; blocked: boolean }) {
   const [text, setText] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
-  // 按下訊息旁的分岔按鈕（或換了引用的訊息）後，焦點移到問題輸入框
+  // 按下訊息旁的分岔按鈕（換了引用的訊息時表單重新掛上；再按同一則時 seq 變了）後，焦點移到問題輸入框
   useEffect(() => {
     inputRef.current?.focus()
-  }, [draft.excerpt])
+  }, [draft.seq])
   const submit = (e: FormEvent) => {
     e.preventDefault()
     const q = text.trim()
@@ -246,13 +248,12 @@ export function BranchPanel({
                 aria-pressed={!drafting && x.id === b?.id}
                 // 建立分岔後焦點移到這裡（ClarifyScreen）
                 data-branch-chip={x.id}
-                onClick={() => {
-                  // 改看既有的分岔：放棄還沒送出的新分岔（焦點留在這裡）
-                  if (drafting) draft.onCancel(false)
-                  setActiveBranch(task.id, x.id)
-                }}
+                // 新分岔建立中不能切走：建立完成會自己切到新分岔，失敗時輸入的問題還在
+                disabled={!!drafting && draft.pending}
+                // 改看既有的分岔：store 一併放棄還沒送出的新分岔（焦點留在這裡）
+                onClick={() => setActiveBranch(task.id, x.id)}
                 className={cx(
-                  'cursor-pointer rounded-full px-2.5 py-1',
+                  'cursor-pointer rounded-full px-2.5 py-1 disabled:cursor-default disabled:opacity-50',
                   !drafting && x.id === b?.id
                     ? 'bg-brand-soft font-medium text-brand-ink'
                     : 'bg-fill text-muted'

@@ -51,7 +51,12 @@ const talk = [
 beforeEach(() => {
   vi.mocked(call).mockClear()
   resetStoreInternals()
-  useStore.setState({ activeBranch: { t1: 'b2' }, timelines: { t1: [] }, toast: undefined })
+  useStore.setState({
+    activeBranch: { t1: 'b2' },
+    branchDrafts: {},
+    timelines: { t1: [] },
+    toast: undefined
+  })
 })
 
 test('沒有分岔時顯示說明', () => {
@@ -187,21 +192,35 @@ test('從訊息開的分岔：第一則訊息分成引用（去掉 Markdown）�
   expect(screen.queryByText(/針對以下內容/)).not.toBeInTheDocument()
 })
 
-test('正在開新分岔時顯示問題輸入框；點其他分岔就取消', async () => {
-  const onCancel = vi.fn()
-  render(
-    <BranchPanel
-      task={task}
-      events={talk}
-      draft={{ excerpt: '會有騷擾的風險。', pending: false, onSubmit: vi.fn(), onCancel }}
-    />
-  )
+test('正在開新分岔時顯示問題輸入框；點分岔標籤就切過去（store 會放棄草稿）', async () => {
+  useStore.getState().startBranchDraft('t1', '會有騷擾的風險。')
+  const draft = {
+    ...useStore.getState().branchDrafts.t1!,
+    pending: false,
+    onSubmit: vi.fn(),
+    onCancel: vi.fn()
+  }
+  render(<BranchPanel task={task} events={talk} draft={draft} />)
   expect(screen.getByRole('form', { name: '新分岔' })).toBeInTheDocument()
   // 分岔的內容先收起來，不會同時出現兩個輸入框
   expect(screen.queryByRole('textbox', { name: '分岔訊息' })).not.toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: /計數存放位置 · 已帶回/ }))
-  expect(onCancel).toHaveBeenCalled()
   expect(useStore.getState().activeBranch.t1).toBe('b1')
+  expect(useStore.getState().branchDrafts.t1).toBeUndefined()
+})
+
+test('新分岔建立中停用分岔標籤', async () => {
+  render(
+    <BranchPanel
+      task={task}
+      events={talk}
+      draft={{ excerpt: 'x', seq: 1, pending: true, onSubmit: vi.fn(), onCancel: vi.fn() }}
+    />
+  )
+  const chip = screen.getByRole('button', { name: /計數存放位置 · 已帶回/ })
+  expect(chip).toBeDisabled()
+  await userEvent.click(chip)
+  expect(useStore.getState().activeBranch.t1).toBe('b2')
 })
 
 test('唯讀時不顯示新分岔的輸入框', () => {
@@ -210,7 +229,7 @@ test('唯讀時不顯示新分岔的輸入框', () => {
       task={task}
       events={talk}
       readOnly
-      draft={{ excerpt: 'x', pending: false, onSubmit: vi.fn(), onCancel: vi.fn() }}
+      draft={{ excerpt: 'x', seq: 1, pending: false, onSubmit: vi.fn(), onCancel: vi.fn() }}
     />
   )
   expect(screen.queryByRole('form', { name: '新分岔' })).not.toBeInTheDocument()
@@ -224,7 +243,7 @@ test('取消新分岔、回到原本的分岔時捲到最底（重新畫出的�
     get: () => 500
   })
   try {
-    const draft = { excerpt: 'x', pending: false, onSubmit: vi.fn(), onCancel: vi.fn() }
+    const draft = { excerpt: 'x', seq: 1, pending: false, onSubmit: vi.fn(), onCancel: vi.fn() }
     const view = (d?: typeof draft) => (
       <BranchPanel task={{ ...task, branches: [open] }} events={talk} draft={d} />
     )

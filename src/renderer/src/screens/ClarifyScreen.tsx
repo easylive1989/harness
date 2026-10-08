@@ -1,5 +1,5 @@
 // src/renderer/src/screens/ClarifyScreen.tsx
-import { type ReactNode, useEffect, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useRef } from 'react'
 import { flushSync } from 'react-dom'
 import type { Task } from '@shared/types'
 import { call } from '../api'
@@ -31,7 +31,11 @@ export function ClarifyScreen({
 }) {
   const act = useStore((s) => s.act)
   const setActiveBranch = useStore((s) => s.setActiveBranch)
-  const activeBranch = useStore((s) => s.activeBranch[task.id])
+  const startBranchDraft = useStore((s) => s.startBranchDraft)
+  const cancelBranchDraft = useStore((s) => s.cancelBranchDraft)
+  // 從訊息開分岔：先在分岔面板問使用者想討論什麼，送出問題才建立分岔（取消就什麼都不建立）。
+  // 草稿放在 store：切到任何分岔（分岔標籤、問題卡片的「查看分岔」「升級成分岔」、建立完成）都會放棄它
+  const draft = useStore((s) => s.branchDrafts[task.id])
   const events = useTimeline(task.id)
   // 卡片內容（反問回覆等）只改 task 不加事件，所以也看 updatedAt
   const {
@@ -43,12 +47,10 @@ export function ClarifyScreen({
   const busy = isBusy(task)
   // 問題卡片在等反問的回答時自己會顯示等待中，底部就不再重複顯示「處理中」
   const cardWaiting = task.questions.some((q) => awaitingCounterReply(task, q))
-  // 從訊息開分岔：先在分岔面板問使用者想討論什麼，送出問題才建立分岔（取消就什麼都不建立）。
-  // 記下引用的訊息、按下的分岔按鈕（取消後焦點回去）與當時顯示的分岔
-  const [draft, setDraft] = useState<{ excerpt: string; trigger: HTMLElement; branch?: string }>()
-  // 草稿期間換了分岔（問題卡片的「升級成分岔」「查看分岔」，或建立完成）：放棄草稿，
-  // 分岔面板才看得到那個分岔（React 文件建議的「render 期間依前一個值調整 state」，不用 effect）
-  if (draft && draft.branch !== activeBranch) setDraft(undefined)
+  // 按下的分岔按鈕：取消後焦點回到它（在事件裡寫入）
+  const draftTrigger = useRef<HTMLElement | null>(null)
+  // 離開釐清畫面（換階段或換任務）就放棄草稿，回來時不會冒出舊的輸入框
+  useEffect(() => () => cancelBranchDraft(task.id), [task.id, cancelBranchDraft])
   const [branching, runBranch] = usePending()
   const composerRef = useRef<HTMLInputElement>(null)
   // 跳到指定的問題：等時間軸畫出那張卡片（或已答列）後才捲，同一次指定只捲一次。
@@ -73,7 +75,7 @@ export function ClarifyScreen({
         })
       )
       if (!b) return
-      // 換到新分岔（上面的檢查會放棄草稿）；畫出來之後把焦點移到新分岔的標籤
+      // 換到新分岔（store 一併放棄草稿）；畫出來之後把焦點移到新分岔的標籤
       flushSync(() => setActiveBranch(task.id, b.id))
       document.querySelector<HTMLElement>(`[data-branch-chip="${b.id}"]`)?.focus()
     })
@@ -100,7 +102,10 @@ export function ClarifyScreen({
                 onBranchFrom={
                   busy
                     ? undefined
-                    : (excerpt, trigger) => setDraft({ excerpt, trigger, branch: activeBranch })
+                    : (excerpt, trigger) => {
+                        draftTrigger.current = trigger
+                        startBranchDraft(task.id, excerpt)
+                      }
                 }
                 branchPending={branching}
                 onOpenStage={onOpenStage}
@@ -137,11 +142,12 @@ export function ClarifyScreen({
         draft={
           draft && {
             excerpt: draft.excerpt,
+            seq: draft.seq,
             pending: branching,
             onSubmit: (q) => void createBranch(draft.excerpt, q),
-            onCancel: (refocus = true) => {
-              setDraft(undefined)
-              if (refocus) draft.trigger.focus()
+            onCancel: () => {
+              cancelBranchDraft(task.id)
+              draftTrigger.current?.focus()
             }
           }
         }
