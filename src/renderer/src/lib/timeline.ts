@@ -23,7 +23,8 @@ const TOOL_LABEL: Record<string, string> = {
   WebSearch: '搜尋網路',
   Agent: '子代理',
   Task: '子代理',
-  TodoWrite: '待辦'
+  TodoWrite: '待辦',
+  ToolSearch: '載入工具'
 }
 
 export type ToolCall = NonNullable<TimelineEvent['tool']>

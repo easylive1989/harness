@@ -2145,6 +2145,13 @@ describe('PermissionGate', () => {
     expect((await call('TodoWrite', {})).behavior).toBe('allow')
   })
 
+  test('ToolSearch 永遠允許：Claude Code 把 MCP 工具的 schema 延後載入，要先用它才能正確呼叫 harness 工具', async () => {
+    const { call, callHook } = setup('clarify')
+    const input = { query: 'select:mcp__harness__ask_user', max_results: 1 }
+    expect((await call('ToolSearch', input)).behavior).toBe('allow')
+    expect(await callHook('ToolSearch', input)).toBe('allow')
+  })
+
   test('只信任 app 自己註冊（source: sdk）的 harness MCP 伺服器', async () => {
     const { call } = setup('implement')
     expect(
@@ -2463,7 +2470,9 @@ export type PermissionGate = (...args: Parameters<CanUseTool>) => Promise<Permis
 
 const READ = new Set(['Read', 'Glob', 'Grep', 'LS'])
 const WRITE = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
-const ALWAYS = new Set(['TodoWrite', 'Task', 'Agent'])
+// ToolSearch 只回傳已提供工具的 schema（不執行任何東西）；Claude Code 會把 MCP 工具延後載入，
+// 不允許它的話 Claude 拿不到 harness 工具的參數格式，只能猜
+const ALWAYS = new Set(['TodoWrite', 'Task', 'Agent', 'ToolSearch'])
 const NEEDS_APPROVAL = new Set(['WebFetch', 'WebSearch'])
 const PATH_KEYS = ['file_path', 'notebook_path', 'path'] as const
 
@@ -11729,7 +11738,8 @@ const TOOL_LABEL: Record<string, string> = {
   WebSearch: '搜尋網路',
   Agent: '子代理',
   Task: '子代理',
-  TodoWrite: '待辦'
+  TodoWrite: '待辦',
+  ToolSearch: '載入工具'
 }
 
 export type ToolCall = NonNullable<TimelineEvent['tool']>

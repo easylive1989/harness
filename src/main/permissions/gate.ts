@@ -47,7 +47,9 @@ export type PermissionGate = (...args: Parameters<CanUseTool>) => Promise<Permis
 
 const READ = new Set(['Read', 'Glob', 'Grep', 'LS'])
 const WRITE = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
-const ALWAYS = new Set(['TodoWrite', 'Task', 'Agent'])
+// ToolSearch 只回傳已提供工具的 schema（不執行任何東西）；Claude Code 會把 MCP 工具延後載入，
+// 不允許它的話 Claude 拿不到 harness 工具的參數格式，只能猜
+const ALWAYS = new Set(['TodoWrite', 'Task', 'Agent', 'ToolSearch'])
 const NEEDS_APPROVAL = new Set(['WebFetch', 'WebSearch'])
 const PATH_KEYS = ['file_path', 'notebook_path', 'path'] as const
 

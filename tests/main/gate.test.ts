@@ -72,6 +72,13 @@ describe('PermissionGate', () => {
     expect((await call('TodoWrite', {})).behavior).toBe('allow')
   })
 
+  test('ToolSearch 永遠允許：Claude Code 把 MCP 工具的 schema 延後載入，要先用它才能正確呼叫 harness 工具', async () => {
+    const { call, callHook } = setup('clarify')
+    const input = { query: 'select:mcp__harness__ask_user', max_results: 1 }
+    expect((await call('ToolSearch', input)).behavior).toBe('allow')
+    expect(await callHook('ToolSearch', input)).toBe('allow')
+  })
+
   test('只信任 app 自己註冊（source: sdk）的 harness MCP 伺服器', async () => {
     const { call } = setup('implement')
     expect(
