@@ -9,7 +9,15 @@ import {
   MAX_IMAGE_BYTES,
   MAX_IMAGES
 } from '@shared/images'
-import { type Channel, type ClaudeStatus, MODELS, type ModelId, type Settings } from '@shared/types'
+import {
+  type Channel,
+  type ClaudeStatus,
+  MODELS,
+  type ModelId,
+  type Settings,
+  WORKSPACES,
+  type WorkspaceMode
+} from '@shared/types'
 
 const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/
 
@@ -80,6 +88,11 @@ export function assertModel(value: unknown): ModelId {
   return value as ModelId
 }
 
+export function assertWorkspace(value: unknown): WorkspaceMode {
+  if (!WORKSPACES.some((w) => w.id === value)) throw new Error('無效的工作方式')
+  return value as WorkspaceMode
+}
+
 const nonEmpty = (v: unknown, what: string) => {
   if (typeof v !== 'string' || !v.trim()) throw new Error(`${what}必須是非空白的文字`)
   return v.trim()
@@ -107,6 +120,7 @@ const SETTINGS_VALIDATORS: { [K in keyof Settings]-?: (v: unknown) => Settings[K
     if (!MODELS.some((m) => m.id === v)) throw new Error('不支援的模型')
     return v as ModelId
   },
+  defaultWorkspace: (v) => assertWorkspace(v),
   worktreeRoot: (v) => {
     const p = nonEmpty(v, 'worktree 位置')
     if (!isAbsolute(p)) throw new Error('worktree 位置必須是絕對路徑')

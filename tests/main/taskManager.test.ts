@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, onTestFinished, test, vi } from 'vitest'
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AppEvent } from '@shared/ipc'
+import type { WorkspaceMode } from '@shared/types'
 import { IMPLEMENT_START_REF, msgDisplay, startsImplementation } from '@shared/protocol'
 import { BUILTIN_TOOLS } from '../../src/main/permissions/gate'
 import { Repository } from '../../src/main/store/repository'
@@ -38,12 +39,13 @@ async function setup(over: Partial<TaskManagerDeps> = {}) {
     ...over
   })
   await tm.init()
-  const create = async () => {
+  const create = async (workspace?: WorkspaceMode) => {
     const t = await tm.createTask({
       repoId: 'r1',
       request: '加上登入失敗鎖定',
       baseBranch: 'main',
-      model: 'claude-opus-5-5'
+      model: 'claude-opus-5-5',
+      ...(workspace ? { workspace } : {})
     })
     await tm.whenIdle(t.id)
     return t.id
@@ -1159,13 +1161,13 @@ function deferred<T = void>() {
   return { promise, resolve }
 }
 
-async function toReviewing(over: Partial<TaskManagerDeps> = {}) {
+async function toReviewing(over: Partial<TaskManagerDeps> = {}, workspace?: WorkspaceMode) {
   const ctx = await setup(over)
   ctx.claude.script = async ({ call, sink }) => {
     if (call === 0) await sink.proposeSpec(spec)
     if (call === 2) await sink.submitReport(sampleReport)
   }
-  const id = await ctx.create()
+  const id = await ctx.create(workspace)
   await ctx.tm.approveSpec(id)
   await ctx.tm.whenIdle(id)
   await ctx.tm.send(id, 'main', '完成')
@@ -1174,6 +1176,124 @@ async function toReviewing(over: Partial<TaskManagerDeps> = {}) {
   ctx.claude.script = async () => []
   return { ...ctx, id }
 }
+
+describe('TaskManager：branch 模式', () => {
+  test('在原 repo 資料夾開新分支，Claude 在原 repo 工作', async () => {
+    const { tm, claude, git, create } = await setup()
+    const id = await create('branch')
+    const t = tm.get(id)
+    expect(git.calls).toEqual([`branch /repos/shop-api harness/20261007-${id} main`])
+    expect(t).toMatchObject({ workspace: 'branch', worktreePath: '/repos/shop-api' })
+    expect(claude.calls[0].options.cwd).toBe('/repos/shop-api')
+    // 沒指定時是 worktree，任務上不記 workspace
+    const wt = await create()
+    expect(tm.get(wt).workspace).toBeUndefined()
+    expect(git.calls.at(-1)).toMatch(/^worktree /)
+  })
+
+  test('原 repo 有未提交變更時拒絕建立，不開分支也不留下任務', async () => {
+    const { tm, git, create } = await setup()
+    git.state.clean = false
+    await expect(create('branch')).rejects.toThrow('原 repo 有未提交的變更')
+    expect(git.calls).toEqual([])
+    expect(tm.list()).toEqual([])
+  })
+
+  test('同一個 repo 已有進行中的 branch 任務時拒絕建立；同時送出的兩個請求只有一個成功', async () => {
+    const { tm, git, create } = await setup()
+    const results = await Promise.allSettled([create('branch'), create('branch')])
+    expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected'])
+    expect(git.calls.filter((c) => c.startsWith('branch '))).toHaveLength(1)
+    const first = tm.list()[0]
+    await expect(create('branch')).rejects.toThrow(`已有進行中的 branch 任務「${first.title}」`)
+    // worktree 任務不受限制
+    await create('worktree')
+    // 丟棄之後就能再建立
+    git.state.clean = true
+    await tm.discard(first.id)
+    await create('branch')
+    expect(
+      tm.list().filter((t) => t.workspace === 'branch' && t.status !== 'discarded')
+    ).toHaveLength(1)
+  })
+
+  test('合併：先切回基準分支再合併', async () => {
+    const { tm, git, id } = await toReviewing({}, 'branch')
+    const { branch } = tm.get(id)
+    git.calls.length = 0
+    await tm.merge(id)
+    expect(git.calls).toEqual(['checkout main', `merge ${branch} main`])
+    expect(git.state.current).toBe('main')
+    expect(tm.get(id).status).toBe('done')
+  })
+
+  test('合併失敗：切回任務分支，任務維持待審閱', async () => {
+    const { tm, git, id } = await toReviewing({}, 'branch')
+    const { branch } = tm.get(id)
+    git.merge = async () => {
+      throw new Error('CONFLICT')
+    }
+    git.calls.length = 0
+    await expect(tm.merge(id)).rejects.toThrow('CONFLICT')
+    expect(git.calls).toEqual(['checkout main', `checkout ${branch}`])
+    expect(git.state.current).toBe(branch)
+    expect(tm.get(id).status).toBe('reviewing')
+  })
+
+  test('合併前原 repo 有未提交變更就拒絕，不切換分支', async () => {
+    const { tm, git, id } = await toReviewing({}, 'branch')
+    git.state.clean = false
+    git.calls.length = 0
+    await expect(tm.merge(id)).rejects.toThrow('原 repo 有未提交的變更')
+    expect(git.calls).toEqual([])
+  })
+
+  test('開 PR 後切回基準分支，任務分支保留；之後清除只刪分支', async () => {
+    const { tm, git, id } = await toReviewing({}, 'branch')
+    const { branch } = tm.get(id)
+    git.calls.length = 0
+    await tm.createPullRequest(id)
+    expect(git.calls).toEqual([`pr ${branch} main 帳號鎖定`, 'checkout main'])
+    expect(tm.get(id).status).toBe('done')
+    await tm.discard(id)
+    expect(git.calls.at(-1)).toBe(`deleteBranch ${branch}`)
+  })
+
+  test('丟棄：放棄變更、切回基準分支並刪除分支，不執行 worktree remove', async () => {
+    const { tm, git, create } = await setup()
+    const id = await create('branch')
+    await tm.discard(id)
+    expect(git.calls.at(-1)).toBe(`discardBranch ${tm.get(id).branch} main`)
+    expect(git.calls.some((c) => c.startsWith('remove '))).toBe(false)
+    expect(git.state.current).toBe('main')
+  })
+
+  test('原 repo 被切到別的分支時，整理報告不 commit 並顯示錯誤', async () => {
+    const { tm, claude, git, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.proposeSpec(spec)
+      if (call === 2) await sink.submitReport(sampleReport)
+    }
+    const id = await create('branch')
+    await tm.approveSpec(id)
+    await tm.whenIdle(id)
+    git.state.current = 'main'
+    const commitAll = vi.spyOn(git, 'commitAll')
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    expect(commitAll).not.toHaveBeenCalled()
+    expect(tm.get(id).error).toContain(`請切回任務分支 ${tm.get(id).branch}`)
+  })
+
+  test('移除 repo：branch 任務只清分支，不對 repo 資料夾執行 worktree remove', async () => {
+    const { tm, git, create } = await setup()
+    const id = await create('branch')
+    const { branch } = tm.get(id)
+    git.calls.length = 0
+    await tm.removeRepo('r1')
+    expect(git.calls).toEqual([`discardBranch ${branch} main`])
+  })
+})
 
 describe('TaskManager：狀態一致性', () => {
   test('get() 回傳複本，改動不影響內部狀態', async () => {

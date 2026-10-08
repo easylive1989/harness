@@ -18,6 +18,7 @@ import { validateSettingsPatch } from '../../src/main/ipcGuards'
 
 const initial: Settings = {
   defaultModel: 'claude-opus-5-5',
+  defaultWorkspace: 'worktree',
   worktreeRoot: '/Users/me/.harness/worktrees',
   branchPrefix: 'harness/',
   alwaysAllowedCommands: ['git status', 'git diff', 'ls *'],
@@ -193,14 +194,24 @@ describe('SettingsScreen：模型與專案設定', () => {
     expect(radio(/Sonnet 5.5/)).toBeChecked()
     expect(radio(/Sonnet 5.5/)).toHaveFocus()
     expect(radio(/Opus 5.5/)).toBeEnabled()
-    expect(screen.getByRole('radiogroup')).toHaveAttribute('aria-busy', 'true')
+    expect(screen.getByRole('radiogroup', { name: '模型' })).toHaveAttribute('aria-busy', 'true')
     await act(async () => gate.resolve())
     await waitFor(() =>
       expect(useStore.getState().settings?.defaultModel).toBe('claude-sonnet-5-5')
     )
     expect(radio(/Sonnet 5.5/)).toBeChecked()
     expect(radio(/Sonnet 5.5/)).toHaveFocus()
-    expect(screen.getByRole('radiogroup')).not.toHaveAttribute('aria-busy')
+    expect(screen.getByRole('radiogroup', { name: '模型' })).not.toHaveAttribute('aria-busy')
+  })
+
+  test('點選預設工作方式即儲存', async () => {
+    render(<SettingsScreen />)
+    const group = screen.getByRole('radiogroup', { name: '預設工作方式' })
+    expect(within(group).getByRole('radio', { name: /^Worktree/ })).toBeChecked()
+    await userEvent.click(within(group).getByRole('radio', { name: /^Branch/ }))
+    expect(call).toHaveBeenCalledWith('settings:set', { defaultWorkspace: 'branch' })
+    await waitFor(() => expect(useStore.getState().settings?.defaultWorkspace).toBe('branch'))
+    expect(within(group).getByRole('radio', { name: /^Branch/ })).toBeChecked()
   })
 
   test('模型儲存失敗時回到原值並顯示 toast', async () => {

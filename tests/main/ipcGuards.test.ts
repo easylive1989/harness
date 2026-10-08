@@ -9,6 +9,7 @@ import {
   assertModel,
   assertString,
   assertVersion,
+  assertWorkspace,
   ensureClaudeReady,
   isPathInside,
   isSafeId,
@@ -138,6 +139,15 @@ describe('validateSettingsPatch', () => {
     )
   })
 
+  test('預設工作方式只接受 worktree 或 branch', () => {
+    expect(validateSettingsPatch({ defaultWorkspace: 'branch' })).toEqual({
+      defaultWorkspace: 'branch'
+    })
+    expect(assertWorkspace('worktree')).toBe('worktree')
+    for (const v of ['Branch', '', undefined, 1])
+      expect(() => assertWorkspace(v)).toThrow('無效的工作方式')
+  })
+
   test('claudePath 空字串或 undefined 代表自動偵測', () => {
     expect(validateSettingsPatch({ claudePath: '  ' })).toEqual({ claudePath: undefined })
     expect(validateSettingsPatch({ claudePath: undefined })).toEqual({ claudePath: undefined })
@@ -154,7 +164,8 @@ describe('validateSettingsPatch', () => {
     [{ alwaysAllowedCommands: ['ls', ' '] }, '允許清單'],
     [{ alwaysAllowedCommands: ['ls', 1] }, '允許清單'],
     [{ loadProjectSettings: 'yes' }, '載入專案設定'],
-    [{ defaultModel: 'gpt-4' }, '模型']
+    [{ defaultModel: 'gpt-4' }, '模型'],
+    [{ defaultWorkspace: 'folder' }, '工作方式']
   ])('拒絕 %j', (patch, msg) => {
     expect(() => validateSettingsPatch(patch)).toThrow(msg)
   })

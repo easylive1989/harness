@@ -6,19 +6,20 @@ import type { ImageInput, ImageRef } from '@shared/images'
 import type { AppEvent, CreateTaskInput } from '@shared/ipc'
 import { IMPLEMENT_START_REF, msg, msgDisplay } from '@shared/protocol'
 import { plannedTestsProblem, type ReportInput } from '@shared/report'
-import type {
-  Branch,
-  BranchConclusion,
-  Channel,
-  FeedbackItem,
-  PendingReport,
-  PermissionDecision,
-  PermissionRequest,
-  Report,
-  Task,
-  TaskStatus,
-  TimelineEvent,
-  VerificationResult
+import {
+  type Branch,
+  type BranchConclusion,
+  type Channel,
+  type FeedbackItem,
+  isBranchMode,
+  type PendingReport,
+  type PermissionDecision,
+  type PermissionRequest,
+  type Report,
+  type Task,
+  type TaskStatus,
+  type TimelineEvent,
+  type VerificationResult
 } from '@shared/types'
 import { AgentRun, type PromptImage, type QueryFn, type RunnerEvent } from '../agent/agentRun'
 import { MAIN_SYSTEM_APPEND } from '../agent/prompts'
@@ -142,6 +143,8 @@ export class TaskManager {
   private stoppedRuns = new WeakSet<AgentRun>()
   /** 正在移除的 repo：期間不能為它建立任務 */
   private removingRepos = new Set<string>()
+  /** 正在建立 branch 任務的 repo：兩個同時建立的請求不會都通過「沒有進行中的 branch 任務」檢查 */
+  private creatingBranchTask = new Set<string>()
   /** 報告整理中（邏輯狀態）：進入 reviewing 的同一步就清除 */
   private finalizing = new Set<string>()
   /** 報告整理的 promise，整個流程（含之後的時間軸寫入）結束才移除；whenIdle 用 */
@@ -331,18 +334,52 @@ export class TaskManager {
     const id = this.newId()
     const slug = `${this.now().slice(0, 10).replace(/-/g, '')}-${id}`
     const branch = `${settings.branchPrefix}${slug}`
-    const worktreePath = join(settings.worktreeRoot, repo.name, slug)
-    await this.d.git.createWorktree(repo.path, worktreePath, branch, input.baseBranch)
-    const images = await this.storeImages(id, input.images ?? [])
+    const workspace = input.workspace ?? 'worktree'
+    if (workspace === 'branch') {
+      // 鎖到任務放進清單為止：同時建立的請求不會都通過「沒有進行中的 branch 任務」檢查
+      if (this.creatingBranchTask.has(repo.id))
+        throw new Error('這個 repo 正在建立另一個 branch 任務')
+      this.creatingBranchTask.add(repo.id)
+    }
+    let images: StoredImage[]
+    let worktreePath: string
+    try {
+      if (workspace === 'branch') {
+        worktreePath = repo.path
+        await this.createBranchWorkspace(repo.id, repo.path, branch, input.baseBranch)
+      } else {
+        worktreePath = join(settings.worktreeRoot, repo.name, slug)
+        await this.d.git.createWorktree(repo.path, worktreePath, branch, input.baseBranch)
+      }
+      images = await this.storeImages(id, input.images ?? [])
+      this.tasks.set(id, this.newTask(id, repo.id, request, images, input, branch, worktreePath))
+    } finally {
+      if (workspace === 'branch') this.creatingBranchTask.delete(repo.id)
+    }
+    await this.update(id, () => undefined)
+    await this.send(id, 'main', request, { images })
+    return this.get(id)
+  }
+
+  private newTask(
+    id: string,
+    repoId: string,
+    request: string,
+    images: StoredImage[],
+    input: CreateTaskInput,
+    branch: string,
+    worktreePath: string
+  ): Task {
     const now = this.now()
-    const task: Task = {
+    return {
       id,
-      repoId: repo.id,
+      repoId,
       title: request.split('\n')[0].slice(0, 40),
       request,
       ...(images.length ? { requestImages: imageRefs(images) } : {}),
       baseBranch: input.baseBranch,
       branch,
+      ...(input.workspace === 'branch' ? { workspace: 'branch' as const } : {}),
       worktreePath,
       model: input.model,
       status: 'clarifying',
@@ -358,10 +395,24 @@ export class TaskManager {
       createdAt: now,
       updatedAt: now
     }
-    this.tasks.set(id, task)
-    await this.update(id, () => undefined)
-    await this.send(id, 'main', request, { images })
-    return this.get(id)
+  }
+
+  /**
+   * branch 模式：原 repo 沒有未提交的變更、同一個 repo 沒有其他進行中的 branch 任務，
+   * 才在原 repo 資料夾 checkout 新分支
+   */
+  private async createBranchWorkspace(repoId: string, path: string, branch: string, base: string) {
+    const active = [...this.tasks.values()].find(
+      (t) =>
+        t.repoId === repoId && isBranchMode(t) && t.status !== 'done' && t.status !== 'discarded'
+    )
+    if (active)
+      throw new Error(
+        `這個 repo 已有進行中的 branch 任務「${active.title}」，請先完成或丟棄它，或改用 worktree`
+      )
+    if (!(await this.d.git.isClean(path)))
+      throw new Error('原 repo 有未提交的變更，請先提交或清除後再用 branch 模式建立任務')
+    await this.d.git.createBranch(path, branch, base)
   }
 
   /** 把附加的圖片存到任務資料夾，回傳之後送給 Claude 與寫進時間軸用的資料 */
@@ -1189,6 +1240,7 @@ export class TaskManager {
       assertNotAborted()
       const t = this.task(taskId)
       const version = t.reportVersions.length + 1
+      await this.assertOnTaskBranch(t)
       // 重試時沒有新的變更：沿用上一次整理已經做好的 commit
       const commit =
         (await this.d.git.commitAll(t.worktreePath, `${t.title}（Harness 報告 v${version}）`)) ??
@@ -1299,6 +1351,14 @@ export class TaskManager {
       throw new Error(`Claude 正在執行，請等它停下來再${what}`)
   }
 
+  /** branch 模式：原 repo 被切到別的分支時不 commit，否則會把變更提交到別的分支上 */
+  private async assertOnTaskBranch(t: Task) {
+    if (!isBranchMode(t)) return
+    const current = await this.d.git.currentBranch(t.worktreePath)
+    if (current !== t.branch)
+      throw new Error(`原 repo 目前在 ${current}，請切回任務分支 ${t.branch} 再繼續`)
+  }
+
   createPullRequest(taskId: string): Promise<string> {
     return this.exclusive(taskId, async () => {
       const t = this.task(taskId)
@@ -1316,6 +1376,11 @@ export class TaskManager {
         x.prUrl = url
         x.status = 'done'
       })
+      // branch 模式：原 repo 切回基準分支，任務分支保留。切換失敗不影響 PR 的結果
+      if (isBranchMode(t))
+        await this.d.git
+          .checkout(t.worktreePath, t.baseBranch)
+          .catch(logError('開 PR 後切回基準分支失敗'))
       return url
     })
   }
@@ -1324,7 +1389,23 @@ export class TaskManager {
     return this.exclusive(taskId, async () => {
       const t = this.task(taskId)
       this.assertReviewable(t, '合併')
-      await this.d.git.merge((await this.repoOf(t)).path, t.branch, t.baseBranch)
+      const repoPath = (await this.repoOf(t)).path
+      if (isBranchMode(t)) {
+        // 原 repo 停在任務分支上：先切回基準分支；合併失敗就切回任務分支，讓任務能繼續修改
+        if (!(await this.d.git.isClean(repoPath)))
+          throw new Error('原 repo 有未提交的變更，請先處理後再合併')
+        await this.d.git.checkout(repoPath, t.baseBranch)
+        try {
+          await this.d.git.merge(repoPath, t.branch, t.baseBranch)
+        } catch (e) {
+          await this.d.git
+            .checkout(repoPath, t.branch)
+            .catch(logError('合併失敗後切回任務分支失敗'))
+          throw e
+        }
+      } else {
+        await this.d.git.merge(repoPath, t.branch, t.baseBranch)
+      }
       await this.update(taskId, (x) => {
         x.status = 'done'
       })
@@ -1337,7 +1418,7 @@ export class TaskManager {
       const t = this.task(taskId)
       if (this.finalizing.has(taskId)) throw new Error('正在整理報告，請稍候再丟棄')
       await this.stopAll(taskId, '任務已丟棄')
-      await this.d.git.removeWorktree((await this.repoOf(t)).path, t.worktreePath, t.branch)
+      await this.removeWorkspace((await this.repoOf(t)).path, t)
       await this.update(taskId, (x) => {
         if (x.status !== 'done' && x.status !== 'discarded')
           x.status = transition(x.status, 'DISCARDED')
@@ -1370,8 +1451,8 @@ export class TaskManager {
           await this.stopAll(id, '任務已刪除')
           const t = this.task(id)
           if (t.status !== 'discarded') {
-            if (gitOk) await this.d.git.removeWorktree(repo.path, t.worktreePath, t.branch)
-            else leftWorktrees.push(t.worktreePath)
+            if (gitOk) await this.removeWorkspace(repo.path, t)
+            else if (!isBranchMode(t)) leftWorktrees.push(t.worktreePath)
           }
           await this.forget(id)
         })
@@ -1383,6 +1464,16 @@ export class TaskManager {
     } finally {
       this.removingRepos.delete(repoId)
     }
+  }
+
+  /**
+   * 刪除任務的工作區與分支。branch 模式的工作區就是原 repo 資料夾，絕不能 worktree remove：
+   * 已完成的任務早已切回基準分支，只刪分支；其他任務放棄未提交的變更、切回基準分支再刪分支
+   */
+  private async removeWorkspace(repoPath: string, t: Task) {
+    if (!isBranchMode(t)) return this.d.git.removeWorktree(repoPath, t.worktreePath, t.branch)
+    if (t.status === 'done') return this.d.git.deleteBranch(repoPath, t.branch)
+    return this.d.git.discardBranch(repoPath, t.branch, t.baseBranch)
   }
 
   /** 拒絕這個任務等待中的核准、中止它所有的執行；abort 後仍不結束的程序不要卡住呼叫端：不再追蹤它 */

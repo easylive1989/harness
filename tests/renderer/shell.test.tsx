@@ -37,6 +37,7 @@ beforeEach(() => {
     claude: { found: true, loggedIn: true },
     settings: {
       defaultModel: 'claude-opus-5-5',
+      defaultWorkspace: 'worktree',
       worktreeRoot: '/wt',
       branchPrefix: 'harness/',
       alwaysAllowedCommands: [],

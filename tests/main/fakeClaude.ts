@@ -137,17 +137,39 @@ export class FakeClaude {
   }
 }
 
-export function fakeGit(): GitLike & { calls: string[] } {
+/** state：原 repo 目前的分支與是否乾淨（branch 模式用，測試可直接改） */
+export function fakeGit(): GitLike & {
+  calls: string[]
+  state: { current: string; clean: boolean }
+} {
   const calls: string[] = []
+  const state = { current: 'main', clean: true }
   return {
     calls,
+    state,
     isRepo: async () => true,
     repoRoot: async (d) => d,
     branches: async () => ['main'],
-    currentBranch: async () => 'main',
+    currentBranch: async () => state.current,
     branchInfo: async () => ({ branches: ['main'], current: 'main' }),
     createWorktree: async (_repo, wt, branch, base) => {
       calls.push(`worktree ${wt} ${branch} ${base}`)
+    },
+    isClean: async () => state.clean,
+    createBranch: async (repo, branch, base) => {
+      calls.push(`branch ${repo} ${branch} ${base}`)
+      state.current = branch
+    },
+    checkout: async (_repo, branch) => {
+      calls.push(`checkout ${branch}`)
+      state.current = branch
+    },
+    discardBranch: async (_repo, branch, base) => {
+      calls.push(`discardBranch ${branch} ${base}`)
+      state.current = base
+    },
+    deleteBranch: async (_repo, branch) => {
+      calls.push(`deleteBranch ${branch}`)
     },
     commitAll: async () => 'abc123',
     hooksPath: async () => undefined,

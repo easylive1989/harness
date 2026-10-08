@@ -44,6 +44,7 @@ beforeEach(() => {
     claude: { found: true, loggedIn: true },
     settings: {
       defaultModel: 'claude-sonnet-5-5',
+      defaultWorkspace: 'worktree',
       worktreeRoot: '/wt',
       branchPrefix: 'harness/',
       alwaysAllowedCommands: [],
@@ -79,9 +80,34 @@ describe('NewTaskScreen', () => {
       request: '加上登入失敗鎖定',
       images: [],
       baseBranch: 'trunk',
-      model: 'claude-opus-5-5'
+      model: 'claude-opus-5-5',
+      workspace: 'worktree'
     })
     await waitFor(() => expect(useStore.getState().view).toEqual({ kind: 'task', taskId: 'new1' }))
+  })
+
+  test('工作方式預設用設定的值；改選 branch 後建立任務帶 workspace=branch', async () => {
+    useStore.setState({
+      settings: { ...useStore.getState().settings!, defaultWorkspace: 'branch' }
+    })
+    const { unmount } = render(<NewTaskScreen />)
+    expect(screen.getByRole('radio', { name: /^Branch/ })).toBeChecked()
+    expect(screen.getByText(/會在原 repo 資料夾切換到新分支/)).toBeInTheDocument()
+    unmount()
+
+    useStore.setState({
+      settings: { ...useStore.getState().settings!, defaultWorkspace: 'worktree' }
+    })
+    render(<NewTaskScreen />)
+    expect(screen.getByRole('radio', { name: /^Worktree/ })).toBeChecked()
+    await userEvent.click(screen.getByRole('radio', { name: /^Branch/ }))
+    await waitFor(() => expect(screen.getByLabelText('從哪個分支開始')).toHaveValue('develop'))
+    await userEvent.type(screen.getByLabelText('需求'), '需求')
+    await userEvent.click(start())
+    expect(call).toHaveBeenCalledWith(
+      'tasks:create',
+      expect.objectContaining({ repoId: 'r1', baseBranch: 'develop', workspace: 'branch' })
+    )
   })
 
   test('建立失敗時顯示錯誤並留在原畫面', async () => {

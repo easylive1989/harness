@@ -67,6 +67,55 @@ describe('GitService', () => {
     }
   })
 
+  test('branch 模式：isClean、createBranch、在原 repo commit 與 diff', async () => {
+    expect(await git.isClean(repo)).toBe(true)
+    await writeFile(join(repo, 'untracked.txt'), 'x\n')
+    expect(await git.isClean(repo)).toBe(false)
+    await rm(join(repo, 'untracked.txt'))
+    await writeFile(join(repo, '.gitignore'), 'ignored.txt\n')
+    sh(repo, 'add', '.')
+    sh(repo, 'commit', '-q', '-m', 'ignore')
+    await writeFile(join(repo, 'ignored.txt'), 'keep\n')
+    expect(await git.isClean(repo)).toBe(true)
+
+    await git.createBranch(repo, 'harness/t1', 'main')
+    expect(await git.currentBranch(repo)).toBe('harness/t1')
+    await writeFile(join(repo, 'a.txt'), 'one\ntwo\n')
+    expect(await git.commitAll(repo, 'change')).toMatch(/^[0-9a-f]{40}$/)
+    expect(await git.diff(repo, 'main')).toContain('+two')
+    await git.checkout(repo, 'main')
+    expect(await git.currentBranch(repo)).toBe('main')
+    await expect(git.createBranch(repo, '--evil', 'main')).rejects.toThrow('不合法的分支名稱')
+  })
+
+  test('discardBranch：清掉未提交變更（保留 ignore 的檔案）、切回 base、刪除分支', async () => {
+    await writeFile(join(repo, '.gitignore'), 'ignored.txt\n')
+    sh(repo, 'add', '.')
+    sh(repo, 'commit', '-q', '-m', 'ignore')
+    await git.createBranch(repo, 'harness/t1', 'main')
+    await writeFile(join(repo, 'a.txt'), 'changed\n')
+    await writeFile(join(repo, 'new.txt'), 'new\n')
+    await writeFile(join(repo, 'ignored.txt'), 'keep\n')
+    await git.discardBranch(repo, 'harness/t1', 'main')
+    expect(await git.currentBranch(repo)).toBe('main')
+    expect(await git.branches(repo)).toEqual(['main'])
+    expect(existsSync(join(repo, 'new.txt'))).toBe(false)
+    expect(existsSync(join(repo, 'ignored.txt'))).toBe(true)
+    expect(sh(repo, 'show', 'HEAD:a.txt')).toBe('one\n')
+    expect(await git.isClean(repo)).toBe(true)
+  })
+
+  test('discardBranch：原 repo 已不在任務分支時不動工作目錄，只刪分支', async () => {
+    await git.createBranch(repo, 'harness/t1', 'main')
+    sh(repo, 'checkout', '-q', 'main')
+    await writeFile(join(repo, 'mine.txt'), 'user\n')
+    await git.discardBranch(repo, 'harness/t1', 'main')
+    expect(existsSync(join(repo, 'mine.txt'))).toBe(true)
+    expect(await git.branches(repo)).toEqual(['main'])
+    // 分支已經不在也不算失敗
+    await git.deleteBranch(repo, 'harness/t1')
+  })
+
   test('建立 worktree、commit、diff 與統計', async () => {
     await git.createWorktree(repo, wt, 'harness/t1', 'main')
     expect(await git.commitAll(wt, 'noop')).toBeNull()

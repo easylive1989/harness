@@ -2,7 +2,7 @@
 // 對照 docs/design/B5-Report.dc.html 的 <aside>：待送出的回饋、整體意見、收尾（PR／合併）。
 // 丟棄（已完成時是清除 worktree）在標題列的「⋯」選單（TaskMenu），每個階段都是同一個入口。
 import { useState } from 'react'
-import type { Task } from '@shared/types'
+import { isBranchMode, type Task } from '@shared/types'
 import { call, errorText } from '../api'
 import { Button, cx, Icons, textareaClass } from '../components/ui'
 import { isBusy } from '../lib/stage'
@@ -166,7 +166,10 @@ export function FeedbackPanel({
       {task.status === 'discarded' && (
         <div className="flex flex-col gap-1.5 text-[13px]">
           <span className="text-[15px] font-bold">已丟棄</span>
-          <span className="text-muted">worktree 與分支已刪除，報告仍然可以看與匯出。</span>
+          <span className="text-muted">
+            {isBranchMode(task) ? '分支已刪除，原 repo 已切回基準分支' : 'worktree 與分支已刪除'}
+            ，報告仍然可以看與匯出。
+          </span>
         </div>
       )}
 

@@ -11,7 +11,8 @@ import type {
   Repo,
   Settings,
   Task,
-  TimelineEvent
+  TimelineEvent,
+  WorkspaceMode
 } from './types'
 import type { ImageInput, ImageRef } from './images'
 
@@ -22,6 +23,8 @@ export interface CreateTaskInput {
   images?: ImageInput[]
   baseBranch: string
   model: ModelId
+  /** 沒給時是 worktree */
+  workspace?: WorkspaceMode
 }
 
 export interface IpcApi {
