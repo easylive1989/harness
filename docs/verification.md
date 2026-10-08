@@ -85,9 +85,11 @@ Task 37（端對端驗證後的體驗修正）處理了大部分項目；修正�
 ```bash
 npx electron-vite build
 node scripts/e2e/driver.mjs --dir <暫存資料夾> --fresh   # 建立示範 repo、settings.json，啟動 app
-node scripts/e2e/run.mjs 'await shot("01-settings"); return state()'
-node scripts/e2e/run.mjs --quit
+node scripts/e2e/run.mjs --dir <暫存資料夾> 'await shot("01-settings"); return state()'
+node scripts/e2e/run.mjs --dir <暫存資料夾> --quit
 ```
+
+驅動程式的指令伺服器（`127.0.0.1:47123`，`--port` 可改，`run.mjs` 用 `E2E_PORT`）執行收到的 JS，所以只接受帶權杖的請求：啟動時產生隨機權杖寫到 `<暫存資料夾>/token`（權限 0600，結束時刪除），`run.mjs` 讀它放在 `x-harness-e2e-token` 標頭；沒有權杖或權杖不對（401）、帶 `Origin` 標頭（瀏覽器發出的請求，403）、Host 不是 `127.0.0.1:<port>`（403）、不是 POST（405）或路徑不是 `/run`、`/quit`（404）的請求一律拒絕（2026-10-08 總審查後加上）。`--dir` 也可以改用環境變數 `E2E_DIR`。
 
 ## 第二輪端對端驗證（新增的測試、分岔主題、提示調整）
 

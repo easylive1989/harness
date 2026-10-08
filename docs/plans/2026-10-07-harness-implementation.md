@@ -22224,7 +22224,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `package.json`（devDependency `playwright`）、`eslint.config.mjs`（`scripts/**/*.mjs` 不要求回傳型別）
 - Create: `docs/verification.md`（記錄驗證結果）
 
-驅動程式用 `HARNESS_USER_DATA_DIR`（Task 25）把資料放在暫存資料夾，預先寫好 `settings.json` 的 `worktreeRoot`，以 stub 取代原生的選資料夾／存檔對話框；啟動後在 `127.0.0.1:47123` 接收一段段 async JS（可用 `page`、`shot`、`state`、`waitIdle` 等 helper），由 `run.mjs` 送出。示範 repo 另含 `.claude/settings.json` 的 allow 規則（`Bash(npm test:*)`、`Edit`），用來驗證 PreToolUse hook 仍會要求核准、釐清階段仍不能改檔。
+驅動程式用 `HARNESS_USER_DATA_DIR`（Task 25）把資料放在暫存資料夾，預先寫好 `settings.json` 的 `worktreeRoot`，以 stub 取代原生的選資料夾／存檔對話框；啟動後在 `127.0.0.1:47123` 接收一段段 async JS（可用 `page`、`shot`、`state`、`waitIdle` 等 helper），由 `run.mjs --dir <資料夾>` 送出（Task 39 起：只接受帶 `<資料夾>/token` 權杖的 POST，見 Task 39）。示範 repo 另含 `.claude/settings.json` 的 allow 規則（`Bash(npm test:*)`、`Edit`），用來驗證 PreToolUse hook 仍會要求核准、釐清階段仍不能改檔。
 
 **Step 1: 示範 repo 腳本**
 

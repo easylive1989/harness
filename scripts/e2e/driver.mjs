@@ -6,16 +6,20 @@
 //   <dir>/worktrees   任務的 worktree
 //   <dir>/harness-demo 示範 repo（scripts/create-demo-repo.sh 建立）
 //   <dir>/shots       截圖；<dir>/exports 匯出的 HTML；<dir>/app.log 主程序與 renderer 的輸出
+//   <dir>/token       指令伺服器的權杖（隨機產生，權限 0600，driver 結束時刪除）
 //
 // 啟動後在 127.0.0.1:<port> 聽指令：POST /run 的內容是一段 async JS，可用下方 helpers，
-// 回傳值以 JSON 傳回。用 scripts/e2e/run.mjs 送指令，例如：
-//   node scripts/e2e/run.mjs 'await shot("01-settings"); return await state()'
+// 回傳值以 JSON 傳回。指令能操作 app 與這台電腦，所以伺服器只接受：POST、路徑 /run 或 /quit、
+// Host 是 127.0.0.1:<port>、沒有 Origin（瀏覽器發出的請求都有）、x-harness-e2e-token 等於
+// <dir>/token 的請求，其他一律拒絕。用 scripts/e2e/run.mjs 送指令（它會讀 <dir>/token），例如：
+//   node scripts/e2e/run.mjs --dir <E2E 資料夾> 'await shot("01-settings"); return await state()'
 //
 // 用法：
 //   npx electron-vite build
 //   node scripts/e2e/driver.mjs --dir <E2E 資料夾> [--port 47123] [--fresh]
 // --fresh 會刪掉 <dir> 下的 userData、worktrees 與示範 repo 重新建立。
 import { execFileSync } from 'node:child_process'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import {
   createWriteStream,
   existsSync,
@@ -50,6 +54,9 @@ const paths = {
   exports: join(dir, 'exports')
 }
 const dataDir = join(paths.userData, 'harness')
+const tokenFile = join(dir, 'token')
+const token = randomBytes(32).toString('hex')
+const TOKEN_HEADER = 'x-harness-e2e-token'
 
 function prepare() {
   if (args.includes('--fresh')) {
@@ -263,11 +270,49 @@ async function runCode(code) {
   return fn(...names.map((n) => h[n]))
 }
 
+/** 權杖寫到 <dir>/token，只有自己讀得到；先刪掉舊檔，權限才一定是 0600 */
+function writeToken() {
+  rmSync(tokenFile, { force: true })
+  writeFileSync(tokenFile, token, { mode: 0o600 })
+}
+const removeToken = () => rmSync(tokenFile, { force: true })
+
+const sameToken = (got) => {
+  const a = Buffer.from(typeof got === 'string' ? got : '')
+  const b = Buffer.from(token)
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+/** 不接受的請求回傳 [狀態碼, 原因]；接受時 undefined */
+function rejection(req) {
+  if (req.method !== 'POST') return [405, '只接受 POST']
+  if (req.url !== '/run' && req.url !== '/quit') return [404, '沒有這個路徑']
+  // 瀏覽器發出的請求都帶 Origin（網頁不能用 fetch 對本機伺服器下指令）；Host 不對時可能是 DNS rebinding
+  if (req.headers.origin !== undefined) return [403, '拒絕瀏覽器發出的請求']
+  if (req.headers.host !== `127.0.0.1:${port}`) return [403, 'Host 不正確']
+  if (!sameToken(req.headers[TOKEN_HEADER])) return [401, '權杖不正確']
+  return undefined
+}
+
 prepare()
+writeToken()
+process.on('exit', removeToken)
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130))
 await launch()
 
 let busy = Promise.resolve()
 createServer((req, res) => {
+  const bad = rejection(req)
+  if (bad) {
+    logLine('driver', `rejected ${req.method} ${req.url}: ${bad[1]}`)
+    res.writeHead(bad[0], {
+      'content-type': 'application/json; charset=utf-8',
+      connection: 'close'
+    })
+    res.end(JSON.stringify({ ok: false, error: bad[1] }))
+    req.resume()
+    return
+  }
   let body = ''
   req.on('data', (c) => (body += c))
   req.on('end', () => {
@@ -293,5 +338,7 @@ createServer((req, res) => {
     })
   })
 }).listen(port, '127.0.0.1', () => {
-  console.log(`[e2e] app 已啟動；指令伺服器 http://127.0.0.1:${port}（E2E 資料夾 ${dir}）`)
+  console.log(
+    `[e2e] app 已啟動；指令伺服器 http://127.0.0.1:${port}（E2E 資料夾 ${dir}，權杖 ${tokenFile}）`
+  )
 })
