@@ -621,6 +621,13 @@ export class TaskManager {
         if (!e.ok && !e.interrupted) {
           await this.update(taskId, (t) => {
             this.setRunError(t, channel, e.error || 'Claude 執行失敗')
+            // 主線這段執行以失敗結束（例如訂閱額度用盡）：和程序崩潰一樣標為發生錯誤，畫面提供「繼續」
+            if (
+              e.final &&
+              channel === 'main' &&
+              (t.runState === 'running' || t.runState === 'waiting_permission')
+            )
+              t.runState = 'error'
           })
         }
         return

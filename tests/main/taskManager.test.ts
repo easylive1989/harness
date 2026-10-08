@@ -1234,7 +1234,7 @@ describe('TaskManager：狀態一致性', () => {
     await tm.send(id, 'main', '先失敗一次')
     await tm.whenIdle(id)
     expect(tm.get(id).error).toBe('執行時發生錯誤') // turn_end 失敗（不是丟出例外）也記錄錯誤
-    expect(tm.get(id).runState).toBe('idle')
+    expect(tm.get(id).runState).toBe('error')
 
     verify.mockImplementationOnce(async () => {
       await verifying.promise
@@ -1614,6 +1614,42 @@ describe('TaskManager：分岔的錯誤', () => {
     expect(tm.get(id).error).toBeUndefined()
   })
 
+  test('訂閱額度用盡：時間軸顯示限制資訊，任務標為發生錯誤，「繼續」以 resume 續接', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => [
+      {
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour' }
+      },
+      {
+        type: 'assistant',
+        parent_tool_use_id: null,
+        error: 'rate_limit',
+        message: { content: [] }
+      },
+      {
+        type: 'result',
+        subtype: 'success',
+        is_error: true,
+        result: 'Claude AI usage limit reached'
+      }
+    ]
+    await tm.send(id, 'main', '繼續做')
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({ runState: 'error', error: 'Claude AI usage limit reached' })
+    const notices = (await tm.timeline(id)).filter((e) => e.kind === 'system').map((e) => e.text)
+    expect(notices).toEqual(['已達到訂閱方案的用量上限（5 小時）。', '已達到用量上限，請稍後再試'])
+    claude.script = async () => []
+    await tm.resume(id)
+    await tm.whenIdle(id)
+    expect(claude.calls.at(-1)).toMatchObject({
+      prompt: expect.stringContaining('[resume]'),
+      options: { resume: 'sess-0' }
+    })
+    expect(tm.get(id)).toMatchObject({ runState: 'idle', error: undefined })
+  })
+
   test('分岔的 turn_end 失敗記在分岔上', async () => {
     const { tm, claude, create } = await setup()
     const id = await create()
@@ -1625,13 +1661,13 @@ describe('TaskManager：分岔的錯誤', () => {
     expect(tm.get(id).runState).toBe('idle')
   })
 
-  test('主線的錯誤仍記在任務上', async () => {
+  test('主線的錯誤仍記在任務上，標為發生錯誤（可「繼續」）', async () => {
     const { tm, claude, create } = await setup()
     const id = await create()
     claude.script = async () => [{ type: 'result', subtype: 'error_during_execution' }]
     await tm.send(id, 'main', '失敗')
     await tm.whenIdle(id)
-    expect(tm.get(id).error).toBe('執行時發生錯誤')
+    expect(tm.get(id)).toMatchObject({ runState: 'error', error: '執行時發生錯誤' })
     claude.script = async () => []
     await tm.send(id, 'main', '再一次')
     await tm.whenIdle(id)

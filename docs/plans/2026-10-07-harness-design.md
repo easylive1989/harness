@@ -56,7 +56,7 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 
 - 建立任務時即建立 worktree（`<worktreeRoot>/<repo>/<slug>`，分支 `<prefix><slug>`，從使用者選的 base branch）。原因：Claude Code session 綁定工作目錄，全程使用同一 cwd 才能安全地 resume 與 fork。釐清階段仍為唯讀。
 - 每個任務有一個主線 session（`mainSessionId`）與零到多個分岔 session。
-- 丟棄：任務標題列（階段切換旁）的「⋯」選單在釐清、規格、實作、報告每個階段都能丟棄，兩段式確認；Claude 執行中會先停止（`TaskManager.discard` 中止所有執行），整理報告中不能丟棄；丟棄後回到新任務頁並提示。已完成（開過 PR／合併）的任務只能清除 worktree；已丟棄的任務沒有選單。這是每個畫面唯一的丟棄入口（2026-10-08 端對端驗證後的決定）。
+- 丟棄：任務標題列（階段切換旁）的「⋯」選單在釐清、規格、實作、報告每個階段都能丟棄，兩段式確認；Claude 執行中會先停止（`TaskManager.discard` 中止所有執行），整理報告中不能丟棄；丟棄後回到新任務頁並提示。已完成（開過 PR／合併）的任務只能清除 worktree（`git worktree remove --force` 並刪除本機分支 `git branch -D`；已開的 PR 與已合併的內容不受影響，確認文字也這樣說明）；已丟棄的任務沒有選單。這是每個畫面唯一的丟棄入口（2026-10-08 端對端驗證後的決定）。
 
 ### 3.2 Agent SDK 使用方式
 
@@ -174,8 +174,8 @@ reviewing ──開 PR / 合併──▶ done        任何狀態 ──丟棄�
 ## 5. 錯誤處理
 
 - 找不到 `claude` 或未登入：設定頁與新任務頁顯示說明（請在終端機執行 `claude` 登入），停用開始按鈕。
-- 訂閱額度用盡／rate limit：顯示 SDK 回報的限制資訊，任務標為「暫停」，可稍後繼續。
-- SDK 程序崩潰或中斷：任務標為「已中斷」，保留 session id，可繼續。
+- 訂閱額度用盡／rate limit：SDK 的 `rate_limit_event`（每段執行每種狀態只報一次）與 assistant 的 `rate_limit` 錯誤在時間軸顯示為系統訊息（「已達到訂閱方案的用量上限（5 小時），約 … 重置。」）；這一輪以失敗的 `result` 結束時錯誤記在 `task.error`，主線標為「發生錯誤」（`runState: 'error'`），畫面顯示錯誤與「繼續」，稍後按「繼續」以 `resume` 續接（送 `[resume]`）。分岔的失敗記在分岔上，不影響主線。
+- SDK 程序崩潰（迭代丟出例外）：同樣記錄錯誤、主線標為「發生錯誤」，保留 session id，可「繼續」。關閉 app 時中止的執行標為「已中斷」（`runState: 'interrupted'`），下次啟動可「繼續」。使用者按停止造成的結束不算錯誤。
 - Claude 未依格式呼叫工具（例如釐清時直接用文字提問）：照常顯示文字訊息，使用者仍可在輸入框回覆。
 - `submit_report` 驗證失敗：把 zod 錯誤回給 Claude 要求修正。
 - Git 操作失敗：顯示指令與 stderr，不自動重試。git／gh 指令都有逾時上限（`GitService` 的 `timeouts` 可設定；預設 commit、合併、建立 worktree 120 秒，push 與 `gh pr create` 300 秒，其他 60 秒），逾時就終止整個程序群組（含 ssh、hook 等子程序）並回報「執行逾時」，不會一直卡住：整理報告時逾時就是整理失敗（可「繼續」重試，見 §3.8），開 PR／合併時逾時就顯示錯誤。
