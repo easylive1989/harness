@@ -600,9 +600,12 @@ export class TaskManager {
     return {
       askUser: (a) =>
         this.enqueue(taskId, async () => {
-          if (this.pendingCounter.get(taskId) === a.question_id) this.pendingCounter.delete(taskId)
-          // 新問題，或重新提問已回答過的問題：時間軸上依提問順序再放一張卡片
-          let added = false
+          // 回答反問後更新同一張卡片：卡片留在原位（反問與回答都在卡片裡）
+          const counterReply = this.pendingCounter.get(taskId) === a.question_id
+          if (counterReply) this.pendingCounter.delete(taskId)
+          // 其他情況（新問題、重新提問已回答或還開著的問題）：時間軸最新的位置再放一張卡片，
+          // 畫面只畫最後一張，使用者在底部就看得到（例如帶回分岔結論後 Claude 重新送出問題）
+          let added = !counterReply
           await this.update(taskId, (t) => {
             const fields = {
               text: a.question,
@@ -613,7 +616,6 @@ export class TaskManager {
             }
             const q = t.questions.find((x) => x.id === a.question_id)
             if (q) {
-              added = q.status === 'answered'
               Object.assign(q, fields, { status: 'open' as const, answer: undefined })
             } else {
               added = true

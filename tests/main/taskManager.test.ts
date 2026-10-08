@@ -157,6 +157,35 @@ describe('TaskManager：建立任務與釐清', () => {
     ])
     expect(q.recommendedOptionId).toBe('acct_ip')
     expect((await tm.timeline(id)).filter((e) => e.kind === 'assistant_text')).toHaveLength(0)
+    // 回答反問後更新的卡片留在原位：不另外放一張
+    expect((await tm.timeline(id)).filter((e) => e.kind === 'question')).toHaveLength(1)
+  })
+
+  test('重新提問還開著的問題（不是回答反問）時，卡片移到時間軸最新的位置', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async ({ call, sink }) => {
+      if (call === 0) await sink.askUser(askQ1)
+    }
+    const id = await create()
+    // 例如帶回分岔結論後，Claude 先說明再重新送出第一題（同一個 question_id，卡片還開著）
+    claude.script = async ({ call, sink }) => {
+      if (call !== 1) return
+      setTimeout(() => void sink.askUser({ ...askQ1, question: '計數單位（依分岔結論）' }), 20)
+      return [assistantText('採用分岔的鎖定規則。')]
+    }
+    await tm.send(id, 'main', '補充：只針對 /login')
+    await tm.whenIdle(id)
+    const tl = await tm.timeline(id)
+    expect(tl.map((e) => e.kind)).toEqual([
+      'user_text',
+      'question',
+      'user_text',
+      'assistant_text',
+      'question'
+    ])
+    expect(tl.filter((e) => e.kind === 'question').map((e) => e.ref)).toEqual(['q1', 'q1'])
+    expect(tm.get(id).questions).toHaveLength(1)
+    expect(tm.get(id).questions[0]).toMatchObject({ status: 'open', text: '計數單位（依分岔結論）' })
   })
 
   test('一般訊息寫入時間軸', async () => {
