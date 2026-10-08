@@ -48,12 +48,12 @@ export const updatePlanShape = {
     .min(1)
 }
 export const concludeBranchShape = {
-  // 從 Claude 訊息開出的分岔，暫定標題是使用者的問題；結論時換成整理過的主題
+  // 從 Claude 訊息開出的分岔，暫定標題是使用者的問題；結論時換成整理過的主題。
+  // 標題只是顯示用：太長就截斷、只有空白就變成空字串（TaskManager 保留原標題），
+  // 不要因為標題讓整個結論被拒絕
   title: z
     .string()
-    .trim()
-    .min(1)
-    .max(30)
+    .overwrite((s) => Array.from(s.trim()).slice(0, 30).join(''))
     .optional()
     .describe('這個分岔的主題，10–20 字（會取代目前的分岔標題）'),
   decision: z.string().min(1),

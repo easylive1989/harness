@@ -320,6 +320,14 @@ describe('TaskManager：分岔', () => {
     await tm.whenIdle(id)
     expect(tm.get(id).branches[0].title).toBe('鎖定期間要回什麼')
 
+    // 只有空白的標題（schema 整理成空字串）也保留原本的標題
+    claude.script = async ({ sink }) => {
+      await sink.concludeBranch({ title: '', decision: '回 429', rationale: '慣例', deferred: [] })
+    }
+    await tm.concludeBranch(id, b.id)
+    await tm.whenIdle(id)
+    expect(tm.get(id).branches[0].title).toBe('鎖定期間要回什麼')
+
     claude.script = async ({ sink }) => {
       await sink.concludeBranch({
         title: '鎖定期間的回應碼',

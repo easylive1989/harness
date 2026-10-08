@@ -669,7 +669,7 @@ export class TaskManager {
             if (b.status === 'concluded') throw new Error('這個分岔已經帶回主線')
             b.conclusion = { decision: a.decision, rationale: a.rationale, deferred: a.deferred }
             b.status = 'concluding'
-            // 暫定標題（使用者的問題或問題卡片的文字）換成 Claude 整理的主題
+            // 暫定標題（使用者的問題或問題卡片的文字）換成 Claude 整理的主題；空的就保留
             if (a.title) b.title = a.title
           })
         }),

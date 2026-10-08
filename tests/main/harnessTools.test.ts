@@ -157,11 +157,23 @@ describe('conclude_branch 的參數', () => {
   const schema = z.object(concludeBranchShape)
   const base = { decision: '用 Redis', rationale: '多台機器' }
 
-  test('title（分岔的主題）選填；有給時去掉前後空白，1–30 字', () => {
+  test('title（分岔的主題）選填：去掉前後空白、超過 30 字就截斷，只有空白當作沒給（不拒絕整個結論）', () => {
     expect(schema.parse(base).title).toBeUndefined()
     expect(schema.parse({ ...base, title: ' 計數存放位置 ' }).title).toBe('計數存放位置')
-    expect(schema.safeParse({ ...base, title: '   ' }).success).toBe(false)
-    expect(schema.safeParse({ ...base, title: '字'.repeat(31) }).success).toBe(false)
-    expect(schema.safeParse({ ...base, title: '字'.repeat(30) }).success).toBe(true)
+    expect(schema.parse({ ...base, title: '字'.repeat(31) }).title).toBe('字'.repeat(30))
+    expect(schema.parse({ ...base, title: '😀'.repeat(31) }).title).toBe('😀'.repeat(30))
+    // 空字串：TaskManager 保留原本的標題
+    expect(schema.parse({ ...base, title: '   ' }).title).toBe('')
+  })
+
+  test('給 Claude 的 JSON schema 裡 title 是選填的字串（沒有長度限制，說明寫 10–20 字）', () => {
+    const json = z.toJSONSchema(schema) as unknown as {
+      properties: { title: Record<string, unknown> }
+      required: string[]
+    }
+    expect(json.properties.title).toMatchObject({ type: 'string' })
+    expect(json.properties.title.maxLength).toBeUndefined()
+    expect(String(json.properties.title.description)).toContain('10–20 字')
+    expect(json.required).not.toContain('title')
   })
 })
