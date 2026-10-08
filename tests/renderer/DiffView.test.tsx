@@ -1,5 +1,5 @@
 // tests/renderer/DiffView.test.tsx
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { type ComponentProps, useState } from 'react'
 import { beforeEach, expect, test, vi } from 'vitest'
@@ -234,21 +234,22 @@ test('2 萬行的檔案只畫前 300 行，附上顯示全部的按鈕', () => {
     <DiffView taskId="t1" diff={bigDiff('src/huge.ts', 20000)} perFile={[]} notes={[]} />
   )
   expect(container.querySelectorAll('[data-line]')).toHaveLength(300)
-  expect(screen.getByRole('button', { name: '顯示全部（共 20000 行）' })).toBeInTheDocument()
+  // 大量 DOM 時 *ByRole 要算每個按鈕的名稱，非常慢：改用文字查詢
+  expect(screen.getByText('顯示全部（共 20000 行）')).toBeInTheDocument()
 })
 
-test('超過 1500 行才截斷；按顯示全部後全部畫出來', async () => {
+test('超過 1500 行才截斷；按顯示全部後全部畫出來', () => {
   const { container, unmount } = render(
     <DiffView taskId="t1" diff={bigDiff('src/a.ts', 1500)} perFile={[]} notes={[]} />
   )
   expect(container.querySelectorAll('[data-line]')).toHaveLength(1500)
-  expect(screen.queryByRole('button', { name: /顯示全部/ })).not.toBeInTheDocument()
+  expect(screen.queryByText(/顯示全部/)).not.toBeInTheDocument()
   unmount()
   const r = render(
     <DiffView taskId="t1" diff={bigDiff('src/a.ts', 1501)} perFile={[]} notes={[]} />
   )
   expect(r.container.querySelectorAll('[data-line]')).toHaveLength(300)
-  await userEvent.click(screen.getByRole('button', { name: '顯示全部（共 1501 行）' }))
+  fireEvent.click(screen.getByText('顯示全部（共 1501 行）'))
   expect(r.container.querySelectorAll('[data-line]')).toHaveLength(1501)
 })
 
@@ -264,7 +265,7 @@ test('要捲到的行在截斷範圍外時自動展開', () => {
     />
   )
   expect(container.querySelector('[data-anchor="diff:src/a.ts:1200"]')).toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /顯示全部/ })).not.toBeInTheDocument()
+  expect(screen.queryByText(/顯示全部/)).not.toBeInTheDocument()
 })
 
 test('匯出時鎖定檔與超過 3000 行的檔案只放摘要，也沒有錨點屬性', () => {
