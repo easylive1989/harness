@@ -25,8 +25,8 @@ import { useStickToBottom } from '../lib/useStickToBottom'
 import { useStore } from '../store'
 
 type ToolEvent = TimelineEvent & { tool: ToolCall }
-/** 工具呼叫的結果：失敗，或使用者在核准對話框拒絕 */
-type ToolOutcome = 'failed' | 'denied'
+/** 工具呼叫的結果：失敗、使用者在核准對話框拒絕，或 Harness 的規則擋下（reason：顯示的原因） */
+type ToolOutcome = { kind: 'failed' | 'denied' | 'blocked'; reason?: string }
 const isToolCall = (e: TimelineEvent): e is ToolEvent => e.kind === 'tool_call' && !!e.tool
 /** 進行中的步驟裡列出最近幾個工具呼叫 */
 const RECENT_TOOLS = 8
@@ -72,10 +72,15 @@ function ToolRows({
             </code>
             {waiting ? (
               <span className="ml-auto flex-none text-xs text-decision-ink">等待核准</span>
-            ) : outcome === 'denied' ? (
+            ) : outcome?.kind === 'denied' ? (
               <span className="ml-auto flex-none text-xs text-muted">已拒絕</span>
+            ) : outcome?.kind === 'blocked' ? (
+              // Harness 的規則擋下（預期中的事，不是失敗）：原因放在 title
+              <span className="ml-auto flex-none text-xs text-muted" title={outcome.reason}>
+                已阻擋
+              </span>
             ) : (
-              outcome === 'failed' && (
+              outcome?.kind === 'failed' && (
                 <span className="ml-auto flex-none text-xs text-danger">失敗</span>
               )
             )}
@@ -255,7 +260,13 @@ export function ImplementScreen({
   const outcomes = new Map<string, ToolOutcome>(
     events
       .filter((e) => e.kind === 'tool_result' && e.tool?.isError)
-      .map((e) => [e.tool!.id, e.tool!.denied ? 'denied' : 'failed'])
+      .map((e): [string, ToolOutcome] => [
+        e.tool!.id,
+        {
+          kind: e.tool!.denied ? 'denied' : e.tool!.blocked ? 'blocked' : 'failed',
+          reason: e.text
+        }
+      ])
   )
   // 重新提問過的問題只在最後一次出現的位置畫卡片
   const latest = latestQuestionEvents(events)

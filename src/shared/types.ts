@@ -162,6 +162,8 @@ export interface TimelineEvent {
     isError?: boolean
     /** 工具結果：使用者在核准對話框拒絕了這個呼叫 */
     denied?: boolean
+    /** 工具結果：Harness 的規則擋下了這個呼叫（階段不允許、worktree 外…），text 是原因 */
+    blocked?: boolean
   }
   /** question id / decision id / spec 版本 / report 版本；user_text 的實作起點標記（IMPLEMENT_START_REF） */
   ref?: string

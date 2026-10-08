@@ -44,6 +44,19 @@ export function toolTarget(tool: Pick<ToolCall, 'input'>, root?: string): string
   return root ? relativeTo(root, target) : target
 }
 
+/**
+ * 失敗的工具結果怎麼標：使用者在核准對話框拒絕、Harness 的規則擋下（階段不允許、worktree 外…）
+ * 都是預期中的事，用中性的顏色；真的失敗才是紅色的「工具錯誤」
+ */
+export function toolResultLabel(tool?: Pick<ToolCall, 'denied' | 'blocked'>): {
+  label: string
+  muted: boolean
+} {
+  if (tool?.denied) return { label: '已拒絕', muted: true }
+  if (tool?.blocked) return { label: '已阻擋', muted: true }
+  return { label: '工具錯誤', muted: false }
+}
+
 /** 工具呼叫的一行摘要，例如「讀取 src/auth/login.ts」 */
 export function toolSummary(tool: ToolCall, root?: string): string {
   const target = toolTarget(tool, root)

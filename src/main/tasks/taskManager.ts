@@ -117,6 +117,8 @@ export class TaskManager {
    * 那段執行結束時清掉（沒等到工具結果的也一併清掉）。
    */
   private deniedToolUses = new Map<string, AgentRun | undefined>()
+  /** Harness 規則擋下的 tool_use id → 提出的執行與原因：工具結果標成「已阻擋」；清除時機同上 */
+  private blockedToolUses = new Map<string, { run?: AgentRun; reason: string }>()
   /** 主線正在回答反問的問題卡片：這段期間的文字回覆寫進卡片 */
   private pendingCounter = new Map<string, string>()
   /** 報告整理中（邏輯狀態）：進入 reviewing 的同一步就清除 */
@@ -434,6 +436,9 @@ export class TaskManager {
       ],
       requestApproval: (req, signal) =>
         this.requestApproval(taskId, channel, owner.run, req, signal),
+      onBlocked: (toolUseId, reason) => {
+        if (toolUseId) this.blockedToolUses.set(toolUseId, { run: owner.run, reason })
+      },
       onApproved: (command, pattern) => {
         this.persist(taskId, (x) => {
           if (command && !x.approvedCommands.includes(command)) x.approvedCommands.push(command)
@@ -576,12 +581,20 @@ export class TaskManager {
         return
       case 'tool_result': {
         const denied = this.deniedToolUses.delete(e.id)
+        const blocked = this.blockedToolUses.get(e.id)
+        this.blockedToolUses.delete(e.id)
         if (e.isError) {
           await this.addTimeline(taskId, {
             channel,
             kind: 'tool_result',
-            text: e.text.slice(0, 2000),
-            tool: { id: e.id, name: '', isError: true, ...(denied ? { denied: true } : {}) }
+            // 規則擋下的顯示 Harness 的原因（SDK 的文字會帶「PreToolUse:… hook error:」之類的前綴）
+            text: (blocked?.reason || e.text).slice(0, 2000),
+            tool: {
+              id: e.id,
+              name: '',
+              isError: true,
+              ...(denied ? { denied: true } : blocked ? { blocked: true } : {})
+            }
           })
         }
         return
@@ -896,6 +909,7 @@ export class TaskManager {
 
   private forgetDenied(run: AgentRun) {
     for (const [id, r] of this.deniedToolUses) if (r === run) this.deniedToolUses.delete(id)
+    for (const [id, b] of this.blockedToolUses) if (b.run === run) this.blockedToolUses.delete(id)
   }
 
   private denyWaitersOf(run: AgentRun, message: string) {
@@ -1005,6 +1019,7 @@ export class TaskManager {
     await settlesWithin(Promise.all(marks), timeoutMs)
     // 中止後仍不結束的執行不會走到 onRunDone
     this.deniedToolUses.clear()
+    this.blockedToolUses.clear()
   }
 
   async resume(taskId: string) {

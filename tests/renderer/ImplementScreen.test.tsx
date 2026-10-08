@@ -282,7 +282,7 @@ const openQuestion = (id: string, text: string): Question => ({
 })
 const start = ev({ kind: 'user_text', text: msgDisplay.specApproved, ref: IMPLEMENT_START_REF })
 
-test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已拒絕」', async () => {
+test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已拒絕」、規則擋下的標「已阻擋」', async () => {
   useStore.setState({
     timelines: {
       t1: [
@@ -294,7 +294,13 @@ test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已
           text: '先不要刪',
           tool: { id: 'tu-d', name: '', isError: true, denied: true }
         }),
-        tool('Bash', { command: 'npm test' }, 'tu-b')
+        tool('Bash', { command: 'npm test' }, 'tu-b'),
+        tool('Read', { file_path: '/etc/hosts' }, 'tu-x'),
+        ev({
+          kind: 'tool_result',
+          text: '只能讀取 worktree 內的檔案',
+          tool: { id: 'tu-x', name: '', isError: true, blocked: true }
+        })
       ]
     }
   })
@@ -305,8 +311,13 @@ test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已
   expect(rows.map((r) => r.textContent)).toEqual([
     '指令npm test等待核准',
     '指令rm -rf dist已拒絕',
-    '指令npm test'
+    '指令npm test',
+    // Harness 規則擋下的：中性的「已阻擋」，原因在 title
+    '讀取/etc/hosts已阻擋'
   ])
+  const blocked = within(rows[3]).getByText('已阻擋')
+  expect(blocked).toHaveClass('text-muted')
+  expect(blocked).toHaveAttribute('title', '只能讀取 worktree 內的檔案')
   await screen.findByText('src/auth/lockout.ts')
 })
 

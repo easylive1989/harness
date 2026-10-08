@@ -183,6 +183,29 @@ test('分岔裡的工具錯誤以錯誤樣式顯示；處理中在常駐的 live
   expect(status).toHaveTextContent('Claude 正在回覆…')
 })
 
+test('分岔裡被 Harness 規則擋下或使用者拒絕的工具以中性的顏色顯示', () => {
+  render(
+    <BranchPanel
+      task={{ ...task, branches: [open] }}
+      events={[
+        ...talk,
+        ev('e4', {
+          kind: 'tool_result',
+          text: '分岔裡不能執行指令',
+          tool: { id: 'x', name: '', isError: true, blocked: true }
+        }),
+        ev('e5', {
+          kind: 'tool_result',
+          text: '先不要',
+          tool: { id: 'y', name: '', isError: true, denied: true }
+        })
+      ]}
+    />
+  )
+  expect(screen.getByText('已阻擋：分岔裡不能執行指令')).toHaveClass('text-muted')
+  expect(screen.getByText('已拒絕：先不要')).toHaveClass('text-muted')
+})
+
 test('從訊息開的分岔：第一則訊息分成引用（去掉 Markdown）與使用者的問題', () => {
   const seed = ev('e1', { text: '針對以下內容：\n建議改成 **429**\n\n我的問題：為什麼不是 423？' })
   render(<BranchPanel task={{ ...task, branches: [open] }} events={[seed]} />)

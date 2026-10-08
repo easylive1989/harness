@@ -25,10 +25,18 @@ export interface GateContext {
   getAllowedPatterns(): string[]
   requestApproval(req: ApprovalRequest, signal: AbortSignal): Promise<PermissionDecision>
   onApproved(command: string | undefined, rememberPattern?: string): void
+  /**
+   * Harness 的規則擋下了這個工具呼叫（階段不允許、worktree 外、核准後狀態已改變…），
+   * 不是使用者拒絕：時間軸上的工具結果標成「已阻擋」並顯示這個原因
+   */
+  onBlocked?(toolUseId: string | undefined, reason: string): void
 }
 
-/** evaluateTool 只需要規則相關的部分 */
-export type GateRules = Pick<GateContext, 'getPhase' | 'worktreePath' | 'getAllowedPatterns'>
+/** evaluateTool 只需要規則相關的部分（hook 另外會通知擋下） */
+export type GateRules = Pick<
+  GateContext,
+  'getPhase' | 'worktreePath' | 'getAllowedPatterns' | 'onBlocked'
+>
 
 export interface Evaluation {
   decision: 'allow' | 'deny' | 'ask'
@@ -217,9 +225,13 @@ const deny = (message: string): PermissionResult => ({ behavior: 'deny', message
 export function createPermissionGate(ctx: GateContext): PermissionGate {
   return async (toolName, input, { signal, mcpServer, toolUseID }) => {
     if (signal.aborted) return deny('已取消')
+    const block = (reason: string) => {
+      ctx.onBlocked?.(toolUseID, reason)
+      return deny(reason)
+    }
     const e = evaluateTool(toolName, input, ctx, { mcpServer })
     if (e.decision === 'allow') return allow(input)
-    if (e.decision === 'deny') return deny(e.message ?? `Harness 不允許使用 ${toolName}`)
+    if (e.decision === 'deny') return block(e.message ?? `Harness 不允許使用 ${toolName}`)
 
     const d = await ctx.requestApproval(
       { toolName, input, suggestedPattern: e.suggestedPattern, toolUseId: toolUseID },
@@ -227,7 +239,7 @@ export function createPermissionGate(ctx: GateContext): PermissionGate {
     )
     if (!d.allow) return deny(d.message?.trim() || '使用者拒絕了這個操作')
     if (signal.aborted) return deny('已取消')
-    if (!phaseStillAllows(toolName, ctx.getPhase())) return deny('任務狀態已改變')
+    if (!phaseStillAllows(toolName, ctx.getPhase())) return block('任務狀態已改變')
     // 只有指令可以記住樣式
     ctx.onApproved(e.command, e.command ? d.rememberPattern : undefined)
     return allow(input)
@@ -239,13 +251,14 @@ export function createPermissionGate(ctx: GateContext): PermissionGate {
  * ask 會讓 SDK 轉交 canUseTool 走核准流程。
  */
 export function createPreToolUseHook(ctx: GateRules): HookCallback {
-  return async (input) => {
+  return async (input, toolUseID) => {
     if (input.hook_event_name !== 'PreToolUse') return {}
     // 沒有來源資訊（舊版 CLI）時不做決定，交給拿得到 mcpServer 的 canUseTool
     if (input.tool_name.startsWith('mcp__harness__') && !input.mcp_server) return {}
     const e: Evaluation = isRecord(input.tool_input)
       ? evaluateTool(input.tool_name, input.tool_input, ctx, { mcpServer: input.mcp_server })
       : denyE('工具參數格式不正確')
+    if (e.decision === 'deny') ctx.onBlocked?.(input.tool_use_id ?? toolUseID, e.message ?? '')
     return {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',

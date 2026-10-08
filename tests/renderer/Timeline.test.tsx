@@ -191,6 +191,27 @@ describe('Timeline', () => {
     expect(screen.queryByText(/工具錯誤/)).not.toBeInTheDocument()
   })
 
+  test('Harness 規則擋下的工具顯示「已阻擋：原因」（中性的顏色），真的失敗才是紅色的工具錯誤', () => {
+    render(
+      <Timeline
+        task={makeTask()}
+        channel="main"
+        events={[
+          ev({
+            kind: 'tool_result',
+            text: '目前不是實作階段，不能修改檔案。',
+            tool: { id: 'e1', name: '', isError: true, blocked: true }
+          }),
+          ev({ kind: 'tool_result', text: 'exit 1', tool: { id: 'b1', name: '', isError: true } })
+        ]}
+      />
+    )
+    const blocked = screen.getByText('已阻擋：目前不是實作階段，不能修改檔案。')
+    expect(blocked).toHaveClass('text-muted')
+    expect(blocked).not.toHaveClass('text-danger')
+    expect(screen.getByText('工具錯誤：exit 1')).toHaveClass('text-danger')
+  })
+
   test('重新提問的問題只在最後一次出現的位置顯示卡片', () => {
     const open = { ...q, status: 'open' as const, answer: undefined }
     render(

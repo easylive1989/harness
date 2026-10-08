@@ -5,6 +5,7 @@ import {
   latestQuestionEvents,
   type ToolCall,
   toolLabel,
+  toolResultLabel,
   toolSummary,
   userTextDisplay
 } from '../lib/timeline'
@@ -181,18 +182,20 @@ export function Timeline({
                 變更報告 v{e.ref} 已產生 → 查看
               </button>
             )
-          case 'tool_result':
+          case 'tool_result': {
+            const { label, muted } = toolResultLabel(e.tool)
             return (
               <div
                 key={e.id}
                 className={cx(
                   'ml-10 line-clamp-4 text-xs break-all whitespace-pre-wrap',
-                  e.tool?.denied ? 'text-muted' : 'text-danger'
+                  muted ? 'text-muted' : 'text-danger'
                 )}
               >
-                {e.tool?.denied ? '已拒絕' : '工具錯誤'}：{e.text}
+                {label}：{e.text}
               </div>
             )
+          }
           case 'system':
             return (
               <div

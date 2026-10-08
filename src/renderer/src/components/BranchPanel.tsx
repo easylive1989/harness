@@ -3,7 +3,7 @@ import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 
 import type { Branch, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
 import { parseBranchSeed, stripMarkdown } from '../lib/branchDraft'
-import { userTextDisplay } from '../lib/timeline'
+import { toolResultLabel, userTextDisplay } from '../lib/timeline'
 import { blockImeSubmit, isComposing } from '../lib/ime'
 import { isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
@@ -162,12 +162,19 @@ function BranchMessage({ e }: { e: TimelineEvent }) {
     }
     case 'assistant_text':
       return <Markdown text={e.text ?? ''} />
-    case 'tool_result':
+    case 'tool_result': {
+      const { label, muted } = toolResultLabel(e.tool)
       return (
-        <div className="line-clamp-4 text-xs break-all whitespace-pre-wrap text-danger">
-          工具錯誤：{e.text}
+        <div
+          className={cx(
+            'line-clamp-4 text-xs break-all whitespace-pre-wrap',
+            muted ? 'text-muted' : 'text-danger'
+          )}
+        >
+          {label}：{e.text}
         </div>
       )
+    }
     case 'system':
       return <div className="self-center text-xs text-muted">{e.text}</div>
     default:

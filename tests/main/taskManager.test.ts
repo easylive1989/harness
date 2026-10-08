@@ -391,6 +391,9 @@ const toolOpts = (toolUseID: string) =>
 /** 測試用：看 TaskManager 還記著幾個被拒絕的 tool_use id（應在執行結束時清掉） */
 const deniedCount = (tm: TaskManager) =>
   (tm as unknown as { deniedToolUses: { size: number } }).deniedToolUses.size
+/** 測試用：看 TaskManager 還記著幾個被規則擋下的 tool_use id（工具結果處理後或執行結束時清掉） */
+const blockedCount = (tm: TaskManager) =>
+  (tm as unknown as { blockedToolUses: { size: number } }).blockedToolUses.size
 const toolResult = (toolUseId: string, text: string) => ({
   type: 'user',
   parent_tool_use_id: null,
@@ -593,6 +596,47 @@ describe('TaskManager：規格與實作', () => {
     ])
   })
 
+  test('Harness 規則擋下的工具（PreToolUse hook 或 canUseTool），時間軸上標成已阻擋並附上原因', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async ({ options }) => {
+      // 釐清階段改檔：hook 擋下；讀 worktree 外的檔案：canUseTool 擋下
+      const hook = options.hooks!.PreToolUse![0].hooks[0]
+      await hook(
+        {
+          hook_event_name: 'PreToolUse',
+          tool_name: 'Edit',
+          tool_input: { file_path: '/x/README.md' },
+          tool_use_id: 'tu-hook',
+          session_id: 's',
+          transcript_path: '',
+          cwd: '/x'
+        },
+        'tu-hook',
+        { signal: new AbortController().signal }
+      )
+      await options.canUseTool!('Read', { file_path: '/etc/passwd' }, toolOpts('tu-gate'))
+      return [
+        toolResult('tu-hook', 'PreToolUse:Edit hook error: 目前不是實作階段…'),
+        toolResult('tu-gate', '只能讀取 worktree 內的檔案'),
+        toolResult('tu-fail', 'exit 1')
+      ]
+    }
+    await tm.send(id, 'main', '順便改 README')
+    await tm.whenIdle(id)
+    const results = (await tm.timeline(id)).filter((e) => e.kind === 'tool_result')
+    expect(results.map((e) => [e.tool?.id, e.tool?.blocked, e.text])).toEqual([
+      [
+        'tu-hook',
+        true,
+        '目前不是實作階段，不能修改檔案。請用 ask_user 提問或用 propose_spec 提出規格。'
+      ],
+      ['tu-gate', true, '只能讀取 worktree 內的檔案'],
+      ['tu-fail', undefined, 'exit 1']
+    ])
+    expect(blockedCount(tm)).toBe(0)
+  })
+
   test('執行結束時清掉這段執行拒絕過、但沒等到工具結果的 tool_use id', async () => {
     const { tm, claude, create } = await setup()
     claude.script = async ({ call, sink }) => {
@@ -600,13 +644,17 @@ describe('TaskManager：規格與實作', () => {
     }
     const id = await create()
     claude.script = async ({ options }) => {
+      // 規則擋下、但工具結果沒有來
+      await options.canUseTool!('Read', { file_path: '/etc/passwd' }, toolOpts('tu-lost-block'))
       await options.canUseTool!('Bash', { command: 'rm -rf dist' }, toolOpts('tu-lost'))
     }
     await tm.approveSpec(id)
     await until(() => !!tm.get(id).pendingPermission)
+    expect(blockedCount(tm)).toBe(1)
     await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: false })
     await tm.whenIdle(id)
     expect(deniedCount(tm)).toBe(0)
+    expect(blockedCount(tm)).toBe(0)
   })
 
   test('shutdown 清掉被拒絕的 tool_use id（執行卡住、不會結束）', async () => {

@@ -31,7 +31,8 @@ function setup(
     worktreePath,
     getAllowedPatterns: () => patterns,
     requestApproval: vi.fn(async () => decision),
-    onApproved: vi.fn()
+    onApproved: vi.fn(),
+    onBlocked: vi.fn()
   }
   const gate = createPermissionGate(ctx)
   const call = (
@@ -39,7 +40,7 @@ function setup(
     input: Record<string, unknown>,
     mcpServer?: McpServer,
     signal = new AbortController().signal
-  ) => gate(tool, input, { signal, mcpServer } as never)
+  ) => gate(tool, input, { signal, mcpServer, toolUseID: 'u1' } as never)
   const hook = createPreToolUseHook(ctx)
   const callHook = async (tool: string, toolInput: unknown, mcpServer?: McpServer) =>
     hookDecision(
@@ -68,6 +69,25 @@ function hookDecision(out: HookJSONOutput) {
 }
 
 describe('PermissionGate', () => {
+  test('規則拒絕時通知 onBlocked（Harness 擋下，不是使用者拒絕）；使用者拒絕不通知', async () => {
+    const { call, ctx } = setup('implement')
+    await call('Read', { file_path: '/etc/passwd' })
+    expect(ctx.onBlocked).toHaveBeenCalledWith('u1', '只能讀取 worktree 內的檔案')
+    const denied = setup('implement', { allow: false })
+    await denied.call('Bash', { command: 'npm run build' })
+    expect(denied.ctx.onBlocked).not.toHaveBeenCalled()
+  })
+
+  test('核准後任務狀態已改變：也算 Harness 擋下', async () => {
+    const { call, ctx, state } = setup('implement')
+    vi.mocked(ctx.requestApproval).mockImplementationOnce(async () => {
+      state.phase = 'clarify'
+      return { allow: true }
+    })
+    expect(await call('Bash', { command: 'npm run build' })).toMatchObject({ behavior: 'deny' })
+    expect(ctx.onBlocked).toHaveBeenCalledWith('u1', '任務狀態已改變')
+  })
+
   test('harness 工具與 TodoWrite 永遠允許', async () => {
     const { call } = setup('clarify')
     expect((await call('mcp__harness__ask_user', {}, OURS)).behavior).toBe('allow')
@@ -295,6 +315,17 @@ describe('PreToolUse hook', () => {
   test('釐清階段 Edit 被 hook 拒絕', async () => {
     const { callHook } = setup('clarify')
     expect(await callHook('Edit', { file_path: '/wt/t1/a.ts' })).toBe('deny')
+  })
+
+  test('規則拒絕（deny）時以 tool_use_id 通知 onBlocked；ask、allow 不通知', async () => {
+    const { callHook, ctx } = setup('clarify')
+    await callHook('Edit', { file_path: '/wt/t1/a.ts' })
+    expect(ctx.onBlocked).toHaveBeenCalledWith('u1', expect.stringContaining('目前不是實作階段'))
+    vi.mocked(ctx.onBlocked!).mockClear()
+    const impl = setup('implement')
+    await impl.callHook('Bash', { command: 'npm run build' })
+    await impl.callHook('Read', { file_path: '/wt/t1/a.ts' })
+    expect(impl.ctx.onBlocked).not.toHaveBeenCalled()
   })
 
   test('不在允許清單的 Bash 交給使用者核准（ask）', async () => {
