@@ -27,6 +27,7 @@ describe('harness tool handlers', () => {
     const r = await h.ask_user(args)
     expect(s.askUser).toHaveBeenCalledWith(args)
     expect(textOf(r)).toContain('結束這一輪')
+    expect(textOf(r)).toContain('不要說明你送出了問題')
   })
 
   test('submit_report 格式錯誤時回傳 isError 且不呼叫 sink', async () => {
@@ -44,6 +45,21 @@ describe('harness tool handlers', () => {
     const r = await createToolHandlers(s).submit_report(sampleReport)
     expect(r.isError).toBeFalsy()
     expect(s.submitReport).toHaveBeenCalled()
+    expect(textOf(r)).toContain('不要在文字中重述報告')
+  })
+
+  test('propose_spec 成功時要求結束這一輪、不在文字中重述規格', async () => {
+    const r = await createToolHandlers(sink()).propose_spec({
+      title: 't',
+      summary: 's',
+      in_scope: [],
+      out_of_scope: [],
+      decisions: [],
+      steps: ['a'],
+      acceptance: ['b']
+    })
+    expect(textOf(r)).toContain('結束這一輪')
+    expect(textOf(r)).toContain('不要在文字中重述規格')
   })
 
   test('sink 丟錯時轉成 isError，並在 host 端記錄', async () => {

@@ -112,14 +112,14 @@ export function createToolHandlers(sink: ToolSink) {
         if (problem) return fail(`問題格式有誤，請修正後重新呼叫 ask_user：${problem}`)
         await sink.askUser(a)
         return ok(
-          '問題已顯示給使用者。請立刻結束這一輪，不要再輸出其他內容，等待使用者以 [answer …] 或 [counter_question …] 回覆。'
+          '問題已顯示給使用者。請立刻結束這一輪，不要再輸出其他內容（不要重述問題，也不要說明你送出了問題），等待使用者以 [answer …] 或 [counter_question …] 回覆。'
         )
       }),
     propose_spec: (a: ProposeSpecArgs) =>
       guard(async () => {
         await sink.proposeSpec(a)
         return ok(
-          '規格草稿已交給使用者審閱。請結束這一輪，等待 [spec_approved] 或 [spec_feedback …]。'
+          '規格草稿已交給使用者審閱，介面會顯示完整內容。請結束這一輪，不要在文字中重述規格，等待 [spec_approved] 或 [spec_feedback …]。'
         )
       }),
     update_plan: (a: UpdatePlanArgs) =>
@@ -140,14 +140,16 @@ export function createToolHandlers(sink: ToolSink) {
             `報告格式有誤，請修正後重新呼叫 submit_report：\n${z.prettifyError(parsed.error)}`
           )
         await sink.submitReport(parsed.data)
-        return ok('報告已提交，Harness 會整理 diff 並實際執行驗證指令。請結束這一輪。')
+        return ok(
+          '報告已提交，Harness 會整理 diff 並實際執行驗證指令。請結束這一輪，不要在文字中重述報告內容。'
+        )
       })
   }
 }
 
 const DESCRIPTIONS: Record<HarnessToolName, string> = {
   ask_user:
-    '向使用者提出一個需要釐清的問題，以問題卡片呈現。一次只問一題，呼叫後立刻結束這一輪。用相同 question_id 再呼叫可更新卡片。',
+    '向使用者提出一個需要釐清的問題，以問題卡片呈現。一次只問一題，呼叫後立刻結束這一輪。用相同 question_id 再呼叫可更新卡片。問題與選項只放在參數裡，不要在文字中重述。',
   propose_spec: '當你對需求有足夠把握時，提出規格草稿給使用者核准。呼叫後結束這一輪。',
   update_plan: '實作階段回報步驟清單與每一步的狀態。',
   conclude_branch:
