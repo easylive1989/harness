@@ -77,6 +77,16 @@ export interface ToolSink {
 export type HarnessToolName =
   'ask_user' | 'propose_spec' | 'update_plan' | 'conclude_branch' | 'submit_report'
 
+/**
+ * 呼叫後要 Claude 結束這一輪、不再寫字的工具（結果都寫著「請結束這一輪」），以 Claude Code 看到的全名列出。
+ * 透過 CLAUDE_CODE_TERMINAL_MCP_TOOLS 告訴 Claude Code：否則這一輪只有思考、沒有文字時，
+ * 它會補一句「[Your previous response had no visible output…]」催 Claude 寫一段話，
+ * Claude 只好重述問題或說「已送出」。
+ */
+export const TURN_ENDING_TOOLS = (
+  ['ask_user', 'propose_spec', 'conclude_branch', 'submit_report'] satisfies HarnessToolName[]
+).map((n) => `mcp__harness__${n}`)
+
 type Result = { content: { type: 'text'; text: string }[]; isError?: boolean }
 const ok = (text: string): Result => ({ content: [{ type: 'text', text }] })
 const fail = (text: string): Result => ({ content: [{ type: 'text', text }], isError: true })

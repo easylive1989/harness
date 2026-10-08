@@ -84,6 +84,9 @@ describe('TaskManager：建立任務與釐清', () => {
     expect(claude.calls[0].options.tools).toEqual(BUILTIN_TOOLS)
     expect(claude.calls[0].options.env).toMatchObject({
       ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
+      // 呼叫這些工具後安靜結束這一輪是對的：Claude Code 不要再催 Claude 寫一段話（重述問題、說已送出）
+      CLAUDE_CODE_TERMINAL_MCP_TOOLS:
+        'mcp__harness__ask_user,mcp__harness__propose_spec,mcp__harness__conclude_branch,mcp__harness__submit_report',
       PATH: process.env.PATH
     })
     expect(claude.calls[0].tools).toEqual([

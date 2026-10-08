@@ -30,7 +30,7 @@ import {
   type GateContext
 } from '../permissions/gate'
 import type { Repository } from '../store/repository'
-import type { HarnessToolName, ToolSink } from '../tools/harnessTools'
+import { type HarnessToolName, type ToolSink, TURN_ENDING_TOOLS } from '../tools/harnessTools'
 import { prBody } from './prBody'
 import { phaseOf, type TaskEventType, transition } from './stateMachine'
 
@@ -461,8 +461,13 @@ export class TaskManager {
       hooks: { PreToolUse: [{ hooks: [createPreToolUseHook(gateCtx)] }] },
       pathToClaudeCodeExecutable: this.d.getClaudePath(),
       // claude.ai 帳號上的連接器（Gmail、Notion…）不載入：PermissionGate 一律拒絕，只會佔用 context，
-      // Claude 還會在回覆裡提到它們
-      env: { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: 'false' }
+      // Claude 還會在回覆裡提到它們。
+      // 呼叫提問、規格、結論、報告工具後安靜結束這一輪是對的：Claude Code 不要再催 Claude 寫一段話
+      env: {
+        ...process.env,
+        ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
+        CLAUDE_CODE_TERMINAL_MCP_TOOLS: TURN_ENDING_TOOLS.join(',')
+      }
     }
 
     const run = new AgentRun(this.d.queryFn, { options, firstPrompt: prompt }, (e) => {
