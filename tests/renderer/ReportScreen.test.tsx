@@ -204,18 +204,6 @@ test('還有未送出的回饋時提醒；合併失敗時在面板顯示 git 的
   expect(alert).toHaveTextContent('Merge conflict in src/auth/login.ts')
 })
 
-test('丟棄 worktree 要再確認一次，可以取消', async () => {
-  renderReport(reviewTask())
-  await loaded()
-  await userEvent.click(within(panel()).getByRole('button', { name: '丟棄 worktree' }))
-  expect(call).not.toHaveBeenCalledWith('finish:discard', 't1')
-  expect(within(panel()).getByText(/harness\/t1/)).toBeInTheDocument()
-  await userEvent.click(within(panel()).getByRole('button', { name: '取消' }))
-  await userEvent.click(within(panel()).getByRole('button', { name: '丟棄 worktree' }))
-  await userEvent.click(within(panel()).getByRole('button', { name: '確定丟棄' }))
-  expect(call).toHaveBeenCalledWith('finish:discard', 't1')
-})
-
 test('依回饋修改中（implementing）回看報告：只能看', async () => {
   renderReport(reviewTask({ status: 'implementing', runState: 'running' }), true)
   await loaded()
@@ -352,18 +340,13 @@ test('點回饋清單裡的程式碼回饋會切換到那個檔案', async () =>
   expect(screen.getByText('回饋 · 第 11 行')).toBeInTheDocument()
 })
 
-test('已完成：顯示 PR 連結與清除 worktree', async () => {
+test('已完成：顯示 PR 連結；清除 worktree 在標題列的選單（見 TaskMenu.test.tsx）', async () => {
   renderReport(reviewTask({ status: 'done', prUrl: 'https://github.com/me/shop/pull/7' }), true)
   await loaded()
   expect(screen.queryByRole('button', { name: /送出回饋/ })).not.toBeInTheDocument()
   await userEvent.click(within(panel()).getByRole('button', { name: '開啟 Pull Request' }))
   expect(call).toHaveBeenCalledWith('shell:openExternal', 'https://github.com/me/shop/pull/7')
-  await userEvent.click(within(panel()).getByRole('button', { name: '清除 worktree' }))
-  await userEvent.click(within(panel()).getByRole('button', { name: '確定清除' }))
-  expect(call).toHaveBeenCalledWith('finish:discard', 't1')
-  // 清除後提示，這次開著畫面時不再顯示按鈕
-  await waitFor(() => expect(useStore.getState().toast?.text).toBe('已清除 worktree'))
-  expect(within(panel()).queryByRole('button', { name: '清除 worktree' })).not.toBeInTheDocument()
+  expect(within(panel()).queryByRole('button', { name: /清除|丟棄/ })).not.toBeInTheDocument()
 })
 
 test('TaskScreen：待審閱顯示報告；依回饋修改中可以回看報告但只能看', async () => {

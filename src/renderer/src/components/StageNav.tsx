@@ -15,10 +15,7 @@ export function StageNav({
   const current = currentStage(task)
   const order = STAGES.map((s) => s.id)
   return (
-    <nav
-      aria-label="任務階段"
-      className="ml-auto flex items-center gap-1 rounded-full bg-fill p-1 text-xs"
-    >
+    <nav aria-label="任務階段" className="flex items-center gap-1 rounded-full bg-fill p-1 text-xs">
       {STAGES.map((s, i) => {
         const can = reachable(task, s.id)
         const passed = order.indexOf(s.id) < order.indexOf(current)

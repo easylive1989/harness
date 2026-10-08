@@ -1,5 +1,6 @@
 // src/renderer/src/report/FeedbackPanel.tsx
-// 對照 docs/design/B5-Report.dc.html 的 <aside>：待送出的回饋、整體意見、收尾（PR／合併／丟棄）
+// 對照 docs/design/B5-Report.dc.html 的 <aside>：待送出的回饋、整體意見、收尾（PR／合併）。
+// 丟棄（已完成時是清除 worktree）在標題列的「⋯」選單（TaskMenu），每個階段都是同一個入口。
 import { useState } from 'react'
 import type { Task } from '@shared/types'
 import { call, errorText } from '../api'
@@ -20,11 +21,7 @@ export function FeedbackPanel({
   const items = useStore((s) => s.feedback[task.id]) ?? []
   const removeFeedback = useStore((s) => s.removeFeedback)
   const act = useStore((s) => s.act)
-  const showToast = useStore((s) => s.showToast)
   const [overall, setOverall] = useState('')
-  const [confirmDiscard, setConfirmDiscard] = useState(false)
-  // 已完成的任務清除過 worktree：任務本身沒有記錄，這次開著畫面時就不再顯示按鈕
-  const [cleared, setCleared] = useState(false)
   // 收尾失敗的原因（例如合併衝突）留在面板上，不只是幾秒就消失的 toast
   const [failure, setFailure] = useState<{ title: string; text: string }>()
   // 送出回饋與收尾操作共用：其中一個進行中時全部停用（主程序也只允許一個收尾操作）
@@ -69,15 +66,6 @@ export function FeedbackPanel({
       await act(() => call('shell:openExternal', url))
     })
   const merge = () => finish('合併失敗', () => call('finish:merge', task.id))
-  const discard = () =>
-    finish(done ? '清除 worktree 失敗' : '丟棄失敗', async () => {
-      await call('finish:discard', task.id)
-      setConfirmDiscard(false)
-      if (done) {
-        setCleared(true)
-        showToast('已清除 worktree')
-      }
-    })
 
   return (
     <aside
@@ -181,40 +169,6 @@ export function FeedbackPanel({
           <span className="text-muted">worktree 與分支已刪除，報告仍然可以看與匯出。</span>
         </div>
       )}
-
-      {task.status !== 'discarded' &&
-        !(done && cleared) &&
-        (confirmDiscard ? (
-          <div className="flex flex-col gap-2.5 rounded-xl bg-danger-soft p-3 text-[13px]">
-            <span className="text-danger">
-              {done
-                ? `確定要刪除 worktree 與本機分支 ${task.branch}？已開的 PR 或已合併的內容不受影響。`
-                : `確定要丟棄？worktree 與分支 ${task.branch} 都會刪除，無法復原。`}
-            </span>
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                className="bg-danger font-medium text-white hover:bg-danger/90"
-                disabled={pending}
-                onClick={() => void discard()}
-              >
-                {done ? '確定清除' : '確定丟棄'}
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirmDiscard(false)}>
-                取消
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <Button
-            variant="danger"
-            className="h-10"
-            disabled={pending}
-            onClick={() => setConfirmDiscard(true)}
-          >
-            {done ? '清除 worktree' : '丟棄 worktree'}
-          </Button>
-        ))}
 
       {failure && (
         <div

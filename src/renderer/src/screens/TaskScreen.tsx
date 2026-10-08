@@ -1,6 +1,7 @@
 // src/renderer/src/screens/TaskScreen.tsx
 import { useState } from 'react'
 import { StageNav } from '../components/StageNav'
+import { TaskMenu } from '../components/TaskMenu'
 import { currentStage, type Stage } from '../lib/stage'
 import { useStore } from '../store'
 import { ClarifyScreen } from './ClarifyScreen'
@@ -12,12 +13,20 @@ export function TaskScreen({ taskId }: { taskId: string }) {
   const task = useStore((s) => s.tasks[taskId])
   // 使用者回看的階段，只對選它時的任務與狀態有效；換任務或狀態前進就回到目前階段
   const [picked, setPicked] = useState<{ key: string; stage: Stage } | null>(null)
+  // 已完成的任務這次開著畫面時清除過 worktree：不再顯示選單（換階段畫面也一樣）
+  const [cleared, setCleared] = useState(false)
   if (!task) return null
   const key = `${taskId}:${task.status}`
   const current = currentStage(task)
   const shown = picked?.key === key ? picked.stage : current
   const openStage = (s: Stage) => setPicked(s === current ? null : { key, stage: s })
-  const nav = <StageNav task={task} shown={shown} onSelect={openStage} />
+  // 階段切換與「⋯」選單（丟棄任務）放在每個畫面的標題列右側
+  const nav = (
+    <div className="ml-auto flex items-center gap-2">
+      <StageNav task={task} shown={shown} onSelect={openStage} />
+      <TaskMenu task={task} cleared={cleared} onCleared={() => setCleared(true)} />
+    </div>
+  )
   // 已丟棄的任務停在哪個階段都只能看
   const ended = task.status === 'discarded' || task.status === 'done'
   const readOnly = ended || shown !== current
