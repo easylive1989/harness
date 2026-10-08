@@ -24,7 +24,7 @@ import {
 } from '@shared/types'
 import { useShallow } from 'zustand/react/shallow'
 import { call, errorText } from '../api'
-import { modelChoices } from '../lib/runOptions'
+import { modelChoices, selectedModelId } from '../lib/runOptions'
 import { Button, cx, Icons, inputClass, Pill } from '../components/ui'
 import { checkNewPattern } from '../lib/allowedCommands'
 import { blockImeSubmit, isComposing } from '../lib/ime'
@@ -351,7 +351,7 @@ function ModelSection({ settings, save }: { settings: Settings; save: Save }) {
         className="grid grid-cols-2 gap-2.5"
       >
         {modelChoices(models, model.value).map((m) => {
-          const on = model.value === m.id
+          const on = selectedModelId(models, model.value) === m.id
           return (
             <label
               key={m.id}

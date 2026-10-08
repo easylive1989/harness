@@ -11,6 +11,7 @@ import { call } from '@renderer/api'
 import App from '@renderer/App'
 import { Markdown } from '@renderer/components/Markdown'
 import { Sidebar } from '@renderer/components/Sidebar'
+import { FALLBACK_MODELS } from '@shared/types'
 import { Toast } from '@renderer/components/Toast'
 import { TaskScreen } from '@renderer/screens/TaskScreen'
 import { resetStoreInternals, useStore } from '@renderer/store'
@@ -104,6 +105,18 @@ describe('Sidebar', () => {
     expect(useStore.getState().view).toEqual({ kind: 'settings' })
     await userEvent.click(screen.getByRole('button', { name: '新任務' }))
     expect(useStore.getState().view).toEqual({ kind: 'new' })
+  })
+
+  test('底部的模型名稱：清單是別名時也顯示模型名稱，不是 Default', () => {
+    useStore.setState({
+      models: [
+        { id: 'default', resolvedId: 'claude-opus-5-5', label: 'Default (recommended)', hint: '' },
+        { id: 'opus', resolvedId: 'claude-opus-5-5', label: 'Opus 5.5', hint: '' }
+      ]
+    })
+    render(<Sidebar />)
+    expect(screen.getByRole('button', { name: /設定/ })).toHaveTextContent('Opus 5.5 · 訂閱方案')
+    useStore.setState({ models: FALLBACK_MODELS })
   })
 
   test('底部顯示 Claude Code 狀態', () => {

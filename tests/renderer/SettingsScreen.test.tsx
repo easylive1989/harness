@@ -247,6 +247,19 @@ describe('SettingsScreen：模型與專案設定', () => {
     expect(radio(/^Auto/)).toBeDisabled()
   })
 
+  test('設定存完整 id、清單是別名時勾選對應的模型（不是 Default）', () => {
+    useStore.setState({
+      models: [
+        { id: 'default', resolvedId: 'claude-opus-5-5', label: 'Default (recommended)', hint: '' },
+        { id: 'opus', resolvedId: 'claude-opus-5-5', label: 'Opus 5.5', hint: '' },
+        { id: 'sonnet', resolvedId: 'claude-sonnet-5-5', label: 'Sonnet 5.5', hint: '' }
+      ]
+    })
+    render(<SettingsScreen />)
+    expect(radio(/Opus 5.5/)).toBeChecked()
+    expect(radio(/Default/)).not.toBeChecked()
+  })
+
   test('設定的模型不在清單裡時仍列出來', () => {
     useStore.setState({
       settings: { ...initial, defaultModel: 'claude-legacy-4' }

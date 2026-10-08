@@ -139,6 +139,19 @@ describe('NewTaskScreen', () => {
     )
   })
 
+  test('設定存完整 id、清單是別名時，模型選單選在對應的模型（不是 Default）', () => {
+    useStore.setState({
+      models: [
+        { id: 'default', resolvedId: 'claude-opus-5-5', label: 'Default (recommended)', hint: '' },
+        { id: 'opus', resolvedId: 'claude-opus-5-5', label: 'Opus 5.5', hint: '' },
+        { id: 'sonnet', resolvedId: 'claude-sonnet-5-5', label: 'Sonnet 5.5', hint: '' }
+      ],
+      settings: { ...useStore.getState().settings!, defaultModel: 'claude-opus-5-5' }
+    })
+    render(<NewTaskScreen />)
+    expect(screen.getByLabelText('模型')).toHaveValue('opus')
+  })
+
   test('effort 與權限模式預設用設定的值', async () => {
     useStore.setState({
       settings: {

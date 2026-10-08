@@ -8,7 +8,7 @@ import {
   type RunOptions,
   supportsAutoMode
 } from '@shared/types'
-import { applyRunOptions, modelChoices } from '../lib/runOptions'
+import { applyRunOptions, modelChoices, selectedModelId } from '../lib/runOptions'
 import { useStore } from '../store'
 import { cx, inputClass } from './ui'
 
@@ -34,7 +34,7 @@ export function RunOptionFields({
       <label className={field}>
         <span className="text-[13px] font-medium">模型</span>
         <select
-          value={value.model}
+          value={selectedModelId(models, value.model)}
           disabled={disabled}
           onChange={(e) => set({ model: e.target.value })}
           className={cx(inputClass, 'px-3 text-sm')}

@@ -24,6 +24,8 @@ export const FALLBACK_MODELS: ModelOption[] = [
   { id: 'claude-fable-5-1', label: 'Fable 5.1', hint: '最新一代模型' }
 ]
 export const DEFAULT_MODEL: ModelId = 'claude-opus-5-5'
+/** Claude Code「用帳號預設模型」的別名 */
+const DEFAULT_ALIAS = 'default'
 
 /** auto：不指定，用模型的預設 */
 export type EffortChoice = 'auto' | EffortLevel
@@ -47,9 +49,18 @@ export const PERMISSION_MODES: { id: PermissionModeChoice; label: string; hint: 
   }
 ]
 
-/** 找到模型的資訊（也比對別名對應的完整 id）；清單裡沒有時回傳 undefined */
+/**
+ * 找到模型的資訊（也比對別名對應的完整 id）；清單裡沒有時回傳 undefined。
+ * Claude Code 的 default 別名與指名模型的別名（例如 opus）會對應到同一個完整 id：
+ * 以完整 id 比對時優先用指名模型的那個，名稱才會是「Opus 5.5」而不是「Default」。
+ */
 export function findModel(models: ModelOption[], id: ModelId): ModelOption | undefined {
-  return models.find((m) => m.id === id) ?? models.find((m) => m.resolvedId === id)
+  const byResolved = models.filter((m) => m.resolvedId === id)
+  return (
+    models.find((m) => m.id === id) ??
+    byResolved.find((m) => m.id !== DEFAULT_ALIAS) ??
+    byResolved[0]
+  )
 }
 
 export function modelLabel(models: ModelOption[], id: ModelId): string {

@@ -14,6 +14,11 @@ export function modelChoices(models: ModelOption[], current: string): ModelOptio
     : [...models, { id: current, label: current, hint: '' }]
 }
 
+/** 選單上要標成已選的項目 id：設定存的是完整 id（例如 claude-opus-5-5）時對到清單裡的別名 */
+export function selectedModelId(models: ModelOption[], current: string): string {
+  return findModel(models, current)?.id ?? current
+}
+
 /** 套用修改：換模型時把新模型不支援的 effort／權限模式改回預設 */
 export function applyRunOptions(
   models: ModelOption[],
