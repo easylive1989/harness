@@ -10,6 +10,7 @@ import {
   toolSummary,
   userTextDisplay
 } from '../lib/timeline'
+import { MessageImages } from './Attachments'
 import { Markdown } from './Markdown'
 import { AnsweredQuestionRow, QuestionCard } from './QuestionCard'
 import { Avatar, cx, Icons, LiveStatus } from './ui'
@@ -69,10 +70,12 @@ function ToolGroup({ events, root }: { events: ToolEvent[]; root: string }) {
   )
 }
 
-function UserBubble({ text }: { text: string }) {
+function UserBubble({ taskId, e }: { taskId: string; e: TimelineEvent }) {
+  const text = e.text ?? ''
   return (
     <div className="max-w-[78%] self-end rounded-[18px_18px_6px_18px] bg-fill px-4 py-3 whitespace-pre-wrap">
       {userTextDisplay(text)}
+      <MessageImages taskId={taskId} images={e.images} className={text ? 'mt-2' : ''} />
     </div>
   )
 }
@@ -108,7 +111,7 @@ export function Timeline({
         const e = it.e
         switch (e.kind) {
           case 'user_text':
-            return <UserBubble key={e.id} text={e.text ?? ''} />
+            return <UserBubble key={e.id} taskId={task.id} e={e} />
           case 'assistant_text':
             return (
               <div key={e.id} className="group flex gap-3">

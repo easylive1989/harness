@@ -3,8 +3,10 @@
 import { useEffect, useState } from 'react'
 import { MODELS, type ModelId } from '@shared/types'
 import { call } from '../api'
+import { AttachButton, AttachmentPreview } from '../components/Attachments'
 import { ClaudeBanner } from '../components/ClaudeBanner'
 import { Button, cx, Icons, inputClass, textareaClass } from '../components/ui'
+import { useImageAttachments } from '../lib/useImageAttachments'
 import { useStore } from '../store'
 
 /** 把家目錄縮寫成 ~，卡片上比較好讀 */
@@ -26,6 +28,7 @@ export function NewTaskScreen() {
   const [baseChoice, setBaseChoice] = useState<{ repoId: string; value: string }>()
   const [model, setModel] = useState<ModelId>(defaultModel ?? 'claude-opus-5-5')
   const [busy, setBusy] = useState(false)
+  const attach = useImageAttachments()
 
   // 選的 repo 不在清單裡（還沒選、或剛被移除）時用第一個
   const repoId = repos.some((r) => r.id === picked) ? picked : repos[0]?.id
@@ -54,7 +57,15 @@ export function NewTaskScreen() {
   const submit = async () => {
     if (!ready || !repoId) return
     setBusy(true)
-    const task = await act(() => call('tasks:create', { repoId, request, baseBranch: base, model }))
+    const task = await act(() =>
+      call('tasks:create', {
+        repoId,
+        request,
+        images: attach.images,
+        baseBranch: base,
+        model
+      })
+    )
     setBusy(false)
     if (task) await open({ kind: 'task', taskId: task.id })
   }
@@ -127,19 +138,29 @@ export function NewTaskScreen() {
           </button>
         </fieldset>
 
-        <label className="flex flex-col gap-2.5">
-          <span className="text-[13px] font-medium">需求</span>
-          <textarea
-            rows={5}
-            value={request}
-            onChange={(e) => setRequest(e.target.value)}
-            placeholder="例如：登入 API 要加上失敗次數限制，連續失敗太多次就鎖帳號。"
-            className={cx(
-              textareaClass,
-              'resize-y rounded-[14px] px-4 py-3.5 text-sm leading-[1.65]'
-            )}
-          />
-        </label>
+        <div className="flex flex-col gap-2.5" {...attach.bind}>
+          <label className="flex flex-col gap-2.5">
+            <span className="text-[13px] font-medium">需求</span>
+            <textarea
+              rows={5}
+              value={request}
+              onChange={(e) => setRequest(e.target.value)}
+              placeholder="例如：登入 API 要加上失敗次數限制，連續失敗太多次就鎖帳號。"
+              className={cx(
+                textareaClass,
+                'resize-y rounded-[14px] px-4 py-3.5 text-sm leading-[1.65]'
+              )}
+            />
+          </label>
+          <AttachmentPreview items={attach.items} error={attach.error} onRemove={attach.remove} />
+          <div className="flex items-center gap-1 text-xs text-muted">
+            <AttachButton
+              onFiles={(f) => void attach.add(f)}
+              className="size-8 rounded-lg bg-fill-2"
+            />
+            可以附加截圖：直接貼上、拖進來，或按左邊的按鈕選擇圖片。
+          </div>
+        </div>
 
         <div className="flex flex-wrap gap-4">
           <label className="flex min-w-[200px] flex-1 flex-col gap-2">

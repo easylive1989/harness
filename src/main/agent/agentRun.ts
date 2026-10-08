@@ -1,6 +1,7 @@
 // src/main/agent/agentRun.ts
 import { randomUUID } from 'node:crypto'
 import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { ImageInput } from '@shared/images'
 import { AsyncQueue } from './asyncQueue'
 
 export type QueryFn = (params: {
@@ -192,10 +193,26 @@ export function mapMessage(raw: SDKMessage): MappedEvent[] {
   }
 }
 
-export function userMessage(text: string): SDKUserMessage & { uuid: string } {
+/** 隨訊息送出的圖片（base64） */
+export type PromptImage = Pick<ImageInput, 'mediaType' | 'data'>
+
+/** 沒有圖片時 content 維持字串；有圖片時圖片在前、文字在後（Claude 建議的順序） */
+export function userMessage(
+  text: string,
+  images: PromptImage[] = []
+): SDKUserMessage & { uuid: string } {
+  const content: SDKUserMessage['message']['content'] = images.length
+    ? [
+        ...images.map((img) => ({
+          type: 'image' as const,
+          source: { type: 'base64' as const, media_type: img.mediaType, data: img.data }
+        })),
+        ...(text ? [{ type: 'text' as const, text }] : [])
+      ]
+    : text
   return {
     type: 'user',
-    message: { role: 'user', content: text },
+    message: { role: 'user', content },
     parent_tool_use_id: null,
     uuid: randomUUID()
   }
@@ -212,6 +229,8 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 export interface RunConfig {
   options: Options
   firstPrompt: string
+  /** 第一則訊息附加的圖片 */
+  firstImages?: PromptImage[]
   /** interrupt() 等待 SDK 回應的上限，逾時改用 abort（預設 5000ms） */
   interruptTimeoutMs?: number
 }
@@ -244,7 +263,7 @@ export class AgentRun {
         console.error('[AgentRun] onEvent 回呼失敗', err)
       }
     }
-    this.enqueue(cfg.firstPrompt)
+    this.enqueue(cfg.firstPrompt, cfg.firstImages)
     // 用區域變數迭代：TS 會把建構子內的 async IIFE 視為立即執行，直接讀 this.q 會報 TS2565
     const q = queryFn({
       prompt: this.queue,
@@ -283,9 +302,9 @@ export class AgentRun {
     return !this.ended && !this.queue.isClosed
   }
 
-  send(text: string): boolean {
+  send(text: string, images?: PromptImage[]): boolean {
     if (!this.active) return false
-    this.enqueue(text)
+    this.enqueue(text, images)
     return true
   }
 
@@ -308,8 +327,8 @@ export class AgentRun {
     this.closeInput()
   }
 
-  private enqueue(text: string) {
-    const msg = userMessage(text)
+  private enqueue(text: string, images?: PromptImage[]) {
+    const msg = userMessage(text, images)
     this.pending.add(msg.uuid)
     this.queue.push(msg)
   }

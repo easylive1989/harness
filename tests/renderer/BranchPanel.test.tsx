@@ -82,7 +82,7 @@ test('分岔訊息：輸入法選字中的 Enter 不送出', async () => {
   await userEvent.type(input, '再想想')
   expect(fireEvent.keyDown(input, { key: 'Enter', isComposing: true })).toBe(false)
   expect(fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 })).toBe(false)
-  expect(call).not.toHaveBeenCalledWith('tasks:send', 't1', 'branch:b2', '再想想')
+  expect(call).not.toHaveBeenCalledWith('tasks:send', 't1', 'branch:b2', '再想想', [])
   expect(input).toHaveValue('再想想')
 })
 
@@ -92,7 +92,7 @@ test('在分岔中送出訊息，Claude 回覆過後可以帶回主線', async (
   expect(screen.getByText('會有騷擾的風險。')).toBeInTheDocument()
   expect(screen.queryByText('主線的訊息')).not.toBeInTheDocument()
   await userEvent.type(screen.getByRole('textbox', { name: '分岔訊息' }), '再想想{Enter}')
-  expect(call).toHaveBeenCalledWith('tasks:send', 't1', 'branch:b2', '再想想')
+  expect(call).toHaveBeenCalledWith('tasks:send', 't1', 'branch:b2', '再想想', [])
   expect(screen.getByRole('textbox', { name: '分岔訊息' })).toHaveValue('')
   await userEvent.click(screen.getByRole('button', { name: '帶回主線' }))
   expect(call).toHaveBeenCalledWith('branch:conclude', 't1', 'b2')

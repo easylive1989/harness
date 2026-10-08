@@ -1,5 +1,6 @@
 // src/main/store/repository.ts
 import { join } from 'node:path'
+import { type ImageRef, imageExt } from '@shared/images'
 import type { Report, Repo, Settings, Task, TimelineEvent } from '@shared/types'
 import type { Store } from './store'
 
@@ -100,6 +101,17 @@ export class Repository {
   }
   readTimeline(taskId: string) {
     return this.store.readJsonl<TimelineEvent>(`tasks/${taskId}/timeline.jsonl`)
+  }
+
+  /** 訊息附加的圖片存在 tasks/<id>/attachments/<圖片 id>.<副檔名> */
+  private imagePath(taskId: string, image: ImageRef) {
+    return `tasks/${taskId}/attachments/${image.id}.${imageExt(image.mediaType)}`
+  }
+  saveImage(taskId: string, image: ImageRef, data: Buffer) {
+    return this.store.writeBuffer(this.imagePath(taskId, image), data)
+  }
+  readImage(taskId: string, image: ImageRef): Promise<Buffer> {
+    return this.store.readBuffer(this.imagePath(taskId, image))
   }
 
   saveReport(r: Report) {

@@ -75,6 +75,24 @@ export class Store {
     }
   }
 
+  /** 寫入二進位檔（附加的圖片）；先寫暫存檔再改名，和 writeJson 一樣不會留下寫到一半的檔案 */
+  async writeBuffer(rel: string, data: Buffer): Promise<void> {
+    const file = this.path(rel)
+    await mkdir(dirname(file), { recursive: true })
+    const tmp = `${file}.${randomUUID()}.tmp`
+    try {
+      await writeFile(tmp, data)
+      await rename(tmp, file)
+    } catch (e) {
+      await unlink(tmp).catch(() => {})
+      throw e
+    }
+  }
+
+  readBuffer(rel: string): Promise<Buffer> {
+    return readFile(this.path(rel))
+  }
+
   async appendJsonl(rel: string, obj: unknown): Promise<void> {
     const file = this.path(rel)
     await mkdir(dirname(file), { recursive: true })

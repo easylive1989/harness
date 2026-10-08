@@ -4,6 +4,8 @@ import type { ClaudeStatus } from '@shared/types'
 import {
   assertChannel,
   assertId,
+  assertImageRef,
+  assertImages,
   assertModel,
   assertString,
   assertVersion,
@@ -13,6 +15,37 @@ import {
   isValidBranchName,
   validateSettingsPatch
 } from '../../src/main/ipcGuards'
+
+describe('附加圖片', () => {
+  const png = { mediaType: 'image/png', data: 'iVBORw0KGgo=' }
+
+  test('沒有附加時是空陣列；合法的圖片原樣通過，檔名截到 255 字', () => {
+    expect(assertImages(undefined)).toEqual([])
+    expect(assertImages([png])).toEqual([png])
+    expect(assertImages([{ ...png, name: 'x'.repeat(300) }])[0].name).toHaveLength(255)
+  })
+
+  test('拒絕不支援的格式、非 base64、超過 5 MB 與超過 10 張', () => {
+    expect(() => assertImages([{ ...png, mediaType: 'image/svg+xml' }])).toThrow('只支援')
+    expect(() => assertImages([{ ...png, data: '<script>' }])).toThrow('無效的圖片資料')
+    expect(() => assertImages([{ ...png, data: '' }])).toThrow('無效的圖片資料')
+    // 5 MB 解碼前約 6.67M 個 base64 字元
+    const big = 'A'.repeat(Math.ceil((5 * 1024 * 1024 + 3) / 3) * 4)
+    expect(() => assertImages([{ ...png, data: big }])).toThrow('5 MB')
+    expect(() => assertImages(Array(11).fill(png))).toThrow('最多附加 10 張')
+    expect(() => assertImages('x')).toThrow('無效的圖片')
+  })
+
+  test('讀取圖片的參照：id 不能拿來組出其他路徑，格式要在白名單內', () => {
+    expect(assertImageRef({ id: 'abc-1', mediaType: 'image/png', extra: 1 })).toEqual({
+      id: 'abc-1',
+      mediaType: 'image/png'
+    })
+    expect(() => assertImageRef({ id: '../task', mediaType: 'image/png' })).toThrow()
+    expect(() => assertImageRef({ id: 'abc', mediaType: 'text/html' })).toThrow()
+    expect(() => assertImageRef(null)).toThrow()
+  })
+})
 
 describe('id 檢查', () => {
   test.each(['ab12cd34', 'r1', 'A_b-9', 'x'.repeat(64)])('接受 %s', (id) => {

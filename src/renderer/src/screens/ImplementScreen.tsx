@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { msgDisplay } from '@shared/protocol'
 import type { DiffStats, PlanStep, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
+import { MessageImages } from '../components/Attachments'
 import { Composer, StopButton } from '../components/Composer'
 import { InlineCode, Markdown } from '../components/Markdown'
 import { PendingPermission } from '../components/PermissionDialog'
@@ -135,6 +136,7 @@ function ChatItem({ task, e, readOnly }: { task: Task; e: TimelineEvent; readOnl
             <span className="block text-[11px] text-muted">你插話</span>
           )}
           {userTextDisplay(text)}
+          <MessageImages taskId={task.id} images={e.images} className={text ? 'mt-2' : ''} />
         </div>
       )
     }
@@ -424,9 +426,9 @@ export function ImplementScreen({
                   placeholder="插話給 Claude…"
                   // 整理報告時主程序不接受主線訊息
                   disabled={task.runState === 'finalizing'}
-                  onSend={(t) => {
+                  onSend={(t, images) => {
                     stick()
-                    void act(() => call('tasks:send', task.id, 'main', t))
+                    void act(() => call('tasks:send', task.id, 'main', t, images))
                   }}
                   extra={running && <StopButton taskId={task.id} channel="main" />}
                 />

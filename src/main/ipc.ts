@@ -10,6 +10,8 @@ import type { GitService } from './git/gitService'
 import {
   assertChannel,
   assertId,
+  assertImageRef,
+  assertImages,
   assertModel,
   assertString,
   assertVersion,
@@ -90,6 +92,7 @@ export function registerIpc(d: IpcDeps) {
       const input: CreateTaskInput = {
         repoId: assertId(raw.repoId, 'repo'),
         request: text(raw.request, '需求'),
+        images: assertImages(raw.images),
         baseBranch: assertString(raw.baseBranch, 'base branch', { max: 255 }),
         model: assertModel(raw.model)
       }
@@ -97,13 +100,18 @@ export function registerIpc(d: IpcDeps) {
       return d.tasks.createTask(input)
     },
     'tasks:timeline': (taskId) => d.tasks.timeline(task(taskId)),
-    'tasks:send': (taskId, channel, msg) =>
-      d.tasks.send(task(taskId), assertChannel(channel), text(msg)),
+    'tasks:send': (taskId, channel, msg, rawImages) => {
+      const images = assertImages(rawImages)
+      // 有附加圖片時可以不寫文字
+      const body = assertString(msg, '訊息', { allowEmpty: images.length > 0 })
+      return d.tasks.sendMessage(task(taskId), assertChannel(channel), body, images)
+    },
     'tasks:answer': (taskId, qid, answer) =>
       d.tasks.answerQuestion(task(taskId), ref(qid, '問題 id'), answer),
     'tasks:counter': (taskId, qid, msg) =>
       d.tasks.counterQuestion(task(taskId), ref(qid, '問題 id'), text(msg)),
     'tasks:changedFiles': (taskId) => d.tasks.changedFiles(task(taskId)),
+    'attachments:read': (taskId, image) => d.tasks.readImage(task(taskId), assertImageRef(image)),
     'branch:open': (taskId, input) => {
       if (!input || typeof input !== 'object') throw new Error('無效的分岔內容')
       text(input.title, '分岔標題')
