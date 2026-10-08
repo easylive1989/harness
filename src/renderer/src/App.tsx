@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { Sidebar } from './components/Sidebar'
 import { Toast } from './components/Toast'
 import { NewTaskScreen } from './screens/NewTaskScreen'
+import { SettingsScreen } from './screens/SettingsScreen'
 import { TaskScreen } from './screens/TaskScreen'
 import { type State, useStore } from './store'
 
@@ -40,12 +41,13 @@ export default function App() {
     <div className="flex h-full flex-col">
       <TitleBar title={title} />
       <div className="flex min-h-0 flex-1 gap-3 px-3 pb-3">
-        <Sidebar />
+        {/* 設定頁自帶左欄（分類與返回） */}
+        {view.kind !== 'settings' && <Sidebar />}
         <div className="flex min-w-0 flex-1 gap-3">
           {view.kind === 'new' && <NewTaskScreen />}
           {/* key：換任務時重建，回看階段等畫面狀態不會帶到下一個任務 */}
           {view.kind === 'task' && <TaskScreen key={view.taskId} taskId={view.taskId} />}
-          {/* Task 34 加入 SettingsScreen */}
+          {view.kind === 'settings' && <SettingsScreen />}
         </div>
       </div>
       <Toast />

@@ -18503,18 +18503,956 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 34：設定畫面
 
 **Files:**
+- Create: `src/shared/commandPattern.ts`（`normalizeCommand`、`hasShellOperators` 從 Task 12 的 `src/main/permissions/commandPattern.ts` 移過來：權限判斷與設定頁的輸入檢查用同一份）
+- Modify: `src/main/permissions/commandPattern.ts`（改用共用的版本，`hasShellOperators` 照樣 re-export，gate／taskManager 不用改）
+- Create: `src/renderer/src/lib/allowedCommands.ts`
 - Create: `src/renderer/src/screens/SettingsScreen.tsx`
-- Modify: `src/renderer/src/App.tsx`（`view.kind === 'settings'` 時渲染）
+- Modify: `src/renderer/src/App.tsx`（`view.kind === 'settings'` 時渲染，並隱藏 Sidebar）
+- Test: `tests/renderer/allowedCommands.test.ts`、`tests/renderer/SettingsScreen.test.tsx`
 
-**Step 1: SettingsScreen.tsx（對照 `docs/design/B6-Settings.dc.html`）**
+**行為重點：**
+- 版面對照 `docs/design/B6-Settings.dc.html`：設定頁自帶左欄（返回＋四個分類），所以 App 在設定頁不顯示 Sidebar。左欄的分類以 `aria-current="location"` 標示目前區塊：點分類時平滑捲到該區（`scroll-mt-9`）並把焦點移到區塊，以點的分類為準（最後幾區捲不到頂端）；使用者自己捲動（wheel／touch／鍵盤）後改依捲動位置判斷，捲到底時是最後一區。返回回到新任務頁。
+- 設定變更經由 `useSaveSettings` 排隊一次送一個：主程序的 `settings:set` 是「讀取 → 合併 → 寫入」，同時送出兩個會讓後寫入的蓋掉先寫入的欄位。回傳的完整設定寫回 store。
+- 失焦（或 Enter）才儲存的文字欄位（claude 路徑、worktree 位置、分支前綴）：沒有修改就不送；儲存失敗時**保留使用者輸入的內容**，在欄位下方以 `role="alert"` 顯示主程序的錯誤（例如「worktree 位置必須是絕對路徑」「分支前綴必須是非空白的文字」），欄位標 `aria-invalid`；Esc 還原成目前的設定值；儲存中停用欄位。輸入狀態存成 `draft`（`null` 代表顯示目前的設定值），不在 effect 裡同步。
+- claude 路徑留空代表自動偵測（送空字串，主程序存成 undefined）；主程序在 `claudePath` 改變時已重新偵測，renderer 存好後只讀回 `claude:status`（不帶 refresh）。「重新檢查」才帶 `true` 重新偵測。
+- 單選（預設模型）與勾選（載入專案設定）點了就存：儲存中先顯示新值並停用，失敗時回到原值並以 toast 顯示錯誤。
+- 權限區塊的前三列是固定規則（worktree 內讀寫自動允許、修改 `.git`／`.claude`／`.mcp.json` 需要核准、shell 指令需要核准），只顯示「固定」標籤，不是開關。
+- 永遠允許的指令：新增前先正規化空白；空白輸入時「新增」停用；和清單中的樣式相同（忽略空白差異）或含 `` ; & | ` < > $ `` 的樣式不能加入（後者永遠不會生效），錯誤以 `role="alert"` 顯示並保留輸入；只有一個字加上 ` *`（例如 `npm *`、`rm *`）或 `*` 不在結尾時只提醒、仍可加入。清單下方說明比對規則。儲存中停用新增與移除；移除後焦點回到輸入框。
+- 設計稿 worktree 位置旁的「選擇…」按鈕需要新的資料夾選擇 IPC，這個 Task 不做（直接輸入絕對路徑）。
+
+**Step 1: 寫失敗測試**
+
+```ts
+// tests/renderer/allowedCommands.test.ts
+import { describe, expect, test } from 'vitest'
+import { checkNewPattern } from '@renderer/lib/allowedCommands'
+
+const existing = ['git status', 'ls *']
+
+describe('checkNewPattern', () => {
+  test('去掉多餘空白；空白輸入沒有樣式', () => {
+    expect(checkNewPattern('  npm   test  * ', existing)).toEqual({ pattern: 'npm test *' })
+    expect(checkNewPattern('   ', existing)).toEqual({ pattern: '' })
+  })
+
+  test('和清單中的樣式相同（忽略空白差異）就不能加入', () => {
+    expect(checkNewPattern('git   status', existing).error).toBe('「git status」已經在清單中')
+    expect(checkNewPattern(' ls  * ', [' ls   * ']).error).toBe('「ls *」已經在清單中')
+  })
+
+  test.each(['npm test && rm -rf /', 'cat a | head', 'echo $HOME', 'ls > out', 'a; b'])(
+    '含串接或重導符號的「%s」不能加入',
+    (c) => expect(checkNewPattern(c, existing).error).toMatch('一律需要核准')
+  )
+
+  test.each(['npm *', 'git *', 'rm *'])('只有一個字加上 * 的「%s」提醒範圍很廣', (c) => {
+    const r = checkNewPattern(c, existing)
+    expect(r.error).toBeUndefined()
+    expect(r.warning).toBe(`「${c}」會允許所有 ${c.slice(0, -2)} 開頭的指令，範圍很廣`)
+  })
+
+  test('* 不在結尾時提醒會當成一般字元', () => {
+    expect(checkNewPattern('npm run test:*', existing).warning).toMatch('其他位置的 *')
+    expect(checkNewPattern('*', existing).warning).toMatch('其他位置的 *')
+  })
+
+  test('一般樣式沒有錯誤也沒有提醒', () => {
+    expect(checkNewPattern('npm test *', existing)).toEqual({ pattern: 'npm test *' })
+    expect(checkNewPattern('npm run lint', existing)).toEqual({ pattern: 'npm run lint' })
+  })
+})
+```
 
 ```tsx
-import { useState } from 'react'
-import { MODELS, type Settings } from '@shared/types'
-import { call } from '../api'
-import { Button, cx, Icons, inputClass } from '../components/ui'
+// tests/renderer/SettingsScreen.test.tsx
+import { act, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
+vi.mock('@renderer/api', () => ({
+  call: vi.fn(),
+  onEvent: vi.fn(() => () => {}),
+  errorText: (e: unknown) => (e instanceof Error ? e.message : String(e))
+}))
+import type { Settings } from '@shared/types'
+import { call } from '@renderer/api'
+import App from '@renderer/App'
+import { SettingsScreen } from '@renderer/screens/SettingsScreen'
+import { resetStoreInternals, useStore } from '@renderer/store'
+// 用主程序真正的檢查，錯誤訊息和實際 IPC 回傳的一樣
+import { validateSettingsPatch } from '../../src/main/ipcGuards'
+
+const initial: Settings = {
+  defaultModel: 'claude-opus-5-5',
+  worktreeRoot: '/Users/me/.harness/worktrees',
+  branchPrefix: 'harness/',
+  alwaysAllowedCommands: ['git status', 'git diff', 'ls *'],
+  loadProjectSettings: true
+}
+let stored: Settings
+let replies: Record<string, (...args: never[]) => unknown>
+
+const deferred = () => {
+  let resolve!: () => void
+  const promise = new Promise<void>((r) => (resolve = r))
+  return { promise, resolve }
+}
+const setCalls = () => vi.mocked(call).mock.calls.filter(([ch]) => ch === 'settings:set')
+
+beforeEach(() => {
+  stored = { ...initial }
+  replies = {
+    'settings:set': (patch: Partial<Settings>) => {
+      stored = { ...stored, ...validateSettingsPatch(patch) }
+      return stored
+    },
+    'settings:get': () => stored,
+    'claude:status': () => useStore.getState().claude
+  }
+  vi.mocked(call).mockReset()
+  vi.mocked(call).mockImplementation((async (ch: string, ...args: never[]) =>
+    replies[ch](...args)) as typeof call)
+  resetStoreInternals()
+  useStore.setState({
+    init: () => () => {},
+    ready: true,
+    repos: [],
+    tasks: {},
+    timelines: {},
+    view: { kind: 'settings' },
+    toast: undefined,
+    claude: {
+      found: true,
+      loggedIn: true,
+      path: '/usr/local/bin/claude',
+      version: '2.1.0 (Claude Code)',
+      subscriptionType: 'max',
+      email: 'me@example.com'
+    },
+    settings: initial
+  })
+})
+
+const region = (name: string) => screen.getByRole('region', { name })
+const addInput = () => screen.getByLabelText('新增指令')
+const addButton = () => screen.getByRole('button', { name: '新增' })
+
+describe('SettingsScreen：Claude 帳號', () => {
+  test('顯示登入狀態、路徑、版本與帳號；重新檢查會重新偵測', async () => {
+    render(<SettingsScreen />)
+    const account = region('Claude 帳號')
+    expect(within(account).getByText('已透過 Claude Code 登入 · Max 方案')).toBeInTheDocument()
+    expect(within(account).getByText('/usr/local/bin/claude')).toBeInTheDocument()
+    expect(within(account).getByText('2.1.0 (Claude Code)')).toBeInTheDocument()
+    expect(within(account).getByText('me@example.com')).toBeInTheDocument()
+
+    replies['claude:status'] = () => ({
+      found: true,
+      loggedIn: false,
+      error: '尚未登入，請在終端機執行 claude 並完成登入。'
+    })
+    await userEvent.click(within(account).getByRole('button', { name: '重新檢查' }))
+    expect(call).toHaveBeenCalledWith('claude:status', true)
+    expect(
+      await within(account).findByText('尚未登入，請在終端機執行 claude 並完成登入。')
+    ).toBeInTheDocument()
+  })
+
+  test('claude 路徑失焦時儲存並讀回偵測結果；清空改回自動偵測', async () => {
+    replies['claude:status'] = () => ({
+      found: true,
+      loggedIn: false,
+      path: '/opt/claude',
+      error: '無法讀取 Claude Code 狀態：spawn ENOENT'
+    })
+    render(<SettingsScreen />)
+    const field = screen.getByLabelText('claude 執行檔路徑')
+    await userEvent.type(field, ' /opt/claude ')
+    await userEvent.tab()
+    expect(call).toHaveBeenCalledWith('settings:set', { claudePath: '/opt/claude' })
+    // 主程序在 settings:set 時已重新偵測，只讀回狀態、不再要求重新偵測
+    await waitFor(() => expect(call).toHaveBeenLastCalledWith('claude:status'))
+    expect(await screen.findByText('無法讀取 Claude Code 狀態：spawn ENOENT')).toBeInTheDocument()
+    expect(field).toHaveValue('/opt/claude')
+
+    await userEvent.clear(field)
+    await userEvent.tab()
+    expect(call).toHaveBeenCalledWith('settings:set', { claudePath: '' })
+    await waitFor(() => expect(useStore.getState().settings?.claudePath).toBeUndefined())
+    expect(field).toHaveValue('')
+  })
+})
+
+describe('SettingsScreen：模型與專案設定', () => {
+  test('點選模型即儲存為預設模型', async () => {
+    render(<SettingsScreen />)
+    expect(screen.getByRole('radio', { name: /Opus 5.5/ })).toBeChecked()
+    await userEvent.click(screen.getByRole('radio', { name: /Sonnet 5.5/ }))
+    expect(call).toHaveBeenCalledWith('settings:set', { defaultModel: 'claude-sonnet-5-5' })
+    await waitFor(() =>
+      expect(useStore.getState().settings?.defaultModel).toBe('claude-sonnet-5-5')
+    )
+    expect(screen.getByRole('radio', { name: /Sonnet 5.5/ })).toBeChecked()
+  })
+
+  test('載入專案設定：勾選即儲存；失敗時回到原值並顯示 toast', async () => {
+    render(<SettingsScreen />)
+    const box = screen.getByRole('checkbox', { name: /載入 repo 的 CLAUDE.md/ })
+    expect(box).toBeChecked()
+    await userEvent.click(box)
+    expect(call).toHaveBeenCalledWith('settings:set', { loadProjectSettings: false })
+    await waitFor(() => expect(box).not.toBeChecked())
+
+    replies['settings:set'] = () => {
+      throw new Error('無法寫入設定檔')
+    }
+    await userEvent.click(box)
+    await waitFor(() => expect(useStore.getState().toast?.text).toBe('無法寫入設定檔'))
+    expect(box).not.toBeChecked()
+  })
+
+  test('設定變更依序送出：前一個完成前不送下一個', async () => {
+    const gate = deferred()
+    const save = replies['settings:set']
+    replies['settings:set'] = async (patch: never) => {
+      if ('defaultModel' in (patch as object)) await gate.promise
+      return save(patch)
+    }
+    render(<SettingsScreen />)
+    await userEvent.click(screen.getByRole('radio', { name: /Sonnet 5.5/ }))
+    // 儲存中先顯示新的選擇，並停用選項
+    expect(screen.getByRole('radio', { name: /Sonnet 5.5/ })).toBeChecked()
+    expect(screen.getByRole('radio', { name: /Opus 5.5/ })).toBeDisabled()
+    await userEvent.click(screen.getByRole('checkbox', { name: /載入 repo 的 CLAUDE.md/ }))
+    expect(setCalls()).toHaveLength(1)
+    await act(async () => gate.resolve())
+    await waitFor(() => expect(setCalls()).toHaveLength(2))
+    await waitFor(() =>
+      expect(useStore.getState().settings).toMatchObject({
+        defaultModel: 'claude-sonnet-5-5',
+        loadProjectSettings: false
+      })
+    )
+  })
+})
+
+describe('SettingsScreen：權限', () => {
+  test('固定的權限規則只是說明，不是開關', () => {
+    render(<SettingsScreen />)
+    const perm = region('實作階段權限')
+    expect(within(perm).queryByRole('checkbox')).not.toBeInTheDocument()
+    expect(within(perm).getAllByText('固定')).toHaveLength(3)
+    expect(within(perm).getByText('worktree 內的檔案讀寫自動允許')).toBeInTheDocument()
+    expect(within(perm).getByText('shell 指令需要核准')).toBeInTheDocument()
+    expect(within(perm).getByText('.mcp.json')).toBeInTheDocument()
+    // 清單下方說明樣式規則與串接指令
+    expect(within(perm).getByText(/一律需要核准/)).toBeInTheDocument()
+  })
+
+  test('新增指令時正規化空白，成功後清空輸入', async () => {
+    render(<SettingsScreen />)
+    expect(addButton()).toBeDisabled()
+    await userEvent.type(addInput(), '   ')
+    expect(addButton()).toBeDisabled()
+    await userEvent.type(addInput(), 'npm   test *')
+    await userEvent.click(addButton())
+    expect(call).toHaveBeenCalledWith('settings:set', {
+      alwaysAllowedCommands: ['git status', 'git diff', 'ls *', 'npm test *']
+    })
+    await waitFor(() => expect(addInput()).toHaveValue(''))
+    expect(screen.getByRole('button', { name: '移除 npm test *' })).toBeInTheDocument()
+  })
+
+  test('重複或含串接符號的樣式不能加入，錯誤顯示在輸入框下方', async () => {
+    render(<SettingsScreen />)
+    await userEvent.type(addInput(), 'git  status{Enter}')
+    expect(screen.getByRole('alert')).toHaveTextContent('「git status」已經在清單中')
+    expect(addInput()).toHaveAttribute('aria-invalid', 'true')
+    expect(addInput()).toHaveValue('git  status')
+    // 修改輸入時清掉錯誤
+    await userEvent.clear(addInput())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await userEvent.type(addInput(), 'npm test && rm -rf /{Enter}')
+    expect(screen.getByRole('alert')).toHaveTextContent('一律需要核准')
+    expect(setCalls()).toHaveLength(0)
+  })
+
+  test('範圍很廣的樣式只提醒，仍可加入', async () => {
+    render(<SettingsScreen />)
+    await userEvent.type(addInput(), 'npm *')
+    expect(screen.getByText('「npm *」會允許所有 npm 開頭的指令，範圍很廣')).toBeInTheDocument()
+    expect(addButton()).toBeEnabled()
+    await userEvent.click(addButton())
+    expect(call).toHaveBeenCalledWith('settings:set', {
+      alwaysAllowedCommands: ['git status', 'git diff', 'ls *', 'npm *']
+    })
+    await waitFor(() => expect(screen.queryByText(/範圍很廣/)).not.toBeInTheDocument())
+  })
+
+  test('移除指令；儲存中停用清單按鈕，完成後焦點回到輸入框', async () => {
+    const gate = deferred()
+    const save = replies['settings:set']
+    replies['settings:set'] = async (patch: never) => {
+      await gate.promise
+      return save(patch)
+    }
+    render(<SettingsScreen />)
+    await userEvent.click(screen.getByRole('button', { name: '移除 ls *' }))
+    expect(call).toHaveBeenCalledWith('settings:set', {
+      alwaysAllowedCommands: ['git status', 'git diff']
+    })
+    expect(screen.getByRole('button', { name: '移除 git status' })).toBeDisabled()
+    await act(async () => gate.resolve())
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: '移除 ls *' })).not.toBeInTheDocument()
+    )
+    expect(screen.getByRole('button', { name: '移除 git status' })).toBeEnabled()
+    expect(addInput()).toHaveFocus()
+  })
+
+  test('清單是空的時說明每個指令都會詢問', () => {
+    useStore.setState({ settings: { ...initial, alwaysAllowedCommands: [] } })
+    render(<SettingsScreen />)
+    expect(screen.getByText('清單是空的，每個 shell 指令都會先詢問你。')).toBeInTheDocument()
+  })
+})
+
+describe('SettingsScreen：Worktree 與分支', () => {
+  test('相對路徑儲存失敗時保留輸入並顯示錯誤，修正後儲存', async () => {
+    render(<SettingsScreen />)
+    const field = screen.getByLabelText('Worktree 存放位置')
+    await userEvent.clear(field)
+    await userEvent.type(field, 'worktrees')
+    await userEvent.tab()
+    expect(await screen.findByRole('alert')).toHaveTextContent('worktree 位置必須是絕對路徑')
+    expect(field).toHaveValue('worktrees')
+    expect(field).toHaveAttribute('aria-invalid', 'true')
+    expect(useStore.getState().settings?.worktreeRoot).toBe('/Users/me/.harness/worktrees')
+
+    await userEvent.clear(field)
+    await userEvent.type(field, '/tmp/wt{Enter}')
+    await waitFor(() => expect(useStore.getState().settings?.worktreeRoot).toBe('/tmp/wt'))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(field).toHaveValue('/tmp/wt')
+    expect(field).not.toHaveAttribute('aria-invalid')
+  })
+
+  test('Esc 還原成目前的設定值；沒有修改時失焦不儲存', async () => {
+    render(<SettingsScreen />)
+    const field = screen.getByLabelText('分支名稱前綴')
+    await userEvent.click(field)
+    await userEvent.tab()
+    expect(setCalls()).toHaveLength(0)
+    await userEvent.type(field, 'x{Escape}')
+    expect(field).toHaveValue('harness/')
+    await userEvent.tab()
+    expect(setCalls()).toHaveLength(0)
+  })
+
+  test('分支前綴清空時保留空白輸入並顯示錯誤', async () => {
+    render(<SettingsScreen />)
+    const field = screen.getByLabelText('分支名稱前綴')
+    await userEvent.clear(field)
+    await userEvent.tab()
+    expect(await screen.findByRole('alert')).toHaveTextContent('分支前綴必須是非空白的文字')
+    expect(field).toHaveValue('')
+    expect(useStore.getState().settings?.branchPrefix).toBe('harness/')
+  })
+})
+
+describe('SettingsScreen：版面與導覽', () => {
+  test('設定頁取代側欄；左欄標示目前分類，返回回到新任務', async () => {
+    render(<App />)
+    expect(screen.queryByRole('navigation', { name: 'Repo 與任務' })).not.toBeInTheDocument()
+    const nav = screen.getByRole('navigation', { name: '設定分類' })
+    const link = (name: string) => within(nav).getByRole('link', { name })
+    expect(link('Claude 帳號')).toHaveAttribute('aria-current', 'location')
+    await userEvent.click(link('權限'))
+    expect(link('權限')).toHaveAttribute('aria-current', 'location')
+    expect(link('Claude 帳號')).not.toHaveAttribute('aria-current')
+    expect(region('實作階段權限')).toHaveFocus()
+
+    await userEvent.click(within(nav).getByRole('button', { name: '返回' }))
+    expect(useStore.getState().view).toEqual({ kind: 'new' })
+    expect(screen.getByRole('navigation', { name: 'Repo 與任務' })).toBeInTheDocument()
+  })
+
+  test('設定沒有載入時可以重新載入', async () => {
+    useStore.setState({ settings: undefined })
+    render(<SettingsScreen />)
+    expect(screen.getByText(/無法載入設定/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '重新載入' }))
+    expect(call).toHaveBeenCalledWith('settings:get')
+    expect(await screen.findByRole('region', { name: '模型' })).toBeInTheDocument()
+  })
+})
+```
+
+**Step 2: 確認失敗**
+
+Run: `npx vitest run tests/renderer/allowedCommands.test.ts tests/renderer/SettingsScreen.test.tsx` → FAIL（模組不存在）
+
+**Step 3: 共用的指令正規化與串接判斷**
+
+```ts
+// src/shared/commandPattern.ts
+// 指令樣式的共用規則：主程序的權限判斷與設定頁的輸入檢查用同一份
+
+/** 去掉前後空白並把連續空白合併成一個 */
+export const normalizeCommand = (s: string) => s.trim().replace(/\s+/g, ' ')
+
+/** 串接、重導、命令替換、變數展開或換行都視為需要人工核准 */
+export function hasShellOperators(command: string): boolean {
+  return /[;&|`<>$\n\r]/.test(command)
+}
+```
+
+```ts
+// src/main/permissions/commandPattern.ts
+import { hasShellOperators, normalizeCommand as normalize } from '@shared/commandPattern'
+
+export { hasShellOperators }
+
+export function matchesPattern(command: string, pattern: string): boolean {
+  const c = normalize(command)
+  const p = normalize(pattern)
+  if (!p) return false
+  if (p.endsWith(' *')) {
+    const prefix = p.slice(0, -2)
+    return c === prefix || c.startsWith(`${prefix} `)
+  }
+  return c === p
+}
+
+export function suggestPattern(command: string): string {
+  const parts = normalize(command).split(' ')
+  return `${parts.slice(0, Math.min(2, parts.length)).join(' ')} *`
+}
+```
+
+**Step 4: lib/allowedCommands.ts**
+
+```ts
+// src/renderer/src/lib/allowedCommands.ts
+// 設定頁「永遠允許的指令」新增前的檢查（比對規則見 src/main/permissions/commandPattern.ts）
+import { hasShellOperators, normalizeCommand } from '@shared/commandPattern'
+
+export interface PatternCheck {
+  /** 正規化後要存的樣式；空字串代表還沒輸入 */
+  pattern: string
+  /** 不能加入的原因 */
+  error?: string
+  /** 可以加入，但要提醒使用者的事（範圍很廣、* 不在結尾） */
+  warning?: string
+}
+
+export function checkNewPattern(raw: string, existing: string[]): PatternCheck {
+  const pattern = normalizeCommand(raw)
+  if (!pattern) return { pattern }
+  if (existing.some((c) => normalizeCommand(c) === pattern))
+    return { pattern, error: `「${pattern}」已經在清單中` }
+  // 含串接或重導的指令一律詢問，這種樣式永遠不會生效
+  if (hasShellOperators(pattern))
+    return { pattern, error: '含有 ; & | ` < > $ 的指令一律需要核准，加進清單也不會生效' }
+  const wildcard = pattern.endsWith(' *')
+  const prefix = wildcard ? pattern.slice(0, -2) : pattern
+  if (prefix.includes('*'))
+    return { pattern, warning: '只有結尾的「 *」代表任意參數，其他位置的 * 會當成一般字元比對' }
+  if (wildcard && !prefix.includes(' '))
+    return {
+      pattern,
+      warning: `「${pattern}」會允許所有 ${prefix} 開頭的指令，範圍很廣`
+    }
+  return { pattern }
+}
+```
+
+**Step 5: SettingsScreen.tsx（對照 `docs/design/B6-Settings.dc.html`）**
+
+```tsx
+// src/renderer/src/screens/SettingsScreen.tsx
+// 對照 docs/design/B6-Settings.dc.html
+import {
+  type FormEvent,
+  type MouseEvent,
+  type ReactNode,
+  useCallback,
+  useId,
+  useRef,
+  useState
+} from 'react'
+import { type ClaudeStatus, MODELS, type Settings } from '@shared/types'
 import { useShallow } from 'zustand/react/shallow'
+import { call, errorText } from '../api'
+import { Button, cx, Icons, inputClass, Pill } from '../components/ui'
+import { checkNewPattern } from '../lib/allowedCommands'
+import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
+
+type Save = (patch: Partial<Settings>) => Promise<Settings>
+
+const SECTIONS = [
+  { id: 'account', label: 'Claude 帳號' },
+  { id: 'model', label: '模型' },
+  { id: 'perm', label: '權限' },
+  { id: 'workspace', label: 'Worktree 與專案設定' }
+] as const
+type SectionId = (typeof SECTIONS)[number]['id']
+const sectionDomId = (id: SectionId) => `settings-${id}`
+const sectionTitleId = (id: SectionId) => `settings-${id}-title`
+
+/** 捲動位置對應的分類：區塊頂端進入上方三分之一就算目前分類；捲到底時是最後一個 */
+function sectionInView(main: HTMLElement): SectionId {
+  if (main.scrollTop + main.clientHeight >= main.scrollHeight - 4) return SECTIONS.at(-1)!.id
+  const line = main.getBoundingClientRect().top + main.clientHeight / 3
+  let current: SectionId = SECTIONS[0].id
+  for (const s of SECTIONS) {
+    const el = document.getElementById(sectionDomId(s.id))
+    if (el && el.getBoundingClientRect().top <= line) current = s.id
+  }
+  return current
+}
+
+/**
+ * 依序送出設定變更：主程序的 settings:set 是「讀取 → 合併 → 寫入」，
+ * 兩個同時送出會讓後寫入的蓋掉先寫入的欄位，所以排隊一次送一個。
+ * 成功時更新 store；失敗時把錯誤丟回呼叫端，由各欄位決定怎麼顯示。
+ */
+function useSaveSettings(): Save {
+  const tail = useRef<Promise<unknown>>(Promise.resolve())
+  return useCallback((patch: Partial<Settings>) => {
+    const run = tail.current.then(async () => {
+      const next = await call('settings:set', patch)
+      useStore.setState({ settings: next })
+      return next
+    })
+    tail.current = run.catch(() => undefined)
+    return run
+  }, [])
+}
+
+/** 點一下就生效的選項（單選、勾選）：儲存期間先顯示新值，失敗時回到原值並以 toast 顯示錯誤 */
+function useInstantSetting<K extends keyof Settings>(key: K, saved: Settings[K], save: Save) {
+  const act = useStore((s) => s.act)
+  const [saving, run] = usePending()
+  const [next, setNext] = useState<Settings[K]>(saved)
+  const set = (value: Settings[K]) => {
+    setNext(value)
+    void run(() => act(() => save({ [key]: value } as Partial<Settings>)))
+  }
+  return { value: saving ? next : saved, saving, set }
+}
+
+/** 左欄分類對應的區塊；tabIndex 讓點左欄後焦點移到這裡 */
+function Section({ id, title, children }: { id: SectionId; title: string; children: ReactNode }) {
+  return (
+    <section
+      id={sectionDomId(id)}
+      aria-labelledby={sectionTitleId(id)}
+      tabIndex={-1}
+      className="flex scroll-mt-9 flex-col gap-3 outline-none"
+    >
+      <h2 id={sectionTitleId(id)} className="m-0 text-[15px] font-bold">
+        {title}
+      </h2>
+      {children}
+    </section>
+  )
+}
+
+/**
+ * 失焦或按 Enter 時儲存的文字設定。儲存失敗時保留輸入的內容並在下方顯示錯誤，
+ * 按 Esc 還原成目前的設定值。
+ */
+function TextSetting({
+  label,
+  saved,
+  onSave,
+  placeholder,
+  hint
+}: {
+  label: string
+  saved: string
+  onSave: (value: string) => Promise<unknown>
+  placeholder?: string
+  hint?: ReactNode
+}) {
+  // null：沒有未儲存的修改，顯示目前的設定值
+  const [draft, setDraft] = useState<string | null>(null)
+  const [error, setError] = useState<string>()
+  const [saving, run] = usePending()
+  const id = useId()
+  const commit = async () => {
+    if (draft === null) return
+    const value = draft.trim()
+    if (value === saved) {
+      setDraft(null)
+      setError(undefined)
+      return
+    }
+    await run(async () => {
+      try {
+        await onSave(value)
+        setDraft(null)
+        setError(undefined)
+      } catch (e) {
+        setError(errorText(e))
+      }
+    })
+  }
+  return (
+    <div className="flex flex-col gap-1.5 text-[13px]">
+      <label htmlFor={id} className="font-medium">
+        {label}
+      </label>
+      <input
+        id={id}
+        value={draft ?? saved}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => void commit()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur()
+          else if (e.key === 'Escape') {
+            setDraft(null)
+            setError(undefined)
+          }
+        }}
+        disabled={saving}
+        placeholder={placeholder}
+        spellCheck={false}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? `${id}-error` : hint ? `${id}-hint` : undefined}
+        className={cx(
+          inputClass,
+          'h-10 rounded-[10px] px-3 font-mono text-xs disabled:bg-fill-2',
+          error && 'border-danger focus:border-danger'
+        )}
+      />
+      {error && (
+        <span id={`${id}-error`} role="alert" className="text-xs text-danger">
+          {error}
+        </span>
+      )}
+      {hint && (
+        <span id={`${id}-hint`} className="text-xs text-muted">
+          {hint}
+        </span>
+      )}
+    </div>
+  )
+}
+
+/** 「Max」這類方案名稱首字大寫；沒有資料時顯示「訂閱方案」 */
+const planLabel = (type?: string) =>
+  type ? `${type.slice(0, 1).toUpperCase()}${type.slice(1)} 方案` : '訂閱方案'
+
+function AccountSection({
+  claude,
+  claudePath,
+  save
+}: {
+  claude?: ClaudeStatus
+  claudePath: string
+  save: Save
+}) {
+  const act = useStore((s) => s.act)
+  const [checking, runCheck] = usePending()
+  const ok = !!claude?.loggedIn
+  const recheck = () =>
+    void runCheck(() =>
+      act(async () => useStore.setState({ claude: await call('claude:status', true) }))
+    )
+  // 主程序在 claudePath 改變時已重新偵測，這裡只需讀回最新狀態
+  const saveClaudePath = async (value: string) => {
+    await save({ claudePath: value })
+    await act(async () => useStore.setState({ claude: await call('claude:status') }))
+  }
+  return (
+    <Section id="account" title="Claude 帳號">
+      <div
+        className={cx(
+          'flex flex-wrap items-center gap-3.5 rounded-[14px] p-4',
+          ok ? 'bg-brand-tint' : 'bg-danger-soft'
+        )}
+      >
+        <span
+          aria-hidden
+          className={cx('size-2.5 flex-none rounded-full', ok ? 'bg-ok' : 'bg-danger')}
+        />
+        <span role="status" className="flex min-w-0 flex-[1_1_240px] flex-col">
+          <span className={cx('font-medium', !ok && 'text-danger')}>
+            {ok
+              ? `已透過 Claude Code 登入 · ${planLabel(claude?.subscriptionType)}`
+              : (claude?.error ?? '正在檢查 Claude Code…')}
+          </span>
+          <span className={cx('text-xs', ok ? 'text-brand-muted' : 'text-muted')}>
+            使用本機 Claude Code 的登入憑證，不需要 API key
+          </span>
+        </span>
+        <Button
+          disabled={checking}
+          onClick={recheck}
+          className="h-[38px] rounded-[10px] bg-surface px-3.5 text-ink hover:bg-fill"
+        >
+          {checking ? '檢查中…' : '重新檢查'}
+        </Button>
+      </div>
+      <dl className="m-0 grid grid-cols-[140px_minmax(0,1fr)] items-baseline gap-x-4 gap-y-2 px-1 text-[13px]">
+        <dt className="text-muted">Claude Code</dt>
+        <dd className="m-0 min-w-0">
+          {claude?.path ? <code className="break-all">{claude.path}</code> : '—'}
+        </dd>
+        <dt className="text-muted">版本</dt>
+        <dd className="m-0 font-mono text-xs">{claude?.version ?? '—'}</dd>
+        {claude?.email && (
+          <>
+            <dt className="text-muted">帳號</dt>
+            <dd className="m-0 min-w-0 break-all">{claude.email}</dd>
+          </>
+        )}
+      </dl>
+      <span className="text-xs text-muted">
+        尚未登入時，會請你在終端機執行 <code>claude</code> 完成登入。
+      </span>
+      <TextSetting
+        label="claude 執行檔路徑"
+        saved={claudePath}
+        onSave={saveClaudePath}
+        placeholder="自動偵測"
+        hint="留空時從登入 shell 的 PATH 尋找 claude。"
+      />
+    </Section>
+  )
+}
+
+function ModelSection({ settings, save }: { settings: Settings; save: Save }) {
+  const model = useInstantSetting('defaultModel', settings.defaultModel, save)
+  return (
+    <Section id="model" title="模型">
+      <div
+        role="radiogroup"
+        aria-labelledby={sectionTitleId('model')}
+        className="grid grid-cols-2 gap-2.5"
+      >
+        {MODELS.map((m) => {
+          const on = model.value === m.id
+          return (
+            <label
+              key={m.id}
+              className={cx(
+                'flex cursor-pointer gap-2.5 rounded-[14px] p-3.5',
+                on ? 'bg-brand-tint shadow-[0_0_0_2px_var(--color-brand)]' : 'bg-fill-2'
+              )}
+            >
+              <input
+                type="radio"
+                name="defaultModel"
+                checked={on}
+                disabled={model.saving}
+                onChange={() => model.set(m.id)}
+                className="mt-[5px] accent-brand"
+              />
+              <span className="flex flex-col">
+                <span className="font-medium">{m.label}</span>
+                <span className={cx('text-xs', on ? 'text-brand-muted' : 'text-muted')}>
+                  {m.hint}
+                </span>
+              </span>
+            </label>
+          )
+        })}
+      </div>
+      <span className="text-xs text-muted">每個任務建立時也可以單獨選擇。</span>
+    </Section>
+  )
+}
+
+/** 固定的權限規則：只說明，不能關閉 */
+function FixedRule({ title, detail }: { title: ReactNode; detail: string }) {
+  return (
+    <div className="flex items-center gap-3 border-b border-line-soft px-4 py-3.5">
+      <span className="flex flex-1 flex-col">
+        <span className="font-medium">{title}</span>
+        <span className="text-xs text-muted">{detail}</span>
+      </span>
+      <Pill tone="brand" className="flex-none">
+        固定
+      </Pill>
+    </div>
+  )
+}
+
+function AllowedCommands({ list, save }: { list: string[]; save: Save }) {
+  const [input, setInput] = useState('')
+  const [error, setError] = useState<string>()
+  const [saving, run] = usePending()
+  const inputRef = useRef<HTMLInputElement>(null)
+  const id = useId()
+  const check = checkNewPattern(input, list)
+  const warning = !error && check.warning
+
+  const update = (next: string[]) =>
+    run(async () => {
+      try {
+        await save({ alwaysAllowedCommands: next })
+        setError(undefined)
+        return true
+      } catch (e) {
+        setError(errorText(e))
+        return false
+      }
+    })
+  const add = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!check.pattern) return
+    if (check.error) {
+      setError(check.error)
+      return
+    }
+    if (await update([...list, check.pattern])) setInput('')
+  }
+  const remove = async (c: string) => {
+    // 移除的按鈕會消失，把焦點交給輸入框
+    if (await update(list.filter((x) => x !== c))) inputRef.current?.focus()
+  }
+
+  return (
+    <div className="flex flex-col gap-2.5 px-4 py-3.5">
+      <span id={`${id}-label`} className="text-[13px] font-medium">
+        永遠允許的指令
+      </span>
+      {list.length > 0 ? (
+        <ul aria-labelledby={`${id}-label`} className="m-0 flex list-none flex-wrap gap-1.5 p-0">
+          {list.map((c, i) => (
+            <li
+              key={`${i}:${c}`}
+              className="flex items-center gap-1.5 rounded-full bg-fill py-1 pr-1.5 pl-2.5 font-mono text-xs"
+            >
+              {c}
+              <button
+                type="button"
+                aria-label={`移除 ${c}`}
+                disabled={saving}
+                onClick={() => void remove(c)}
+                className="flex size-[22px] cursor-pointer items-center justify-center rounded-full text-muted hover:bg-chip hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Icons.X width={10} height={10} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <span className="text-xs text-muted">清單是空的，每個 shell 指令都會先詢問你。</span>
+      )}
+      <form onSubmit={(e) => void add(e)} className="flex gap-2">
+        <input
+          ref={inputRef}
+          aria-label="新增指令"
+          value={input}
+          onChange={(e) => {
+            setInput(e.target.value)
+            setError(undefined)
+          }}
+          placeholder="例如 npm test *"
+          spellCheck={false}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={[error && `${id}-error`, warning && `${id}-warning`, `${id}-hint`]
+            .filter(Boolean)
+            .join(' ')}
+          className={cx(
+            inputClass,
+            'h-[38px] min-w-0 flex-1 rounded-[10px] px-3 font-mono text-xs',
+            error && 'border-danger focus:border-danger'
+          )}
+        />
+        <Button
+          type="submit"
+          disabled={saving || !check.pattern}
+          className="h-[38px] rounded-[10px] px-3.5 text-ink"
+        >
+          新增
+        </Button>
+      </form>
+      {/* 訊息之間用 margin 而不是 gap：常駐的空 live region 不會多佔一格間距 */}
+      <div className="flex flex-col text-xs">
+        {error && (
+          <span id={`${id}-error`} role="alert" className="mb-2.5 text-danger">
+            {error}
+          </span>
+        )}
+        {/* 常駐的 live region：提醒出現或改變時唸出來 */}
+        <div aria-live="polite">
+          {warning && (
+            <p
+              id={`${id}-warning`}
+              className="m-0 mb-2.5 rounded-[10px] bg-decision px-3 py-2 text-decision-ink"
+            >
+              {warning}
+            </p>
+          )}
+        </div>
+        <span id={`${id}-hint`} className="text-muted">
+          以空格加 <code>*</code> 結尾可接任意參數（<code>npm test *</code> 也允許{' '}
+          <code>npm test --watch</code>），否則要完全相同。含 ; &amp; | ` &lt; &gt; $
+          或換行的指令一律需要核准。
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function PermissionSection({ settings, save }: { settings: Settings; save: Save }) {
+  return (
+    <Section id="perm" title="實作階段權限">
+      <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_var(--color-chip)]">
+        <FixedRule title="worktree 內的檔案讀寫自動允許" detail="worktree 以外的檔案一律拒絕" />
+        <FixedRule
+          title={
+            <>
+              修改 <code>.git</code>、<code>.claude</code> 與 <code>.mcp.json</code> 需要核准
+            </>
+          }
+          detail="這些檔案會改變 git 或 Claude 的行為，即使在 worktree 內也會先詢問"
+        />
+        <FixedRule title="shell 指令需要核准" detail="下方清單中的指令不必詢問" />
+        <AllowedCommands list={settings.alwaysAllowedCommands} save={save} />
+      </div>
+    </Section>
+  )
+}
+
+function WorkspaceSection({ settings, save }: { settings: Settings; save: Save }) {
+  const loadProject = useInstantSetting('loadProjectSettings', settings.loadProjectSettings, save)
+  return (
+    <Section id="workspace" title="Worktree 與專案設定">
+      <TextSetting
+        label="Worktree 存放位置"
+        saved={settings.worktreeRoot}
+        onSave={(v) => save({ worktreeRoot: v })}
+        hint="必須是絕對路徑。只影響之後建立的任務，已有的 worktree 不會搬移。"
+      />
+      <TextSetting
+        label="分支名稱前綴"
+        saved={settings.branchPrefix}
+        onSave={(v) => save({ branchPrefix: v })}
+      />
+      <label className="flex cursor-pointer items-center gap-3 rounded-[14px] px-4 py-3.5 shadow-[0_0_0_1px_var(--color-chip)]">
+        <span className="flex flex-1 flex-col">
+          <span className="font-medium">載入 repo 的 CLAUDE.md 與 .claude 設定</span>
+          <span className="text-xs text-muted">
+            包含專案的 skills 與 MCP；不載入 ~/.claude 的 hooks 與 plugins
+          </span>
+        </span>
+        <input
+          type="checkbox"
+          checked={loadProject.value}
+          disabled={loadProject.saving}
+          onChange={(e) => loadProject.set(e.target.checked)}
+          className="size-[18px] flex-none accent-brand"
+        />
+      </label>
+    </Section>
+  )
+}
 
 export function SettingsScreen() {
   const { settings, claude } = useStore(
@@ -18522,101 +19460,76 @@ export function SettingsScreen() {
   )
   const act = useStore((s) => s.act)
   const open = useStore((s) => s.open)
-  const [newCmd, setNewCmd] = useState('')
-  if (!settings) return null
-  const save = (patch: Partial<Settings>) => act(async () => useStore.setState({ settings: await call('settings:set', patch) }))
-  const refresh = () => act(async () => useStore.setState({ claude: await call('claude:status', true) }))
+  const save = useSaveSettings()
+  // 目前分類：點左欄時以點的那個為準（目標可能捲不到頂端），使用者自己捲動後改看捲動位置
+  const [spied, setSpied] = useState<SectionId>('account')
+  const [clicked, setClicked] = useState<SectionId | null>(null)
+  const active = clicked ?? spied
+  const release = () => setClicked(null)
+
+  const jump = (e: MouseEvent<HTMLAnchorElement>, id: SectionId) => {
+    e.preventDefault()
+    setClicked(id)
+    const el = document.getElementById(sectionDomId(id))
+    el?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+    el?.focus({ preventScroll: true })
+  }
+  const reload = () =>
+    void act(async () => useStore.setState({ settings: await call('settings:get') }))
 
   return (
     <>
       <nav aria-label="設定分類" className="flex w-[236px] flex-none flex-col gap-1 px-1.5 py-2">
-        <button type="button" onClick={() => void open({ kind: 'new' })} className="mb-3 flex h-10 items-center gap-2 px-2.5 text-[13px] text-ink-2"><Icons.Back width={14} height={14} />返回</button>
-        {[['account', 'Claude 帳號'], ['model', '模型'], ['perm', '權限'], ['workspace', 'Worktree 與專案設定']].map(([id, label]) => (
-          <a key={id} href={`#${id}`} className="rounded-xl px-3 py-2.5 text-[13px] text-ink-2 no-underline hover:bg-white/60">{label}</a>
+        <button
+          type="button"
+          onClick={() => void open({ kind: 'new' })}
+          className="mb-3 flex h-10 cursor-pointer items-center gap-2 px-2.5 text-[13px] text-ink-2 hover:text-ink"
+        >
+          <Icons.Back width={14} height={14} />
+          返回
+        </button>
+        {SECTIONS.map((s) => (
+          <a
+            key={s.id}
+            href={`#${sectionDomId(s.id)}`}
+            onClick={(e) => jump(e, s.id)}
+            aria-current={active === s.id ? 'location' : undefined}
+            className={cx(
+              'rounded-xl px-3 py-2.5 text-[13px] no-underline',
+              active === s.id
+                ? 'bg-surface font-medium text-ink shadow-raised hover:text-ink'
+                : 'text-ink-2 hover:bg-surface/60 hover:text-ink'
+            )}
+          >
+            {s.label}
+          </a>
         ))}
       </nav>
-      <main className="flex-1 overflow-y-auto rounded-2xl bg-surface px-7 py-9 shadow-card">
+      <main
+        onScroll={(e) => setSpied(sectionInView(e.currentTarget))}
+        onWheel={release}
+        onTouchMove={release}
+        onKeyDown={release}
+        onPointerDown={(e) => e.target === e.currentTarget && release()}
+        className="min-w-0 flex-1 overflow-y-auto rounded-2xl bg-surface px-7 py-9 shadow-card"
+      >
         <div className="mx-auto flex max-w-[680px] flex-col gap-8">
           <h1 className="m-0 text-2xl font-bold">設定</h1>
-
-          <section id="account" className="flex flex-col gap-3">
-            <span className="text-[15px] font-bold">Claude 帳號</span>
-            <div className={cx('flex flex-wrap items-center gap-3.5 rounded-[14px] p-4', claude?.loggedIn ? 'bg-brand-tint' : 'bg-red-50')}>
-              <span className={cx('size-2.5 rounded-full', claude?.loggedIn ? 'bg-green-600' : 'bg-danger')} />
-              <span className="flex flex-1 flex-col">
-                <span className="font-medium">{claude?.loggedIn ? `已透過 Claude Code 登入 · ${claude.subscriptionType ?? '訂閱方案'}` : claude?.error ?? '未就緒'}</span>
-                <span className="text-xs text-muted">使用本機 Claude Code 的登入憑證，不需要 API key</span>
-              </span>
-              <Button size="sm" onClick={() => void refresh()}>重新檢查</Button>
+          {settings ? (
+            <>
+              <AccountSection claude={claude} claudePath={settings.claudePath ?? ''} save={save} />
+              <ModelSection settings={settings} save={save} />
+              <PermissionSection settings={settings} save={save} />
+              <WorkspaceSection settings={settings} save={save} />
+            </>
+          ) : (
+            <div className="flex items-center gap-3 text-muted">
+              無法載入設定。
+              <Button size="sm" onClick={reload}>
+                重新載入
+              </Button>
             </div>
-            <div className="grid grid-cols-[140px_minmax(0,1fr)] gap-x-4 gap-y-2 px-1 text-[13px]">
-              <span className="text-muted">Claude Code</span><code className="justify-self-start">{claude?.path ?? '—'}</code>
-              <span className="text-muted">版本</span><span className="font-mono text-xs">{claude?.version ?? '—'}</span>
-              {claude?.email && <><span className="text-muted">帳號</span><span>{claude.email}</span></>}
-            </div>
-            <label className="flex flex-col gap-1.5 text-[13px]">
-              <span className="font-medium">claude 執行檔路徑（留空自動偵測）</span>
-              <input defaultValue={settings.claudePath ?? ''} onBlur={(e) => void save({ claudePath: e.target.value.trim() || undefined })} className={cx(inputClass, 'font-mono text-xs')} />
-            </label>
-          </section>
-
-          <section id="model" className="flex flex-col gap-3">
-            <span className="text-[15px] font-bold">預設模型</span>
-            <div className="grid grid-cols-2 gap-2.5">
-              {MODELS.map((m) => (
-                <label key={m.id} className={cx('flex cursor-pointer gap-2.5 rounded-[14px] p-3.5', settings.defaultModel === m.id ? 'bg-brand-tint shadow-[0_0_0_2px_var(--color-brand)]' : 'bg-fill-2')}>
-                  <input type="radio" name="model" checked={settings.defaultModel === m.id} onChange={() => void save({ defaultModel: m.id })} className="mt-1.5 accent-brand" />
-                  <span className="flex flex-col"><span className="font-medium">{m.label}</span><span className="text-xs text-muted">{m.hint}</span></span>
-                </label>
-              ))}
-            </div>
-            <span className="text-xs text-muted">每個任務建立時也可以單獨選擇。</span>
-          </section>
-
-          <section id="perm" className="flex flex-col gap-3">
-            <span className="text-[15px] font-bold">實作階段權限</span>
-            <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#e5e8ed]">
-              <div className="flex items-center gap-3 border-b border-line-soft px-4 py-3.5">
-                <span className="flex flex-1 flex-col"><span className="font-medium">worktree 內的檔案讀寫自動允許</span><span className="text-xs text-muted">worktree 以外的檔案一律拒絕</span></span>
-                <Icons.Check className="text-brand" />
-              </div>
-              <div className="flex items-center gap-3 border-b border-line-soft px-4 py-3.5">
-                <span className="flex flex-1 flex-col"><span className="font-medium">shell 指令需要核准</span><span className="text-xs text-muted">下方清單中的指令永遠允許；含 &&、;、| 的指令一律詢問</span></span>
-                <Icons.Check className="text-brand" />
-              </div>
-              <div className="flex flex-col gap-2.5 px-4 py-3.5">
-                <span className="text-[13px] font-medium">永遠允許的指令</span>
-                <div className="flex flex-wrap gap-1.5">
-                  {settings.alwaysAllowedCommands.map((c) => (
-                    <span key={c} className="flex items-center gap-1.5 rounded-full bg-fill py-1 pr-1.5 pl-2.5 font-mono text-xs">
-                      {c}
-                      <button type="button" aria-label={`移除 ${c}`} onClick={() => void save({ alwaysAllowedCommands: settings.alwaysAllowedCommands.filter((x) => x !== c) })} className="flex size-[22px] items-center justify-center rounded-full text-muted hover:bg-chip"><Icons.X width={10} height={10} /></button>
-                    </span>
-                  ))}
-                </div>
-                <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); const c = newCmd.trim(); if (c && !settings.alwaysAllowedCommands.includes(c)) void save({ alwaysAllowedCommands: [...settings.alwaysAllowedCommands, c] }); setNewCmd('') }}>
-                  <input aria-label="新增指令" value={newCmd} onChange={(e) => setNewCmd(e.target.value)} placeholder="例如 npm test *" className={cx(inputClass, 'h-[38px] flex-1 font-mono text-xs')} />
-                  <Button size="sm" type="submit" className="h-[38px]">新增</Button>
-                </form>
-              </div>
-            </div>
-          </section>
-
-          <section id="workspace" className="flex flex-col gap-3">
-            <span className="text-[15px] font-bold">Worktree 與專案設定</span>
-            <label className="flex flex-col gap-1.5 text-[13px]">
-              <span className="font-medium">Worktree 存放位置</span>
-              <input defaultValue={settings.worktreeRoot} onBlur={(e) => e.target.value.trim() && void save({ worktreeRoot: e.target.value.trim() })} className={cx(inputClass, 'font-mono text-xs')} />
-            </label>
-            <label className="flex flex-col gap-1.5 text-[13px]">
-              <span className="font-medium">分支名稱前綴</span>
-              <input defaultValue={settings.branchPrefix} onBlur={(e) => void save({ branchPrefix: e.target.value.trim() })} className={cx(inputClass, 'font-mono text-xs')} />
-            </label>
-            <label className="flex cursor-pointer items-center gap-3 rounded-[14px] px-4 py-3.5 shadow-[0_0_0_1px_#e5e8ed]">
-              <span className="flex flex-1 flex-col"><span className="font-medium">載入 repo 的 CLAUDE.md 與 .claude 設定</span><span className="text-xs text-muted">包含專案的 skills 與 MCP；不載入 ~/.claude 的 hooks 與 plugins</span></span>
-              <input type="checkbox" checked={settings.loadProjectSettings} onChange={(e) => void save({ loadProjectSettings: e.target.checked })} className="size-[18px] accent-brand" />
-            </label>
-          </section>
+          )}
         </div>
       </main>
     </>
@@ -18624,21 +19537,85 @@ export function SettingsScreen() {
 }
 ```
 
-**Step 2: App.tsx 加入** `{view.kind === 'new' && <NewTaskScreen />}`、`{view.kind === 'settings' && <SettingsScreen />}`；settings 時隱藏 Sidebar（設定頁自帶左欄）：`{view.kind !== 'settings' && <Sidebar />}`。
+**Step 6: App.tsx**（設定頁隱藏 Sidebar 並渲染 SettingsScreen；完整檔案）
 
-**Step 3: 驗證** — `npm run typecheck` PASS；手動：修改設定後重開 app 仍保留。
+```tsx
+// src/renderer/src/App.tsx
+import { useEffect } from 'react'
+import { Sidebar } from './components/Sidebar'
+import { Toast } from './components/Toast'
+import { NewTaskScreen } from './screens/NewTaskScreen'
+import { SettingsScreen } from './screens/SettingsScreen'
+import { TaskScreen } from './screens/TaskScreen'
+import { type State, useStore } from './store'
 
-**Step 4: Commit**
+/** 視窗用 hiddenInset 標題列：這一條是拖曳區，左側留給紅綠燈 */
+function TitleBar({ title }: { title: string }) {
+  return (
+    <div className="drag flex h-11 flex-none items-center justify-center px-20 text-xs text-muted select-none">
+      <span className="truncate">{title}</span>
+    </div>
+  )
+}
+
+/** 標題列文字（選出字串，任務其他欄位變動時不必重繪 App） */
+function titleOf(s: State): string {
+  if (s.view.kind === 'settings') return '設定'
+  if (s.view.kind === 'new') return '新任務'
+  const task = s.tasks[s.view.taskId]
+  const repo = task && s.repos.find((r) => r.id === task.repoId)
+  return [repo?.name, task?.title].filter(Boolean).join(' · ')
+}
+
+export default function App() {
+  const ready = useStore((s) => s.ready)
+  const init = useStore((s) => s.init)
+  const view = useStore((s) => s.view)
+  const title = useStore(titleOf)
+  useEffect(() => init(), [init])
+  if (!ready)
+    return (
+      <div className="drag flex h-full items-center justify-center text-muted select-none">
+        載入中…
+      </div>
+    )
+  return (
+    <div className="flex h-full flex-col">
+      <TitleBar title={title} />
+      <div className="flex min-h-0 flex-1 gap-3 px-3 pb-3">
+        {/* 設定頁自帶左欄（分類與返回） */}
+        {view.kind !== 'settings' && <Sidebar />}
+        <div className="flex min-w-0 flex-1 gap-3">
+          {view.kind === 'new' && <NewTaskScreen />}
+          {/* key：換任務時重建，回看階段等畫面狀態不會帶到下一個任務 */}
+          {view.kind === 'task' && <TaskScreen key={view.taskId} taskId={view.taskId} />}
+          {view.kind === 'settings' && <SettingsScreen />}
+        </div>
+      </div>
+      <Toast />
+    </div>
+  )
+}
+```
+
+**Step 7: 確認通過** — `npm test` 全部通過；`npm run typecheck`、`npm run lint` PASS
+
+**Step 8: 手動驗證** — 從側欄底部進入設定：新增／移除允許的指令、切換模型與載入專案設定後重開 app 仍保留；worktree 位置輸入相對路徑時欄位下方顯示錯誤且保留輸入，改成絕對路徑後儲存；claude 路徑填不存在的路徑時帳號區顯示偵測錯誤，清空後回到自動偵測。
+
+**Step 9: Commit**
 
 ```bash
-git add src/renderer/src
+git add src/shared/commandPattern.ts src/main/permissions/commandPattern.ts
+git commit -m "refactor: share command normalization and shell operator check
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git add src/renderer/src docs/plans tests/renderer
 git commit -m "feat(ui): add settings screen
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
-## Phase 5：端對端驗證
 
 ### Task 35：示範 repo 與完整流程驗證（真實 Claude）
 
