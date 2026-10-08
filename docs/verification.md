@@ -124,7 +124,7 @@ node scripts/e2e/run.mjs --quit
 - `CLAUDE_CODE_TERMINAL_MCP_TOOLS` 只讓 Claude Code 不再催促，Claude 自己要寫字時仍會寫：修正後還看到 `propose_spec` 後「等你審閱。」、`conclude_branch` 後「請在介面上確認，確認後就會帶回主線。」；修正前 `propose_spec`、`submit_report` 後各有一段摘要（「規格草稿已經寫好了…另外有兩處是我自己的設計，請你確認是否接受」「鎖定功能已完成…有兩點需要你注意」，不是被催出來的）。要不要在介面上隱藏這些工具之後的文字是設計決定，這次沒有處理。
 - 問題 4 的提示只用一個分岔驗證過（這個問題本來就不是每次都出現）。
 - 修正前有一次 Claude 連續兩次用同樣參數呼叫 `ask_user`（時間軸多一筆 `question`，畫面只有一張卡片）；修正後沒有再出現。
-- 被拒的工具呼叫（釐清時的 Bash）仍以紅色「工具錯誤」顯示，和第一輪相同。
+- ~~被拒的工具呼叫（釐清時的 Bash）仍以紅色「工具錯誤」顯示~~ → 已修正：Harness 規則擋下的呼叫（PreToolUse hook 或 `canUseTool` 的 deny）由 TaskManager 標記，時間軸顯示中性的「已阻擋：原因」（不帶 SDK 的「PreToolUse:… hook error」前綴），實作的工具列表顯示「已阻擋」；真的失敗仍是紅色。`f39ae19` feat: show tool calls blocked by Harness rules as 已阻擋, not errors（以單元與元件測試驗證，下一次真實 Claude 驗證時確認畫面）
 - 從訊息開的分岔標題截在 30 個字元，長的問題會斷在詞中間（「…每次失敗都重新」），Claude 帶回主線時會換掉。
 - 報告的「修改」標籤這次沒有自然出現（Claude 沒有改既有測試）。
 
