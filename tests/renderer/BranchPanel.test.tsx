@@ -177,3 +177,41 @@ test('分岔裡的工具錯誤以錯誤樣式顯示；處理中在常駐的 live
   expect(screen.getByRole('status')).toBe(status)
   expect(status).toHaveTextContent('Claude 正在回覆…')
 })
+
+test('從訊息開的分岔：第一則訊息分成引用（去掉 Markdown）與使用者的問題', () => {
+  const seed = ev('e1', { text: '針對以下內容：\n建議改成 **429**\n\n我的問題：為什麼不是 423？' })
+  render(<BranchPanel task={{ ...task, branches: [open] }} events={[seed]} />)
+  const quote = screen.getByText('建議改成 429')
+  expect(quote.closest('blockquote')).not.toBeNull()
+  expect(screen.getByText('為什麼不是 423？')).toBeInTheDocument()
+  expect(screen.queryByText(/針對以下內容/)).not.toBeInTheDocument()
+})
+
+test('正在開新分岔時顯示問題輸入框；點其他分岔就取消', async () => {
+  const onCancel = vi.fn()
+  render(
+    <BranchPanel
+      task={task}
+      events={talk}
+      draft={{ excerpt: '會有騷擾的風險。', pending: false, onSubmit: vi.fn(), onCancel }}
+    />
+  )
+  expect(screen.getByRole('form', { name: '新分岔' })).toBeInTheDocument()
+  // 分岔的內容先收起來，不會同時出現兩個輸入框
+  expect(screen.queryByRole('textbox', { name: '分岔訊息' })).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: /計數存放位置 · 已帶回/ }))
+  expect(onCancel).toHaveBeenCalled()
+  expect(useStore.getState().activeBranch.t1).toBe('b1')
+})
+
+test('唯讀時不顯示新分岔的輸入框', () => {
+  render(
+    <BranchPanel
+      task={task}
+      events={talk}
+      readOnly
+      draft={{ excerpt: 'x', pending: false, onSubmit: vi.fn(), onCancel: vi.fn() }}
+    />
+  )
+  expect(screen.queryByRole('form', { name: '新分岔' })).not.toBeInTheDocument()
+})

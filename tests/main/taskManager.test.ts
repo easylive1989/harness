@@ -185,7 +185,10 @@ describe('TaskManager：建立任務與釐清', () => {
     ])
     expect(tl.filter((e) => e.kind === 'question').map((e) => e.ref)).toEqual(['q1', 'q1'])
     expect(tm.get(id).questions).toHaveLength(1)
-    expect(tm.get(id).questions[0]).toMatchObject({ status: 'open', text: '計數單位（依分岔結論）' })
+    expect(tm.get(id).questions[0]).toMatchObject({
+      status: 'open',
+      text: '計數單位（依分岔結論）'
+    })
   })
 
   test('一般訊息寫入時間軸', async () => {

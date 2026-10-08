@@ -1,9 +1,11 @@
 // src/renderer/src/components/BranchPanel.tsx
-import { type FormEvent, useState } from 'react'
+import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 'react'
 import type { Branch, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
+import { parseBranchSeed, stripMarkdown } from '../lib/branchDraft'
 import { userTextDisplay } from '../lib/timeline'
-import { blockImeSubmit } from '../lib/ime'
+import { blockImeSubmit, isComposing } from '../lib/ime'
+import { isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
 import { useStickToBottom } from '../lib/useStickToBottom'
 import { useStore } from '../store'
@@ -44,14 +46,116 @@ function BranchInput({ disabled, onSend }: { disabled: boolean; onSend: (text: s
   )
 }
 
+/** 正在從 Claude 的訊息開新分岔（ClarifyScreen 管理）：送出問題前不會建立任何東西 */
+export interface BranchDraft {
+  /** 引用的 Claude 訊息（原文） */
+  excerpt: string
+  /** 正在建立分岔 */
+  pending: boolean
+  onSubmit: (question: string) => void
+  onCancel: () => void
+}
+
+/** 引用的訊息：最多 3 行，長的可以展開 */
+function Quote({ text, toggle = true }: { text: string; toggle?: boolean }) {
+  const [expanded, setExpanded] = useState(false)
+  const quote = stripMarkdown(text)
+  // jsdom 量不到行數：以字數與換行估計會不會超過 3 行（面板寬約 22 個中文字）
+  const long = toggle && (quote.length > 60 || quote.split('\n').length > 3)
+  return (
+    <div className="flex flex-col gap-1 rounded-xl bg-fill-2 py-2.5 pr-3.5 pl-3 shadow-[inset_3px_0_0_var(--color-line-strong)]">
+      <blockquote className={cx('m-0 whitespace-pre-wrap text-ink-2', !expanded && 'line-clamp-3')}>
+        {quote}
+      </blockquote>
+      {long && (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setExpanded(!expanded)}
+          className="cursor-pointer self-start text-xs text-brand hover:text-brand-hover"
+        >
+          {expanded ? '收合' : '展開全文'}
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** 從訊息開分岔：先問使用者想針對這段討論什麼 */
+function NewBranchForm({ draft, blocked }: { draft: BranchDraft; blocked: boolean }) {
+  const [text, setText] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+  // 按下訊息旁的分岔按鈕（或換了引用的訊息）後，焦點移到問題輸入框
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [draft.excerpt])
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    const q = text.trim()
+    if (!q || blocked || draft.pending) return
+    draft.onSubmit(q)
+  }
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    blockImeSubmit(e)
+    // 選字中的 Esc 是取消組字，不是取消開分岔
+    if (e.key === 'Escape' && !isComposing(e)) draft.onCancel()
+  }
+  return (
+    <form
+      aria-label="新分岔"
+      onSubmit={submit}
+      className="flex flex-col gap-3 px-5 pt-1 pb-5 text-[13px]"
+    >
+      <span className="text-xs font-medium text-brand">新分岔 · 引用的訊息</span>
+      <Quote text={draft.excerpt} />
+      <label className="flex flex-col gap-1.5">
+        <span className="font-medium">想針對這段討論什麼？</span>
+        <input
+          ref={inputRef}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder="例如：為什麼建議 429 而不是 423？"
+          className={inputClass}
+        />
+      </label>
+      <div className="flex gap-2">
+        <Button variant="ghost" onClick={draft.onCancel}>
+          取消
+        </Button>
+        <Button
+          type="submit"
+          variant="dark"
+          className="flex-1"
+          disabled={blocked || draft.pending || !text.trim()}
+        >
+          開始討論
+        </Button>
+      </div>
+      {blocked && <span className="text-xs text-muted">主線正在執行，等它停下來才能開分岔。</span>}
+    </form>
+  )
+}
+
 function BranchMessage({ e }: { e: TimelineEvent }) {
   switch (e.kind) {
-    case 'user_text':
+    case 'user_text': {
+      const text = e.text ?? ''
+      // 從訊息開的分岔：開場分成引用與使用者的問題
+      const seed = parseBranchSeed(text)
       return (
-        <div className="max-w-[88%] self-end rounded-[16px_16px_6px_16px] bg-fill px-3.5 py-2.5 whitespace-pre-wrap">
-          {userTextDisplay(e.text ?? '')}
+        <div className="flex max-w-[88%] flex-col gap-2 self-end rounded-[16px_16px_6px_16px] bg-fill px-3.5 py-2.5 whitespace-pre-wrap">
+          {seed ? (
+            <>
+              <Quote text={seed.excerpt} />
+              <span>{seed.question}</span>
+            </>
+          ) : (
+            userTextDisplay(text)
+          )}
         </div>
       )
+    }
     case 'assistant_text':
       return <Markdown text={e.text ?? ''} />
     case 'tool_result':
@@ -70,11 +174,14 @@ function BranchMessage({ e }: { e: TimelineEvent }) {
 export function BranchPanel({
   task,
   events,
-  readOnly
+  readOnly,
+  draft
 }: {
   task: Task
   events: TimelineEvent[]
   readOnly?: boolean
+  /** 正在從訊息開新分岔：面板改顯示問題輸入框 */
+  draft?: BranchDraft
 }) {
   const act = useStore((s) => s.act)
   const setActiveBranch = useStore((s) => s.setActiveBranch)
@@ -107,6 +214,7 @@ export function BranchPanel({
     void runAction(() => act(() => call('branch:conclude', task.id, id)))
   const confirm = (id: string) =>
     void runAction(() => act(() => call('branch:confirm', task.id, id, undefined)))
+  const drafting = !readOnly && draft
 
   return (
     <aside
@@ -116,20 +224,29 @@ export function BranchPanel({
       <div className="flex flex-col gap-2.5 px-5 pt-[18px] pb-3">
         <span className="text-[15px] font-bold">分岔討論</span>
         {task.branches.length === 0 ? (
-          <span className="text-[13px] text-muted">
-            還沒有分岔。在 Claude 的訊息旁或問題卡片上按「分岔」，就能另開一段討論，結論再帶回主線。
-          </span>
+          !drafting && (
+            <span className="text-[13px] text-muted">
+              還沒有分岔。在 Claude
+              的訊息旁或問題卡片上按「分岔」，就能另開一段討論，結論再帶回主線。
+            </span>
+          )
         ) : (
           <div className="flex flex-wrap gap-1.5 text-xs">
             {task.branches.map((x) => (
               <button
                 key={x.id}
                 type="button"
-                aria-pressed={x.id === b?.id}
-                onClick={() => setActiveBranch(task.id, x.id)}
+                aria-pressed={!drafting && x.id === b?.id}
+                onClick={() => {
+                  // 改看既有的分岔：放棄還沒送出的新分岔
+                  if (drafting) draft.onCancel()
+                  setActiveBranch(task.id, x.id)
+                }}
                 className={cx(
                   'cursor-pointer rounded-full px-2.5 py-1',
-                  x.id === b?.id ? 'bg-brand-soft font-medium text-brand-ink' : 'bg-fill text-muted'
+                  !drafting && x.id === b?.id
+                    ? 'bg-brand-soft font-medium text-brand-ink'
+                    : 'bg-fill text-muted'
                 )}
               >
                 {x.title} · {statusText(x)}
@@ -139,7 +256,8 @@ export function BranchPanel({
         )}
       </div>
 
-      {b && (
+      {drafting && <NewBranchForm draft={draft} blocked={isBusy(task)} />}
+      {!drafting && b && (
         <>
           <div
             ref={scrollRef}

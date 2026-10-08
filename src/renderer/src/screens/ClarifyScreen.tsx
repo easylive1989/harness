@@ -1,11 +1,12 @@
 // src/renderer/src/screens/ClarifyScreen.tsx
-import { type ReactNode, useRef } from 'react'
+import { type ReactNode, useRef, useState } from 'react'
 import type { Task } from '@shared/types'
 import { call } from '../api'
 import { BranchPanel } from '../components/BranchPanel'
 import { Composer } from '../components/Composer'
 import { PendingPermission } from '../components/PermissionDialog'
 import { RunStatus, Timeline } from '../components/Timeline'
+import { branchSeed, branchTitle } from '../lib/branchDraft'
 import { awaitingCounterReply, isBusy } from '../lib/stage'
 import { useTimeline } from '../lib/timeline'
 import { usePending } from '../lib/usePending'
@@ -36,22 +37,22 @@ export function ClarifyScreen({
   const busy = isBusy(task)
   // 問題卡片在等反問的回答時自己會顯示等待中，底部就不再重複顯示「處理中」
   const cardWaiting = task.questions.some((q) => awaitingCounterReply(task, q))
+  // 從訊息開分岔：先在分岔面板問使用者想討論什麼，送出問題才建立分岔（取消就什麼都不建立）
+  const [draft, setDraft] = useState<string>()
   const [branching, runBranch] = usePending()
   const composerRef = useRef<HTMLInputElement>(null)
-  const branchFrom = (text: string) =>
+  const createBranch = (excerpt: string, question: string) =>
     runBranch(async () => {
-      const title = text
-        .replace(/[`*_#>]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 24)
       const b = await act(() =>
         call('branch:open', task.id, {
-          title,
-          seed: `針對這段內容深入討論：\n${text.slice(0, 600)}`
+          title: branchTitle(question),
+          seed: branchSeed(excerpt, question)
         })
       )
-      if (b) setActiveBranch(task.id, b.id)
+      if (!b) return
+      setActiveBranch(task.id, b.id)
+      // 建立期間換了引用的訊息就保留新的草稿
+      setDraft((cur) => (cur === excerpt ? undefined : cur))
     })
   return (
     <>
@@ -73,7 +74,7 @@ export function ClarifyScreen({
                 channel="main"
                 events={events}
                 readOnly={readOnly}
-                onBranchFrom={busy ? undefined : (t) => void branchFrom(t)}
+                onBranchFrom={busy ? undefined : setDraft}
                 branchPending={branching}
                 onOpenStage={onOpenStage}
               />
@@ -102,7 +103,21 @@ export function ClarifyScreen({
         {/* 釐清中 Claude（主線或分岔）要讀網頁、搜尋網路時也要核准 */}
         <PendingPermission task={task} fallbackFocus={() => composerRef.current} />
       </main>
-      <BranchPanel task={task} events={events} readOnly={readOnly} />
+      <BranchPanel
+        task={task}
+        events={events}
+        readOnly={readOnly}
+        draft={
+          draft === undefined
+            ? undefined
+            : {
+                excerpt: draft,
+                pending: branching,
+                onSubmit: (q) => void createBranch(draft, q),
+                onCancel: () => setDraft(undefined)
+              }
+        }
+      />
     </>
   )
 }
