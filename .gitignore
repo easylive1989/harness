@@ -9,3 +9,8 @@ test-results/
 playwright-report/
 blob-report/
 playwright/.cache/
+# Archify 產生的圖：只保留每張圖的 HTML 與原始 JSON，截圖與檢查紀錄不進版控
+.archify/**/*
+!.archify/*/
+!.archify/*/candidate.json
+!.archify/*/*.html
