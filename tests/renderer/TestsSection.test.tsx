@@ -55,7 +55,7 @@ afterEach(() => {
   delete (Element.prototype as Partial<Element>).scrollIntoView
 })
 
-test('新增的測試排在概觀之後、其他區塊之前，列出名稱、檔案、類型、情境與修改原因', async () => {
+test('新增的測試排在概觀之後、其他區塊之前，列出名稱、檔案、類型、情境、預期行為與修改原因', async () => {
   const { container } = renderReport()
   await loaded()
   const order = [...container.querySelectorAll('section[aria-label]')].map((s) =>
@@ -73,10 +73,9 @@ test('新增的測試排在概觀之後、其他區塊之前，列出名稱、�
   expect(added).toHaveAttribute('data-anchor', 'test:t1')
   expect(within(added).getByText('src/auth/lockout.test.ts:3')).toBeInTheDocument()
   expect(within(added).getByText('新增')).toBeInTheDocument()
-  expect(within(added).getByText('單元')).toBeInTheDocument()
-  expect(added).toHaveTextContent(
-    '情境同一帳號連續輸錯密碼 5 次 → 第 6 次登入 → 回 423，而且不再檢查密碼'
-  )
+  expect(within(added).getByText('整合')).toBeInTheDocument()
+  expect(added).toHaveTextContent('情境同一帳號已經連續輸錯密碼 5 次')
+  expect(added).toHaveTextContent('預期行為第 6 次登入回 423，而且不再檢查密碼')
   expect(within(added).queryByText('為什麼改')).not.toBeInTheDocument()
 
   const modified = item('錯誤密碼回 401')
@@ -299,9 +298,10 @@ test('規格有預計測試：最上面寫已加入幾個，列出沒加入的�
   const planned = (id: string, name: string) => ({
     id,
     name,
-    kind: 'unit' as const,
+    kind: 'integration' as const,
     change: 'added' as const,
-    scenario: '情境'
+    scenario: '情境',
+    expected: '預期行為'
   })
   const base = makeReport()
   report = makeReport({
@@ -327,7 +327,16 @@ test('規格有預計測試：最上面寫已加入幾個，列出沒加入的�
 test('預計測試都加入時摘要說都已加入；舊報告沒有預計測試時不顯示摘要與規格標籤', async () => {
   const base = makeReport()
   report = makeReport({
-    plannedTests: [{ id: 'p1', name: '鎖定帳號', kind: 'unit', change: 'added', scenario: '情境' }],
+    plannedTests: [
+      {
+        id: 'p1',
+        name: '鎖定帳號',
+        kind: 'integration',
+        change: 'added',
+        scenario: '情境',
+        expected: '預期行為'
+      }
+    ],
     input: { ...base.input, tests: [{ ...base.input.tests[0], planned: 'p1' }] }
   })
   const { unmount } = renderReport()
@@ -342,4 +351,84 @@ test('預計測試都加入時摘要說都已加入；舊報告沒有預計測�
   await loaded()
   expect(within(section()).queryByRole('group', { name: '規格的預計測試' })).not.toBeInTheDocument()
   expect(within(section()).queryByText(/^規格/)).not.toBeInTheDocument()
+})
+
+/** 單元測試：和 fixture 的 t1 同一個檔案，只是類型不同 */
+const unitTest = (over: Partial<Report['input']['tests'][number]> = {}) => ({
+  ...makeReport().input.tests[0],
+  id: 'u1',
+  name: '計數加一',
+  kind: 'unit' as const,
+  ...over
+})
+
+test('單元測試不列出，只顯示數量；概觀的新增測試也不算單元測試', async () => {
+  const base = makeReport()
+  report = makeReport({ input: { ...base.input, tests: [...base.input.tests, unitTest()] } })
+  renderReport()
+  await loaded()
+  expect(within(section()).queryByText('計數加一')).not.toBeInTheDocument()
+  expect(
+    within(section())
+      .getAllByRole('heading', { level: 3 })
+      .map((h) => h.textContent)
+  ).toEqual(['連續失敗 5 次後鎖定帳號', '錯誤密碼回 401'])
+  expect(within(section()).getByText('另有 1 個單元測試未列出。')).toBeInTheDocument()
+  const overview = screen.getByRole('region', { name: '概觀' })
+  expect(within(overview).getByText('新增測試').nextSibling).toHaveTextContent('1修改 1')
+})
+
+test('只有單元測試時：不說「沒有新增測試」，只顯示單元測試的數量', async () => {
+  const base = makeReport()
+  report = makeReport({
+    input: {
+      ...base.input,
+      tests: [unitTest(), unitTest({ id: 'u2', name: '計數歸零', change: 'modified' })]
+    }
+  })
+  renderReport()
+  await loaded()
+  expect(within(section()).queryByText('這次沒有新增測試')).not.toBeInTheDocument()
+  expect(within(section()).queryByRole('heading', { level: 3 })).not.toBeInTheDocument()
+  expect(within(section()).getByText('另有 2 個單元測試未列出。')).toBeInTheDocument()
+  // 單元測試有說明對應的測試檔：不會被當成未說明
+  expect(within(section()).queryByText('Claude 沒有說明新增的測試')).not.toBeInTheDocument()
+})
+
+test('舊報告的測試沒有預期行為：只顯示情境；沒有單元測試時不顯示數量', async () => {
+  const base = makeReport()
+  // 舊報告存下來的測試沒有 expected
+  const old = { ...base.input.tests[0], expected: undefined as unknown as string }
+  report = makeReport({ input: { ...base.input, tests: [old] } })
+  renderReport()
+  await loaded()
+  const added = item('連續失敗 5 次後鎖定帳號')
+  expect(added).toHaveTextContent('情境同一帳號已經連續輸錯密碼 5 次')
+  expect(within(added).queryByText('預期行為')).not.toBeInTheDocument()
+  expect(within(section()).queryByText(/單元測試未列出/)).not.toBeInTheDocument()
+})
+
+test('規格對照只算非單元的預計測試：沒加入的單元測試不列出', async () => {
+  const base = makeReport()
+  const planned = (id: string, name: string, kind: 'unit' | 'e2e') => ({
+    id,
+    name,
+    kind,
+    change: 'added' as const,
+    scenario: '情境',
+    expected: '預期行為'
+  })
+  report = makeReport({
+    plannedTests: [planned('p1', '鎖定帳號', 'e2e'), planned('p2', '計數加一', 'unit')],
+    input: {
+      ...base.input,
+      tests: [{ ...base.input.tests[0], planned: 'p1' }],
+      planned_skipped: [{ id: 'p2', reason: '改成整合測試' }]
+    }
+  })
+  renderReport()
+  await loaded()
+  const summary = within(section()).getByRole('group', { name: '規格的預計測試' })
+  expect(summary).toHaveTextContent('規格預計 1 個測試：都已加入')
+  expect(summary).not.toHaveTextContent('計數加一')
 })

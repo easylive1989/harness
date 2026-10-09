@@ -32,15 +32,15 @@ test('PR 內文包含摘要、決策、限制與驗證結果', () => {
   expect(body).toContain('由 Harness 產生')
 })
 
-test('摘要之後優先列出新增的測試與情境；修改的測試另外標出並附原因', () => {
+test('摘要之後優先列出新增的測試、情境與預期行為；修改的測試另外標出並附原因', () => {
   const body = prBody(report())
   const sections = [...body.matchAll(/^## (.+)$/gm)].map((m) => m[1])
   expect(sections.slice(0, 3)).toEqual(['摘要', '新增的測試', '決策'])
   expect(body).toContain(
-    '- **連續失敗 5 次後鎖定帳號**（`src/auth/lockout.test.ts`）：同一帳號連續輸錯密碼 5 次 → 第 6 次登入 → 回 423，而且不再檢查密碼'
+    '- **連續失敗 5 次後鎖定帳號**（`src/auth/lockout.test.ts`）：情境：同一帳號已經連續輸錯密碼 5 次；預期行為：第 6 次登入回 423，而且不再檢查密碼'
   )
   expect(body).toContain(
-    '- 修改：**錯誤密碼回 401**（`src/auth/login.test.ts`）：帳號沒有被鎖定時輸錯密碼 → 登入 → 仍然回 401（為什麼改：登入前多了鎖定檢查，測試要先準備一個沒有被鎖定的帳號）'
+    '- 修改：**錯誤密碼回 401**（`src/auth/login.test.ts`）：情境：帳號沒有被鎖定；預期行為：輸錯密碼登入仍然回 401（為什麼改：登入前多了鎖定檢查，測試要先準備一個沒有被鎖定的帳號）'
   )
   expect(body).not.toContain('這次沒有新增測試')
 })
@@ -85,16 +85,19 @@ test('Claude 給的文字壓成一行；code span 裡的反引號會跳脫', () 
           id: 't1',
           file: 'src/`odd`.test.ts',
           name: '多行\n名稱',
-          kind: 'unit',
+          kind: 'integration',
           change: 'added',
-          scenario: '第一行\n\n  第二行'
+          scenario: '第一行\n\n  第二行',
+          expected: '結果\n一行'
         }
       ],
       decisions: [{ ...sampleReport.decisions[0], rationale: '多台\n機器共享' }]
     }),
     verification: [{ command: 'echo `x`', exitCode: 0, durationMs: 1, outputTail: '' }]
   })
-  expect(body).toContain('- **多行 名稱**（`` src/`odd`.test.ts ``）：第一行 第二行')
+  expect(body).toContain(
+    '- **多行 名稱**（`` src/`odd`.test.ts ``）：情境：第一行 第二行；預期行為：結果 一行'
+  )
   expect(body).toContain('（原因：多台 機器共享）')
   expect(body).toContain('- ✅ `` echo `x` ``')
 })
@@ -103,9 +106,10 @@ test('規格有預計測試時：先寫已加入幾個，再列出沒有加入�
   const p = (id: string, name: string) => ({
     id,
     name,
-    kind: 'unit' as const,
+    kind: 'integration' as const,
     change: 'added' as const,
-    scenario: '情境'
+    scenario: '情境',
+    expected: '預期行為'
   })
   const input = {
     ...sampleReport,
@@ -124,4 +128,51 @@ test('規格有預計測試時：先寫已加入幾個，再列出沒有加入�
   // 舊規格沒有預計測試、或規格說明不新增測試：不寫這一行
   expect(prBody(report())).not.toContain('規格預計')
   expect(prBody({ ...report(), plannedTests: [] })).not.toContain('規格預計')
+})
+
+test('單元測試不列出，只寫數量；規格對照也不算單元測試', () => {
+  const unit = { ...sampleReport.tests[0], id: 'u1', name: '計數加一', kind: 'unit' as const }
+  const body = prBody({
+    ...report({
+      ...sampleReport,
+      tests: [...sampleReport.tests, { ...unit, planned: 'p2' }]
+    }),
+    plannedTests: [
+      {
+        id: 'p1',
+        name: '鎖定',
+        kind: 'integration',
+        change: 'added',
+        scenario: '情境',
+        expected: '預期'
+      },
+      {
+        id: 'p2',
+        name: '計數加一',
+        kind: 'unit',
+        change: 'added',
+        scenario: '情境',
+        expected: '預期'
+      }
+    ]
+  })
+  expect(body).not.toContain('計數加一')
+  expect(body).toContain('- **連續失敗 5 次後鎖定帳號**')
+  expect(body).toContain('另有 1 個單元測試未列出。')
+  // 規格預計的 p1 沒有對應的測試、p2 是單元測試：只算 p1
+  expect(body).toContain('規格預計 1 個測試：已加入 0 個，1 個沒有加入。')
+
+  // 只有單元測試：不說「沒有新增測試」
+  const onlyUnit = prBody(report({ ...sampleReport, tests: [unit] }))
+  expect(onlyUnit).not.toContain('這次沒有新增測試')
+  expect(onlyUnit).toContain('## 新增的測試\n另有 1 個單元測試未列出。\n')
+})
+
+test('舊報告的測試沒有預期行為：只寫情境', () => {
+  // 舊報告存下來的測試沒有 expected
+  const old = { ...sampleReport.tests[0], expected: undefined as unknown as string }
+  const body = prBody(report({ ...sampleReport, tests: [old] }))
+  expect(body).toContain(
+    '- **連續失敗 5 次後鎖定帳號**（`src/auth/lockout.test.ts`）：同一帳號已經連續輸錯密碼 5 次\n'
+  )
 })

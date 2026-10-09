@@ -1,5 +1,5 @@
 // src/main/tasks/prBody.ts
-import { plannedCoverage } from '@shared/report'
+import { isShownTest, plannedCoverage, type TestNote } from '@shared/report'
 import { addedTestFiles, resolveTestPath } from '@shared/testFiles'
 import type { Report } from '@shared/types'
 
@@ -15,20 +15,34 @@ function code(s: string): string {
   return `${fence}${pad}${text}${pad}${fence}`
 }
 
-/** 「新增的測試」段落：Claude 說明的新增／修改測試；沒說明但 diff 裡有新增的測試檔時照實寫出，不說沒有新增 */
+/** 測試的說明：情境與預期行為（舊報告沒有預期行為時只有情境） */
+const testText = (t: TestNote) =>
+  t.expected
+    ? `情境：${oneLine(t.scenario)}；預期行為：${oneLine(t.expected)}`
+    : oneLine(t.scenario)
+
+/**
+ * 「新增的測試」段落：Claude 說明的新增／修改測試（單元測試只寫數量）；
+ * 沒說明但 diff 裡有新增的測試檔時照實寫出，不說沒有新增
+ */
 function testLines(r: Report): string[] {
   const i = r.input
-  const added = i.tests.filter((t) => t.change === 'added')
-  const modified = i.tests.filter((t) => t.change === 'modified')
+  const shown = i.tests.filter(isShownTest)
+  const hiddenUnit = i.tests.length - shown.length
+  const added = shown.filter((t) => t.change === 'added')
+  const modified = shown.filter((t) => t.change === 'modified')
+  // 只新增了單元測試也算有新增
+  const anyAdded = i.tests.some((t) => t.change === 'added')
   const files = addedTestFiles(r.diff)
   const described = new Set(i.tests.map((t) => resolveTestPath(t.file, files)))
   const undocumented = files.filter((f) => !described.has(f))
   const list = (paths: string[]) => paths.map(code).join('、')
   const lines = ['## 新增的測試']
   // 規格的預計測試：先說做到幾個，再列出沒做到的與原因
-  if (r.plannedTests?.length) {
-    const c = plannedCoverage(r.plannedTests, i)
-    const n = r.plannedTests.length
+  const planned = r.plannedTests?.filter(isShownTest) ?? []
+  if (planned.length) {
+    const c = plannedCoverage(planned, i)
+    const n = planned.length
     lines.push(
       c.skipped.length
         ? `規格預計 ${n} 個測試：已加入 ${c.added.length} 個，${c.skipped.length} 個沒有加入。`
@@ -39,7 +53,7 @@ function testLines(r: Report): string[] {
       )
     )
   }
-  if (!added.length) {
+  if (!anyAdded) {
     if (undocumented.length) {
       lines.push(`Claude 沒有說明新增的測試：${list(undocumented)}`)
       if (i.tests_note) lines.push(`Claude 的說明：${oneLine(i.tests_note)}`)
@@ -47,14 +61,15 @@ function testLines(r: Report): string[] {
       lines.push(i.tests_note ? `這次沒有新增測試：${oneLine(i.tests_note)}` : '這次沒有新增測試。')
   }
   lines.push(
-    ...added.map((t) => `- **${oneLine(t.name)}**（${code(t.file)}）：${oneLine(t.scenario)}`),
+    ...added.map((t) => `- **${oneLine(t.name)}**（${code(t.file)}）：${testText(t)}`),
     ...modified.map(
       (t) =>
-        `- 修改：**${oneLine(t.name)}**（${code(t.file)}）：${oneLine(t.scenario)}` +
+        `- 修改：**${oneLine(t.name)}**（${code(t.file)}）：${testText(t)}` +
         (t.why ? `（為什麼改：${oneLine(t.why)}）` : '')
     )
   )
-  if (added.length && undocumented.length) lines.push(`- 未說明的新增測試檔：${list(undocumented)}`)
+  if (hiddenUnit) lines.push(`另有 ${hiddenUnit} 個單元測試未列出。`)
+  if (anyAdded && undocumented.length) lines.push(`- 未說明的新增測試檔：${list(undocumented)}`)
   lines.push('')
   return lines
 }

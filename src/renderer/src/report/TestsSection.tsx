@@ -1,13 +1,20 @@
 // src/renderer/src/report/TestsSection.tsx
-// 報告最優先的區塊「新增的測試」：Claude 說明的每個測試（情境、修改原因）、
+// 報告最優先的區塊「新增的測試」：Claude 說明的每個測試（情境、預期行為、修改原因；單元測試只顯示數量）、
 // 對應的驗證結果（Harness 實際執行的指令整體結果，不捏造逐個測試的結果），
 // 以及 Harness 從 diff 偵測到、Claude 沒說明的測試檔。外框（標題、留言）由 ReportView 的 Section 提供。
 import { type ReactNode, useId } from 'react'
 import type { DiffFile } from '@shared/diff'
-import { type PlannedTest, plannedCoverage, type ReportInput, type TestNote } from '@shared/report'
+import {
+  isShownTest,
+  type PlannedTest,
+  plannedCoverage,
+  type ReportInput,
+  type TestNote
+} from '@shared/report'
 import { resolveTestPath } from '@shared/testFiles'
 import type { VerificationResult } from '@shared/types'
 import { InlineCode } from '../components/Markdown'
+import { HiddenUnitTests, TestScenario } from '../components/TestScenario'
 import { cx, Icons, Pill } from '../components/ui'
 import { TEST_CHANGE_LABEL, TEST_KIND_LABEL } from '../lib/testLabels'
 import { testAnchor } from './anchors'
@@ -144,7 +151,7 @@ function PlannedSummary({
   )
 }
 
-/** Claude 說明的一個測試：名稱（標題，可以點：跳到 diff 裡的測試檔與行）、檔案、標籤、情境、修改原因、驗證 */
+/** Claude 說明的一個測試：名稱（標題，可以點：跳到 diff 裡的測試檔與行）、檔案、標籤、情境與預期行為、修改原因、驗證 */
 function TestItem({
   test: t,
   plannedLabel,
@@ -211,10 +218,7 @@ function TestItem({
           {button(anchor, t.name, `對測試「${t.name}」留言`)}
         </span>
       </div>
-      <div className="text-[13px]">
-        <span className="mr-2 font-medium text-brand">情境</span>
-        <InlineCode text={t.scenario} />
-      </div>
+      <TestScenario scenario={t.scenario} expected={t.expected} />
       {t.why && (
         <div className="rounded-[10px] bg-fill-2 px-3 py-2.5 text-[13px] text-ink-2">
           <span className="mr-2 font-medium">為什麼改</span>
@@ -264,24 +268,28 @@ export function TestsSection({
   onShowResults?: () => void
 }) {
   const paths = files.map((f) => f.path)
-  // 新增的在前、修改的在後
+  // 單元測試不列出，只顯示數量；新增的在前、修改的在後
+  const shown = tests.filter(isShownTest)
   const ordered = [
-    ...tests.filter((t) => t.change === 'added'),
-    ...tests.filter((t) => t.change === 'modified')
+    ...shown.filter((t) => t.change === 'added'),
+    ...shown.filter((t) => t.change === 'modified')
   ]
-  const hasAdded = ordered.some((t) => t.change === 'added')
+  // 只新增了單元測試也算有新增：不顯示「這次沒有新增測試」
+  const hasAdded = tests.some((t) => t.change === 'added')
   const undocumentedAdded = undocumented.some((f) => f.status === 'added')
   // 規格說明不新增測試（空陣列）或舊報告：不顯示對照
   const hasPlanned = !!planned?.length
+  // 對照摘要也只算列出的（非單元）預計測試
+  const shownPlanned = planned?.filter(isShownTest) ?? []
   const label = (t: TestNote) =>
     !hasPlanned ? undefined : t.planned ? `規格 ${t.planned.toUpperCase()}` : '規格外'
 
   return (
     <div className="flex flex-col gap-3">
-      {hasPlanned && (
+      {shownPlanned.length > 0 && (
         <PlannedSummary
-          planned={planned}
-          coverage={plannedCoverage(planned, { tests, planned_skipped: plannedSkipped })}
+          planned={shownPlanned}
+          coverage={plannedCoverage(shownPlanned, { tests, planned_skipped: plannedSkipped })}
         />
       )}
       {!hasAdded && (
@@ -322,6 +330,7 @@ export function TestsSection({
           />
         )
       })}
+      <HiddenUnitTests count={tests.length - shown.length} />
       {undocumented.length > 0 && (
         <div className="flex flex-col gap-2">
           <span className="text-xs text-muted">

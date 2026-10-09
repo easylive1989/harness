@@ -5,7 +5,7 @@ import { flushSync } from 'react-dom'
 import { parseUnifiedDiff } from '@shared/diff'
 import { layoutGraph } from '@shared/layout'
 import { wrapBlockHtml } from '@shared/blockHtml'
-import type { ReportInput } from '@shared/report'
+import { isShownTest, type ReportInput } from '@shared/report'
 import { undocumentedTestFiles } from '@shared/testFiles'
 import type { Report, Task, VerificationResult } from '@shared/types'
 import { InlineCode } from '../components/Markdown'
@@ -270,8 +270,10 @@ export function ReportView({
     () => undocumentedTestFiles(diffFiles, r.tests, task.worktreePath),
     [diffFiles, r.tests, task.worktreePath]
   )
-  const addedTests = r.tests.filter((t) => t.change === 'added').length
-  const modifiedTests = r.tests.length - addedTests
+  // 概觀的數字和「新增的測試」列出的一致：不算單元測試
+  const shownTests = r.tests.filter(isShownTest)
+  const addedTests = shownTests.filter((t) => t.change === 'added').length
+  const modifiedTests = shownTests.length - addedTests
   const undocumentedAdded = undocumented.filter((f) => f.status === 'added').length
 
   const button = (anchor: string, label: string, aria = `對「${label}」留言`) =>

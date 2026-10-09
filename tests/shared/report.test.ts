@@ -28,7 +28,13 @@ describe('ReportInputSchema', () => {
     const r = ReportInputSchema.parse({
       ...sampleReport,
       tests: [
-        { id: 't1', file: 'a.test.ts', name: '空白輸入', scenario: '輸入空白 → 送出 → 顯示錯誤' }
+        {
+          id: 't1',
+          file: 'a.test.ts',
+          name: '空白輸入',
+          scenario: '表單是空白的',
+          expected: '送出後顯示錯誤'
+        }
       ],
       tests_note: '只改文件'
     })
@@ -39,16 +45,23 @@ describe('ReportInputSchema', () => {
         name: '空白輸入',
         kind: 'unit',
         change: 'added',
-        scenario: '輸入空白 → 送出 → 顯示錯誤'
+        scenario: '表單是空白的',
+        expected: '送出後顯示錯誤'
       }
     ])
     expect(r.tests_note).toBe('只改文件')
   })
 
-  test('測試一定要有情境說明，行號要是正整數', () => {
+  test('測試一定要有情境與預期行為，行號要是正整數', () => {
     const empty = structuredClone(sampleReport)
     empty.tests[0].scenario = ''
     expect(ReportInputSchema.safeParse(empty).success).toBe(false)
+    const noExpected = structuredClone(sampleReport)
+    delete (noExpected.tests[0] as Partial<(typeof noExpected.tests)[number]>).expected
+    expect(ReportInputSchema.safeParse(noExpected).success).toBe(false)
+    const emptyExpected = structuredClone(sampleReport)
+    emptyExpected.tests[0].expected = ''
+    expect(ReportInputSchema.safeParse(emptyExpected).success).toBe(false)
     const badLine = structuredClone(sampleReport)
     badLine.tests[0].line = 0
     expect(ReportInputSchema.safeParse(badLine).success).toBe(false)
@@ -130,12 +143,18 @@ describe('ReportInputSchema', () => {
 
 describe('規格的預計測試', () => {
   const planned = [
-    PlannedTestSchema.parse({ id: 'p1', name: '鎖定帳號', scenario: '輸錯 5 次 → 登入 → 423' }),
+    PlannedTestSchema.parse({
+      id: 'p1',
+      name: '鎖定帳號',
+      scenario: '同一帳號已經輸錯 5 次',
+      expected: '再登入回 423'
+    }),
     PlannedTestSchema.parse({
       id: 'p2',
       name: '解鎖',
       kind: 'integration',
-      scenario: '鎖定 15 分鐘後 → 登入 → 成功',
+      scenario: '帳號已鎖定 15 分鐘',
+      expected: '登入成功',
       file: 'src/auth/lockout.test.ts'
     })
   ]
@@ -146,6 +165,7 @@ describe('規格的預計測試', () => {
     file: 'a.test.ts',
     name: id,
     scenario: '情境',
+    expected: '預期行為',
     ...(planned ? { planned } : {})
   })
 
@@ -155,8 +175,15 @@ describe('規格的預計測試', () => {
       name: '鎖定帳號',
       kind: 'unit',
       change: 'added',
-      scenario: '輸錯 5 次 → 登入 → 423'
+      scenario: '同一帳號已經輸錯 5 次',
+      expected: '再登入回 423'
     })
+  })
+
+  test('預計測試一定要有預期行為', () => {
+    const p = { id: 'p1', name: '鎖定帳號', scenario: '同一帳號已經輸錯 5 次' }
+    expect(PlannedTestSchema.safeParse(p).success).toBe(false)
+    expect(PlannedTestSchema.safeParse({ ...p, expected: '' }).success).toBe(false)
   })
 
   test('每個預計測試都有對應的測試或列在 planned_skipped 時沒有問題；規格外多加的測試不用對應', () => {

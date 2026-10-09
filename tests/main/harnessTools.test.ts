@@ -31,7 +31,8 @@ const specArgs = {
       name: '鎖定帳號',
       kind: 'unit' as const,
       change: 'added' as const,
-      scenario: '輸錯 5 次 → 登入 → 423'
+      scenario: '同一帳號已經輸錯 5 次',
+      expected: '再登入回 423'
     }
   ],
   steps: ['a'],

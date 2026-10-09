@@ -10,9 +10,10 @@ export const sampleReport: ReportInput = {
       id: 't1',
       file: 'src/auth/lockout.test.ts',
       name: '連續失敗 5 次後鎖定帳號',
-      kind: 'unit',
+      kind: 'integration',
       change: 'added',
-      scenario: '同一帳號連續輸錯密碼 5 次 → 第 6 次登入 → 回 423，而且不再檢查密碼',
+      scenario: '同一帳號已經連續輸錯密碼 5 次',
+      expected: '第 6 次登入回 423，而且不再檢查密碼',
       line: 3
     },
     {
@@ -21,7 +22,8 @@ export const sampleReport: ReportInput = {
       name: '錯誤密碼回 401',
       kind: 'integration',
       change: 'modified',
-      scenario: '帳號沒有被鎖定時輸錯密碼 → 登入 → 仍然回 401',
+      scenario: '帳號沒有被鎖定',
+      expected: '輸錯密碼登入仍然回 401',
       why: '登入前多了鎖定檢查，測試要先準備一個沒有被鎖定的帳號'
     }
   ],
