@@ -1,9 +1,11 @@
 // src/renderer/src/screens/SpecScreen.tsx
 import { type FormEvent, type ReactNode, useId, useRef, useState } from 'react'
+import { isShownTest } from '@shared/report'
 import { type DecisionSource, isBranchMode, type Spec, type Task } from '@shared/types'
 import { call } from '../api'
 import { InlineCode } from '../components/Markdown'
 import { PendingPermission } from '../components/PermissionDialog'
+import { HiddenUnitTests, TestScenario } from '../components/TestScenario'
 import { Button, cx, inputClass, LiveStatus, Pill, UserInstructionPill } from '../components/ui'
 import { blockImeSubmit } from '../lib/ime'
 import { currentStage, isBusy } from '../lib/stage'
@@ -11,42 +13,49 @@ import { TEST_CHANGE_LABEL, TEST_KIND_LABEL } from '../lib/testLabels'
 import { usePending } from '../lib/usePending'
 import { useStore } from '../store'
 
-/** 規格的「預計新增的測試」：報告會對照這些編號；舊規格沒有這個欄位時不顯示 */
+/** 規格的「預計新增的測試」：報告會對照這些編號；單元測試只顯示數量；舊規格沒有這個欄位時不顯示 */
 function PlannedTests({ spec }: { spec: Spec }) {
   const titleId = useId()
   if (!spec.tests) return null
+  const shown = spec.tests.filter(isShownTest)
   return (
     <div className="flex flex-col gap-2.5">
       <span id={titleId} className="text-[15px] font-bold">
         預計新增的測試
       </span>
       {spec.tests.length ? (
-        <ul aria-labelledby={titleId} className="m-0 flex list-none flex-col gap-2 p-0">
-          {spec.tests.map((t) => (
-            <li
-              key={t.id}
-              className="flex flex-col gap-1.5 rounded-[14px] px-4 py-3 shadow-[0_0_0_1px_var(--color-chip)]"
-            >
-              <div className="flex items-start gap-3">
-                <span className="mt-0.5 font-mono text-xs text-muted">{t.id.toUpperCase()}</span>
-                <span className="min-w-0 flex-1 text-sm font-bold">
-                  <InlineCode text={t.name} />
-                </span>
-                <span className="flex flex-none items-center gap-1">
-                  <Pill tone={t.change === 'added' ? 'brand' : 'review'}>
-                    {TEST_CHANGE_LABEL[t.change]}
-                  </Pill>
-                  <Pill tone="muted">{TEST_KIND_LABEL[t.kind]}</Pill>
-                </span>
-              </div>
-              <div className="text-[13px]">
-                <span className="mr-2 font-medium text-brand">情境</span>
-                <InlineCode text={t.scenario} />
-              </div>
-              {t.file && <span className="font-mono text-xs break-all text-muted">{t.file}</span>}
-            </li>
-          ))}
-        </ul>
+        <>
+          {shown.length > 0 && (
+            <ul aria-labelledby={titleId} className="m-0 flex list-none flex-col gap-2 p-0">
+              {shown.map((t) => (
+                <li
+                  key={t.id}
+                  className="flex flex-col gap-1.5 rounded-[14px] px-4 py-3 shadow-[0_0_0_1px_var(--color-chip)]"
+                >
+                  <div className="flex items-start gap-3">
+                    <span className="mt-0.5 font-mono text-xs text-muted">
+                      {t.id.toUpperCase()}
+                    </span>
+                    <span className="min-w-0 flex-1 text-sm font-bold">
+                      <InlineCode text={t.name} />
+                    </span>
+                    <span className="flex flex-none items-center gap-1">
+                      <Pill tone={t.change === 'added' ? 'brand' : 'review'}>
+                        {TEST_CHANGE_LABEL[t.change]}
+                      </Pill>
+                      <Pill tone="muted">{TEST_KIND_LABEL[t.kind]}</Pill>
+                    </span>
+                  </div>
+                  <TestScenario scenario={t.scenario} expected={t.expected} />
+                  {t.file && (
+                    <span className="font-mono text-xs break-all text-muted">{t.file}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          <HiddenUnitTests count={spec.tests.length - shown.length} />
+        </>
       ) : (
         <span className="text-[13px] text-ink-2">
           這次不新增測試：

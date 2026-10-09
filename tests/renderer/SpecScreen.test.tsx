@@ -358,7 +358,7 @@ test('送出修改意見期間又改了內容就保留', async () => {
   expect(input).toHaveValue('上限改 10 次，還有鎖 30 分鐘')
 })
 
-test('預計新增的測試：在範圍之後列出編號、名稱、新增或修改、類型、情境與預計的測試檔', () => {
+test('預計新增的測試：在範圍之後列出編號、名稱、新增或修改、類型、情境、預期行為與預計的測試檔', () => {
   renderSpec(
     specTask({
       specs: [
@@ -367,9 +367,10 @@ test('預計新增的測試：在範圍之後列出編號、名稱、新增或�
             {
               id: 'p1',
               name: '連續失敗 5 次後鎖定',
-              kind: 'unit',
+              kind: 'e2e',
               change: 'added',
-              scenario: '輸錯 5 次 → 第 6 次登入 → 回 `429`',
+              scenario: '同一帳號已經輸錯 5 次',
+              expected: '第 6 次登入回 `429`',
               file: 'src/auth/lockout.test.ts'
             },
             {
@@ -377,8 +378,9 @@ test('預計新增的測試：在範圍之後列出編號、名稱、新增或�
               name: '錯誤密碼回 401',
               kind: 'integration',
               change: 'modified',
+              // 舊規格沒有預期行為
               scenario: '沒被鎖定時輸錯 → 登入 → 401'
-            }
+            } as NonNullable<Spec['tests']>[number]
           ]
         })
       ]
@@ -390,12 +392,16 @@ test('預計新增的測試：在範圍之後列出編號、名稱、新增或�
   expect(rows[0]).toHaveTextContent('P1')
   expect(rows[0]).toHaveTextContent('連續失敗 5 次後鎖定')
   expect(rows[0]).toHaveTextContent('新增')
-  expect(rows[0]).toHaveTextContent('單元')
-  expect(rows[0]).toHaveTextContent('情境輸錯 5 次 → 第 6 次登入 → 回 429')
+  expect(rows[0]).toHaveTextContent('端對端')
+  expect(rows[0]).toHaveTextContent('情境同一帳號已經輸錯 5 次')
+  expect(rows[0]).toHaveTextContent('預期行為第 6 次登入回 429')
   expect(within(rows[0]).getByText('429').tagName).toBe('CODE')
   expect(rows[0]).toHaveTextContent('src/auth/lockout.test.ts')
   expect(rows[1]).toHaveTextContent('修改')
   expect(rows[1]).toHaveTextContent('整合')
+  expect(rows[1]).toHaveTextContent('情境沒被鎖定時輸錯 → 登入 → 401')
+  expect(rows[1]).not.toHaveTextContent('預期行為')
+  expect(screen.queryByText(/單元測試未列出/)).not.toBeInTheDocument()
   // 放在包含／不包含之後、決策之前
   const headings = screen.getAllByText(/^(包含|預計新增的測試|決策)$/).map((e) => e.textContent)
   expect(headings).toEqual(['包含', '預計新增的測試', '決策'])
@@ -410,4 +416,31 @@ test('規格說明不新增測試時顯示原因；舊規格沒有這個欄位�
   unmount()
   renderSpec(specTask())
   expect(screen.queryByText('預計新增的測試')).not.toBeInTheDocument()
+})
+
+test('預計新增的測試不列出單元測試，只顯示數量；全是單元測試時不顯示清單', () => {
+  const planned = (id: string, kind: 'unit' | 'integration') => ({
+    id,
+    name: `測試 ${id}`,
+    kind,
+    change: 'added' as const,
+    scenario: '情境',
+    expected: '預期行為'
+  })
+  const { unmount } = renderSpec(
+    specTask({
+      specs: [spec(1, { tests: [planned('p1', 'unit'), planned('p2', 'integration')] })]
+    })
+  )
+  const rows = within(screen.getByRole('list', { name: '預計新增的測試' })).getAllByRole('listitem')
+  expect(rows).toHaveLength(1)
+  expect(rows[0]).toHaveTextContent('P2')
+  expect(screen.queryByText('測試 p1')).not.toBeInTheDocument()
+  expect(screen.getByText('另有 1 個單元測試未列出。')).toBeInTheDocument()
+  unmount()
+
+  renderSpec(specTask({ specs: [spec(1, { tests: [planned('p1', 'unit')] })] }))
+  expect(screen.queryByRole('list', { name: '預計新增的測試' })).not.toBeInTheDocument()
+  expect(screen.getByText('另有 1 個單元測試未列出。')).toBeInTheDocument()
+  expect(screen.queryByText(/這次不新增測試/)).not.toBeInTheDocument()
 })

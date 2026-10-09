@@ -2149,9 +2149,16 @@ describe('TaskManager：規格的預計測試', () => {
     name: '連續失敗 5 次後鎖定',
     kind: 'unit' as const,
     change: 'added' as const,
-    scenario: '輸錯 5 次 → 第 6 次登入 → 423'
+    scenario: '同一帳號已經輸錯 5 次',
+    expected: '第 6 次登入回 423'
   }
-  const p2 = { ...p1, id: 'p2', name: '鎖定 15 分鐘後解鎖', scenario: '15 分鐘後 → 登入 → 成功' }
+  const p2 = {
+    ...p1,
+    id: 'p2',
+    name: '鎖定 15 分鐘後解鎖',
+    scenario: '帳號已鎖定 15 分鐘',
+    expected: '登入成功'
+  }
   const linked = { ...sampleReport, tests: [{ ...sampleReport.tests[0], planned: 'p1' }] }
 
   test('規格記下預計測試；報告缺少對應時拒絕並把原因交給 Claude，補齊後整理報告、存下預計測試', async () => {

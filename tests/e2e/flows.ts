@@ -37,9 +37,11 @@ export const spec = (extra: Record<string, unknown> = {}) => ({
     {
       id: 'p1',
       name: '連續失敗 3 次後鎖定',
-      kind: 'unit',
+      // 單元測試不會列在規格與報告上：這裡要看到測試卡片，標成整合測試
+      kind: 'integration',
       change: 'added',
-      scenario: 'alice 連續輸錯 3 次 → 用正確密碼登入 → 預期 423',
+      scenario: 'alice 已經連續輸錯 3 次',
+      expected: '用正確密碼登入仍回 423',
       file: 'test/lockout.test.js'
     }
   ],
@@ -99,9 +101,11 @@ export const report = (extra: Record<string, unknown> = {}) => ({
       id: 't1',
       file: 'test/lockout.test.js',
       name: LOCKOUT_TEST_NAME,
-      kind: 'unit',
+      // 單元測試不會列在規格與報告上：這裡要看到測試卡片，標成整合測試
+      kind: 'integration',
       change: 'added',
-      scenario: 'alice 連續輸錯 3 次 → 用正確密碼登入 → 預期 423',
+      scenario: 'alice 已經連續輸錯 3 次',
+      expected: '用正確密碼登入仍回 423',
       line: 5,
       planned: 'p1'
     }

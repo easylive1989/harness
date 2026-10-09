@@ -30,19 +30,31 @@ export const DecisionSourceSchema = z.object({
 const TestKindSchema = z.enum(['unit', 'integration', 'e2e', 'other']).default('unit')
 const TestChangeSchema = z.enum(['added', 'modified']).default('added')
 
+/** 情境（given／arrange）：測試開始前的前提狀態 */
+const ScenarioSchema = z.string().min(1).describe('情境：測試開始前的前提狀態（given／arrange）')
+/**
+ * 預期行為（then／assert）：做了什麼之後預期的結果。
+ * 舊規格與舊報告沒有這個欄位（只有一句 scenario），畫面上要容許 undefined
+ */
+const ExpectedSchema = z
+  .string()
+  .min(1)
+  .describe('預期行為：做了什麼之後預期發生的結果（then／assert）')
+
 /** 規格裡預計新增或修改的一個測試（id 用 p1、p2…）；報告的測試以 planned 對應回來 */
 export const PlannedTestSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   kind: TestKindSchema,
   change: TestChangeSchema,
-  scenario: z.string().min(1),
+  scenario: ScenarioSchema,
+  expected: ExpectedSchema,
   /** 預計的測試檔（相對於 repo 根目錄），規格階段不一定知道 */
   file: z.string().optional()
 })
 export type PlannedTest = z.infer<typeof PlannedTestSchema>
 
-/** 本次新增或修改的一個測試：情境用白話說明（在什麼情況下 → 做什麼 → 預期什麼） */
+/** 本次新增或修改的一個測試：情境與預期行為用白話說明 */
 export const TestNoteSchema = z.object({
   id: z.string().min(1),
   /** 相對於 repo 根目錄的路徑 */
@@ -50,7 +62,8 @@ export const TestNoteSchema = z.object({
   name: z.string().min(1),
   kind: TestKindSchema,
   change: TestChangeSchema,
-  scenario: z.string().min(1),
+  scenario: ScenarioSchema,
+  expected: ExpectedSchema,
   /** 修改既有測試的原因 */
   why: z.string().optional(),
   /** 測試在新版檔案的行號 */
@@ -159,6 +172,9 @@ export const ReportInputSchema = z.object(ReportInputShape).superRefine((r, ctx)
 
 export type ReportInput = z.infer<typeof ReportInputSchema>
 export type TestNote = ReportInput['tests'][number]
+
+/** 規格、報告與 PR 內文列出的測試：單元測試不列出（資料仍完整保留，供對照與未說明測試檔的判斷） */
+export const isShownTest = (t: { kind: PlannedTest['kind'] }) => t.kind !== 'unit'
 
 /** 規格的預計測試在報告裡的狀況：有對應測試的（已加入）與沒有的（附 planned_skipped 的原因） */
 export function plannedCoverage(
